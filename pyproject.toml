@@ -24,6 +24,7 @@ http = [
   "httpx>=0.28",
 ]
 test = [
+  "docker>=7.1",
   "httpx>=0.28",
 ]
 

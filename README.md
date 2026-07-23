@@ -5,7 +5,8 @@ Concrete runtime interpreters for Control Plane Kit.
 This package is the effectful sibling of the extracted Control Plane Kit
 language and operations packages. It starts small and Docker-first. The first
 runtime target is a Docker interpreter backed by the Python Docker SDK, but this
-scaffold intentionally does not implement Docker behavior yet.
+package intentionally stays below operations dispatch and cpk-server process
+composition.
 
 The governing spine is:
 
@@ -47,12 +48,19 @@ inspect/create network
 inspect/create volume
 pull image
 inspect/run/start/stop/remove container
-remove network
+remove network/volume
+materialize and verify configuration artifacts
 ```
 
 The client is lazy: importing the module does not import the optional `docker`
 package. Instantiating the client without an injected SDK client calls
 `docker.from_env()` at the concrete effect boundary.
+
+Configuration artifacts are consumed from core `ConfigurationArtifact` values.
+The Docker SDK client writes bounded, secret-free content into owned Docker
+volumes through a short-lived helper container, verifies the stored digest, and
+mounts only the `content` subpath read-only into workload containers. Host paths
+never enter graph data.
 
 ## Probe And Verification Adapters
 
