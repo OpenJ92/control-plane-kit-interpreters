@@ -44,12 +44,13 @@ class PackageBoundaryTests(unittest.TestCase):
 
         self.assertNotIn("docker", root_imports)
 
-    def test_product_specific_branches_are_absent_from_scaffold(self) -> None:
+    def test_product_specific_branches_are_absent_from_interpreters(self) -> None:
         product_names = {
             "hello",
-            "router",
             "multiplexer",
-            "postgres",
+            "postgres_server",
+            "http_active_router",
+            "http_multiplexer",
             "coredns",
             "webhook",
             "cpk_server",

@@ -12,11 +12,19 @@ license = { text = "MIT" }
 authors = [
   { name = "OpenJ92" }
 ]
-dependencies = []
+dependencies = [
+  "control-plane-kit-core @ https://github.com/OpenJ92/control-plane-kit/archive/2a6b8d09c58d0aee3a3f457c51593bb302420ce4.zip#subdirectory=control-plane-kit-core",
+]
 
 [project.optional-dependencies]
 docker = [
   "docker>=7.1",
+]
+http = [
+  "httpx>=0.28",
+]
+test = [
+  "httpx>=0.28",
 ]
 
 [tool.setuptools.packages.find]
