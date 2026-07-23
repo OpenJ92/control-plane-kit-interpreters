@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+from io import BytesIO
 from importlib import import_module
+import tarfile
 from typing import Any, Mapping, Sequence
+from uuid import uuid4
+
+from control_plane_kit_core.configuration import ConfigurationArtifact
 
 
 @dataclass(frozen=True)
@@ -13,10 +19,29 @@ class DockerSdkResourceInspection:
     labels: Mapping[str, str]
 
 
+@dataclass(frozen=True)
+class DockerSdkConfigurationMount:
+    artifact: ConfigurationArtifact
+    volume_name: str
+
+    def docker_mount(self) -> Mapping[str, object]:
+        return {
+            "Type": "volume",
+            "Source": self.volume_name,
+            "Target": self.artifact.target_path,
+            "ReadOnly": True,
+            "VolumeOptions": {"Subpath": "content"},
+        }
+
+
 @dataclass
 class DockerSdkClient:
     client: Any | None = None
     docker_module: Any | None = None
+    configuration_helper_image: str = (
+        "python:3.14-slim@sha256:"
+        "cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6"
+    )
 
     def __post_init__(self) -> None:
         if self.client is not None:
@@ -82,21 +107,76 @@ class DockerSdkClient:
         environment: Mapping[str, str],
         labels: Mapping[str, str],
         volumes: Mapping[str, str],
+        command: Sequence[str] = (),
+        configuration_mounts: Sequence[DockerSdkConfigurationMount] = (),
     ) -> None:
         mounts = {
             volume_name: {"bind": target_path, "mode": "rw"}
             for volume_name, target_path in volumes.items()
         }
-        self.client.containers.run(
-            image,
-            detach=True,
-            name=name,
-            network=network,
-            network_aliases=list(aliases),
-            environment=dict(environment),
-            labels=dict(labels),
-            volumes=mounts,
+        kwargs: dict[str, object] = {
+            "detach": True,
+            "name": name,
+            "environment": dict(environment),
+            "labels": dict(labels),
+            "volumes": mounts,
+            "mounts": [
+                dict(mount.docker_mount())
+                for mount in sorted(
+                    configuration_mounts,
+                    key=lambda value: value.artifact.artifact_id,
+                )
+            ],
+        }
+        if command:
+            kwargs["command"] = list(command)
+        container = self.client.containers.create(image, **kwargs)
+        self.client.networks.get(network).connect(container, aliases=list(aliases))
+        container.start()
+
+    def materialize_configuration_artifact(
+        self,
+        volume_name: str,
+        artifact: ConfigurationArtifact,
+    ) -> None:
+        if not isinstance(artifact, ConfigurationArtifact):
+            raise TypeError("configuration materialization requires an artifact")
+        helper = self._create_configuration_helper(
+            volume_name,
+            readonly=False,
         )
+        try:
+            helper.start()
+            helper.put_archive(
+                "/artifact",
+                _artifact_archive(artifact),
+            )
+            result = helper.exec_run(
+                ["chmod", artifact.file_mode.value, "/artifact/content"]
+            )
+            exit_code = _exit_code(result)
+            if exit_code != 0:
+                raise RuntimeError("configuration helper chmod failed")
+        finally:
+            helper.remove(force=True)
+
+    def configuration_artifact_digest(self, volume_name: str) -> str | None:
+        helper = self._create_configuration_helper(
+            volume_name,
+            readonly=True,
+        )
+        try:
+            helper.start()
+            try:
+                archive, _metadata = helper.get_archive("/artifact/content")
+            except Exception as error:
+                if self._is_not_found(error):
+                    return None
+                raise
+            digest = _content_digest(archive)
+        finally:
+            helper.remove(force=True)
+        return digest
 
     def start_container(self, name: str) -> None:
         self.client.containers.get(name).start()
@@ -109,6 +189,32 @@ class DockerSdkClient:
 
     def remove_network(self, name: str) -> None:
         self.client.networks.get(name).remove()
+
+    def remove_volume(self, name: str) -> None:
+        self.client.volumes.get(name).remove()
+
+    def _create_configuration_helper(
+        self,
+        volume_name: str,
+        *,
+        readonly: bool,
+    ) -> Any:
+        return self.client.containers.create(
+            self.configuration_helper_image,
+            command=["sleep", "30"],
+            detach=True,
+            name=f"cpk-config-{uuid4().hex}",
+            network_disabled=True,
+            read_only=True,
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges"],
+            volumes={
+                volume_name: {
+                    "bind": "/artifact",
+                    "mode": "ro" if readonly else "rw",
+                }
+            },
+        )
 
     def _is_not_found(self, error: Exception) -> bool:
         docker_module = self.docker_module
@@ -158,3 +264,32 @@ class DockerSdkClient:
         if short_id is not None:
             return str(short_id)
         return None
+
+
+def _artifact_archive(artifact: ConfigurationArtifact) -> bytes:
+    encoded = artifact.content.encode("utf-8")
+    info = tarfile.TarInfo("content")
+    info.size = len(encoded)
+    info.mode = int(artifact.file_mode.value, 8)
+    archive = BytesIO()
+    with tarfile.open(fileobj=archive, mode="w") as tar:
+        tar.addfile(info, BytesIO(encoded))
+    return archive.getvalue()
+
+
+def _content_digest(archive_chunks: Any) -> str:
+    archive = BytesIO(b"".join(archive_chunks))
+    with tarfile.open(fileobj=archive, mode="r") as tar:
+        member = tar.extractfile("content")
+        if member is None:
+            raise RuntimeError("configuration digest archive has no content file")
+        return hashlib.sha256(member.read()).hexdigest()
+
+
+def _exit_code(result: Any) -> int:
+    if isinstance(result, tuple) and result:
+        return int(result[0])
+    value = getattr(result, "exit_code", None)
+    if value is None:
+        raise RuntimeError("configuration helper returned malformed exec result")
+    return int(value)
