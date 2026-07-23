@@ -60,13 +60,20 @@ class FakeResource:
         image: str | None = None,
         running: bool = False,
         published_ports: dict[str, object] | None = None,
+        private_addresses: dict[str, str] | None = None,
     ) -> None:
         self.name = name
         self.image = FakeImage([image]) if image else None
         self.attrs = {
             "Config": {"Labels": labels or {}},
             "State": {"Running": running},
-            "NetworkSettings": {"Ports": published_ports or {}},
+            "NetworkSettings": {
+                "Ports": published_ports or {},
+                "Networks": {
+                    name: {"IPAddress": address}
+                    for name, address in (private_addresses or {}).items()
+                },
+            },
         }
         self.started = False
         self.stopped = False
@@ -224,6 +231,7 @@ assert "docker" not in sys.modules
                 "8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "49152"}],
                 "53/udp": [{"HostIp": "127.0.0.1", "HostPort": "10053"}],
             },
+            private_addresses={"cpk-net": "172.18.0.2"},
         )
         sdk = DockerSdkClient(
             client=fake_client,
@@ -253,6 +261,7 @@ assert "docker" not in sys.modules
                         49152,
                     ),
                 ),
+                private_addresses={"cpk-net": "172.18.0.2"},
             ),
         )
 

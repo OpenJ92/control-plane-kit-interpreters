@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 from io import BytesIO
 from importlib import import_module
@@ -26,6 +26,7 @@ class DockerSdkResourceInspection:
     image: str | None
     labels: Mapping[str, str]
     published_ports: tuple["DockerSdkPublishedPort", ...] = ()
+    private_addresses: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, order=True)
@@ -346,6 +347,7 @@ class DockerSdkClient:
             image=image,
             labels=self._labels(resource),
             published_ports=self._published_ports(resource),
+            private_addresses=self._private_addresses(resource),
         )
 
     def _labels(self, resource: Any) -> Mapping[str, str]:
@@ -420,6 +422,28 @@ class DockerSdkClient:
                         "Docker published port inspection was malformed"
                     ) from error
         return tuple(sorted(values))
+
+    def _private_addresses(self, container: Any) -> Mapping[str, str]:
+        attrs = getattr(container, "attrs", {})
+        settings = attrs.get("NetworkSettings", {}) if isinstance(attrs, Mapping) else {}
+        networks = settings.get("Networks", {}) if isinstance(settings, Mapping) else {}
+        if not isinstance(networks, Mapping):
+            raise RuntimeError("Docker private address inspection was malformed")
+        values: dict[str, str] = {}
+        for name, details in networks.items():
+            if not isinstance(name, str) or not isinstance(details, Mapping):
+                raise RuntimeError("Docker private address inspection was malformed")
+            address = details.get("IPAddress")
+            if not isinstance(address, str) or not address:
+                continue
+            try:
+                ip_address(address)
+            except ValueError as error:
+                raise RuntimeError(
+                    "Docker private address inspection was malformed"
+                ) from error
+            values[name] = address
+        return dict(sorted(values.items()))
 
 
 def runtime_endpoint_observations(
