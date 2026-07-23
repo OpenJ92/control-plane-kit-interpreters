@@ -14,7 +14,7 @@ COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
 
 RUN python -m pip install --upgrade pip \
-    && python -m pip install .
+    && python -m pip install ".[test]"
 
 CMD ["python", "-c", "import control_plane_kit_interpreters; print('control-plane-kit-interpreters ready')"]
 
