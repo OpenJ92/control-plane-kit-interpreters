@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 docker = [
   "docker>=7.1",
+  "httpx>=0.28",
 ]
 http = [
   "httpx>=0.28",

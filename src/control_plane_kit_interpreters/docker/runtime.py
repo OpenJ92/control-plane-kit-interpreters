@@ -1,19 +1,24 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import re
+import time
 from typing import Mapping
 
 from control_plane_kit_core.planning import (
     ActivityOperation,
     ReconcileNode,
+    ReconcileRuntime,
     RemoveNodeResource,
+    RemoveRuntimeResource,
     StartNode,
     StartRuntime,
     StopNode,
     StopRuntime,
+    WaitForHealthy,
 )
+from control_plane_kit_core.probe_intents import LiteralEndpointMaterial
 from control_plane_kit_core.runtime_effects import (
     RuntimeEffectFailure,
     RuntimeEffectKind,
@@ -22,6 +27,12 @@ from control_plane_kit_core.runtime_effects import (
     RuntimeProductMaterial,
 )
 from control_plane_kit_core.types import RuntimeKind
+from control_plane_kit_core.verification import (
+    HttpCheck,
+    VerificationCompleted,
+    VerificationOutcome,
+    VerificationUnsupported,
+)
 
 from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkClient,
@@ -29,6 +40,11 @@ from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkPortBinding,
     runtime_endpoint_observations,
     verify_published_ports,
+)
+from control_plane_kit_interpreters.probes.security import ProbeAddressPolicy
+from control_plane_kit_interpreters.verification import (
+    HttpVerificationInterpreter,
+    VerificationCheckMaterial,
 )
 
 
@@ -41,6 +57,7 @@ class DockerRuntimeInterpreter:
     """Interpret pure runtime-effect requests with the Python Docker SDK."""
 
     client: DockerSdkClient
+    http_transport: object | None = None
 
     def execute(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         if not isinstance(request, RuntimeEffectRequest):
@@ -54,10 +71,18 @@ class DockerRuntimeInterpreter:
             match request.operation:
                 case StartRuntime():
                     return self._start_runtime(request)
+                case ReconcileRuntime():
+                    return self._reconcile_runtime(request)
                 case StopRuntime():
                     return self._stop_runtime(request)
-                case StartNode() | ReconcileNode():
+                case RemoveRuntimeResource():
+                    return self._remove_runtime(request)
+                case StartNode():
                     return self._start_node(request)
+                case ReconcileNode():
+                    return self._reconcile_node(request)
+                case WaitForHealthy():
+                    return self._wait_for_healthy(request)
                 case StopNode():
                     return self._stop_node(request)
                 case RemoveNodeResource():
@@ -77,6 +102,26 @@ class DockerRuntimeInterpreter:
                     _bounded_error_message(error),
                 ),
             )
+
+    def _reconcile_runtime(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
+        runtime_id = _runtime_target(request.operation)
+        network_name = _network_name(request, runtime_id)
+        labels = _runtime_labels(request, runtime_id)
+        inspection = self.client.inspect_network(network_name)
+        if inspection is None:
+            self.client.create_network(name=network_name, labels=labels)
+            action = "created"
+        else:
+            _require_runtime_owner(inspection.labels, labels, "network")
+            action = "reused"
+        return RuntimeEffectResult.succeeded(
+            request.effect_id,
+            evidence={
+                "action": action,
+                "runtime_id": runtime_id,
+                "network": network_name,
+            },
+        )
 
     def _start_runtime(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         runtime_id = _runtime_target(request.operation)
@@ -104,11 +149,31 @@ class DockerRuntimeInterpreter:
         labels = _runtime_labels(request, runtime_id)
         inspection = self.client.inspect_network(network_name)
         if inspection is not None:
-            _require_owned(inspection.labels, labels, "network")
+            _require_runtime_owner(inspection.labels, labels, "network")
         return RuntimeEffectResult.succeeded(
             request.effect_id,
             evidence={
                 "action": "logical-stop",
+                "runtime_id": runtime_id,
+                "network": network_name,
+            },
+        )
+
+    def _remove_runtime(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
+        runtime_id = _runtime_target(request.operation)
+        network_name = _network_name(request, runtime_id)
+        labels = _runtime_labels(request, runtime_id)
+        inspection = self.client.inspect_network(network_name)
+        if inspection is None:
+            action = "absent"
+        else:
+            _require_runtime_owner(inspection.labels, labels, "network")
+            self.client.remove_network(network_name)
+            action = "removed"
+        return RuntimeEffectResult.succeeded(
+            request.effect_id,
+            evidence={
+                "action": action,
                 "runtime_id": runtime_id,
                 "network": network_name,
             },
@@ -124,7 +189,7 @@ class DockerRuntimeInterpreter:
         if network is None:
             self.client.create_network(name=network_name, labels=runtime_labels)
         else:
-            _require_owned(network.labels, runtime_labels, "network")
+            _require_runtime_owner(network.labels, runtime_labels, "network")
 
         container_name = _container_name(request, material.node_id)
         labels = _node_labels(request, material)
@@ -142,14 +207,16 @@ class DockerRuntimeInterpreter:
 
         published = ()
         observed = self.client.inspect_container(container_name)
+        private_host = material.node_id
         if observed is not None:
             _require_owned(observed.labels, labels, "container")
             published = observed.published_ports
+            private_host = _private_host_for_runtime(request, material, observed)
         port_bindings = _private_provider_ports(material)
         observations = runtime_endpoint_observations(
             subject_id=material.node_id,
             graph_id=request.source.desired_graph_id,
-            private_host=material.node_id,
+            private_host=private_host,
             provider_ports=port_bindings,
             published_ports=verify_published_ports((), published),
         )
@@ -165,6 +232,204 @@ class DockerRuntimeInterpreter:
             },
             observations=observations,
         )
+
+    def _reconcile_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
+        material = _single_product(request)
+        _reject_unresolved_secret_deliveries(material)
+        runtime_id = material.runtime_id
+        network_name = _network_name(request, runtime_id)
+        runtime_labels = _runtime_labels(request, runtime_id)
+        network = self.client.inspect_network(network_name)
+        if network is None:
+            self.client.create_network(name=network_name, labels=runtime_labels)
+        else:
+            _require_runtime_owner(network.labels, runtime_labels, "network")
+
+        container_name = _container_name(request, material.node_id)
+        labels = _node_labels(request, material)
+        inspection = self.client.inspect_container(container_name)
+        if inspection is None:
+            self._create_node_container(request, material, container_name, labels)
+            action = "created"
+        elif _fingerprint_matches(inspection.labels, labels):
+            _require_owned(inspection.labels, labels, "container")
+            if inspection.running:
+                action = "reused"
+            else:
+                self.client.start_container(container_name)
+                action = "started"
+        else:
+            _require_node_owner(inspection.labels, labels, "container")
+            self.client.remove_container(container_name)
+            self._create_node_container(request, material, container_name, labels)
+            action = "recreated"
+
+        published = ()
+        observed = self.client.inspect_container(container_name)
+        private_host = material.node_id
+        if observed is not None:
+            _require_owned(observed.labels, labels, "container")
+            published = observed.published_ports
+            private_host = _private_host_for_runtime(request, material, observed)
+        observations = runtime_endpoint_observations(
+            subject_id=material.node_id,
+            graph_id=request.source.desired_graph_id,
+            private_host=private_host,
+            provider_ports=_private_provider_ports(material),
+            published_ports=verify_published_ports((), published),
+        )
+        return RuntimeEffectResult.succeeded(
+            request.effect_id,
+            evidence={
+                "action": action,
+                "node_id": material.node_id,
+                "runtime_id": runtime_id,
+                "container": container_name,
+                "network": network_name,
+                "image": material.product.image.execution_reference,
+            },
+            observations=observations,
+        )
+
+    def _wait_for_healthy(
+        self,
+        request: RuntimeEffectRequest,
+    ) -> RuntimeEffectResult:
+        material = _single_product(request)
+        checks = material.product.runtime_contract.verification.checks
+        if not checks:
+            return RuntimeEffectResult.succeeded(
+                request.effect_id,
+                evidence={
+                    "action": "no-verification-contract",
+                    "node_id": material.node_id,
+                },
+            )
+        endpoints = {
+            observation.socket_name: observation
+            for observation in self._runtime_private_endpoint_observations(
+                request,
+                material,
+            )
+        }
+        completed: list[dict[str, object]] = []
+        for check in checks:
+            endpoint = endpoints.get(check.provider_socket)
+            if endpoint is None:
+                return _failed(
+                    request,
+                    "docker.health-endpoint-missing",
+                    "health check provider socket has no runtime endpoint",
+                )
+            if not isinstance(check, HttpCheck):
+                return _unsupported(request, "docker.health-check-unsupported")
+            if not isinstance(endpoint.address, LiteralEndpointMaterial):
+                return _failed(
+                    request,
+                    "docker.health-endpoint-unresolved",
+                    "health endpoint is not literal runtime material",
+                )
+            result = self._execute_http_health_check(
+                material,
+                request,
+                check,
+                endpoint,
+            )
+            if isinstance(result, VerificationUnsupported):
+                return _unsupported(request, "docker.health-check-unsupported")
+            if not isinstance(result, VerificationCompleted):
+                return _failed(
+                    request,
+                    "docker.health-result-malformed",
+                    "health verification returned malformed result",
+                )
+            completed.append(result.descriptor())
+            if result.outcome is not VerificationOutcome.PASSED:
+                return RuntimeEffectResult.failed(
+                    request.effect_id,
+                    RuntimeEffectFailure(
+                        "docker.health-check-failed",
+                        "health verification did not pass",
+                        {"checks": completed},
+                    ),
+                )
+        return RuntimeEffectResult.succeeded(
+            request.effect_id,
+            evidence={
+                "action": "verified-healthy",
+                "node_id": material.node_id,
+                "checks": completed,
+            },
+        )
+
+    def _execute_http_health_check(
+        self,
+        material: RuntimeProductMaterial,
+        request: RuntimeEffectRequest,
+        check: HttpCheck,
+        endpoint,
+    ):
+        single_attempt = replace(
+            check,
+            policy=replace(check.policy, maximum_attempts=1),
+        )
+        policy = ProbeAddressPolicy(
+            runtime_private_authorities=frozenset((endpoint.address.value,)),
+        )
+        interpreter = HttpVerificationInterpreter(
+            policy,
+            transport=self.http_transport,
+        )
+        result = None
+        for attempt in range(1, check.policy.maximum_attempts + 1):
+            if attempt > 1:
+                time.sleep(1)
+            result = interpreter.execute(
+                VerificationCheckMaterial(
+                    material.node_id,
+                    request.source.desired_graph_id,
+                    single_attempt,
+                    endpoint,
+                )
+            )
+            if (
+                isinstance(result, VerificationCompleted)
+                and result.outcome is VerificationOutcome.PASSED
+            ):
+                return replace(result, attempts=attempt)
+        assert result is not None
+        if isinstance(result, VerificationCompleted):
+            return replace(result, attempts=check.policy.maximum_attempts)
+        return result
+
+    def _runtime_private_endpoint_observations(
+        self,
+        request: RuntimeEffectRequest,
+        material: RuntimeProductMaterial,
+    ):
+        private_host = material.node_id
+        inspection = self._owned_container_inspection(request, material)
+        if inspection is not None:
+            private_host = _private_host_for_runtime(request, material, inspection)
+        return runtime_endpoint_observations(
+            subject_id=material.node_id,
+            graph_id=request.source.desired_graph_id,
+            private_host=private_host,
+            provider_ports=_private_provider_ports(material),
+            published_ports=(),
+        )
+
+    def _owned_container_inspection(
+        self,
+        request: RuntimeEffectRequest,
+        material: RuntimeProductMaterial,
+    ):
+        container_name = _container_name(request, material.node_id)
+        labels = _node_labels(request, material)
+        inspection = self.client.inspect_container(container_name)
+        if inspection is not None:
+            _require_owned(inspection.labels, labels, "container")
+        return inspection
 
     def _create_node_container(
         self,
@@ -192,7 +457,11 @@ class DockerRuntimeInterpreter:
                 self.client.create_volume(name=volume_name, labels=volume_labels)
                 self.client.materialize_configuration_artifact(volume_name, artifact)
             else:
-                _require_owned(inspection.labels, volume_labels, "configuration volume")
+                _require_node_owner(
+                    inspection.labels,
+                    volume_labels,
+                    "configuration volume",
+                )
                 digest = self.client.configuration_artifact_digest(volume_name)
                 if digest != artifact.content_digest:
                     raise _DockerInterpreterPreconditionError(
@@ -211,7 +480,7 @@ class DockerRuntimeInterpreter:
             if inspection is None:
                 self.client.create_volume(name=volume_name, labels=volume_labels)
             else:
-                _require_owned(inspection.labels, volume_labels, "retained volume")
+                _require_node_owner(inspection.labels, volume_labels, "retained volume")
 
         self.client.pull_image(material.product.image.execution_reference)
         self.client.run_container(
@@ -220,8 +489,14 @@ class DockerRuntimeInterpreter:
             network=_network_name(request, material.runtime_id),
             aliases=(material.node_id,),
             environment={
-                binding.name: binding.value
-                for binding in contract.public_environment
+                **{
+                    binding.name: binding.value
+                    for binding in contract.public_environment
+                },
+                **{
+                    binding.name: binding.value
+                    for binding in material.socket_environment
+                },
             },
             labels=labels,
             volumes=retained_volumes,
@@ -237,7 +512,7 @@ class DockerRuntimeInterpreter:
         if inspection is None:
             action = "absent"
         else:
-            _require_owned(inspection.labels, labels, "container")
+            _require_node_owner(inspection.labels, labels, "container")
             if inspection.running:
                 self.client.stop_container(container_name)
                 action = "stopped"
@@ -260,7 +535,7 @@ class DockerRuntimeInterpreter:
         if inspection is None:
             action = "absent"
         else:
-            _require_owned(inspection.labels, labels, "container")
+            _require_node_owner(inspection.labels, labels, "container")
             self.client.remove_container(container_name)
             action = "removed"
         return RuntimeEffectResult.succeeded(
@@ -344,6 +619,16 @@ def _private_provider_ports(
     return tuple(ports)
 
 
+def _private_host_for_runtime(
+    request: RuntimeEffectRequest,
+    material: RuntimeProductMaterial,
+    inspection,
+) -> str:
+    network_name = _network_name(request, material.runtime_id)
+    address = inspection.private_addresses.get(network_name)
+    return material.node_id if address is None else address
+
+
 def _runtime_labels(
     request: RuntimeEffectRequest,
     runtime_id: str,
@@ -386,11 +671,62 @@ def _require_owned(
     expected: Mapping[str, str],
     resource: str,
 ) -> None:
-    if observed.get(f"{_LABEL_PREFIX}.fingerprint") != expected[f"{_LABEL_PREFIX}.fingerprint"]:
+    if not _fingerprint_matches(observed, expected):
         raise _DockerInterpreterPreconditionError(
             f"docker.{resource}-ownership-conflict",
             f"Docker {resource} is not owned by this runtime effect",
         )
+
+
+def _fingerprint_matches(
+    observed: Mapping[str, str],
+    expected: Mapping[str, str],
+) -> bool:
+    return (
+        observed.get(f"{_LABEL_PREFIX}.fingerprint")
+        == expected[f"{_LABEL_PREFIX}.fingerprint"]
+    )
+
+
+def _require_runtime_owner(
+    observed: Mapping[str, str],
+    expected: Mapping[str, str],
+    resource: str,
+) -> None:
+    _require_label_owner(
+        observed,
+        expected,
+        resource,
+        ("kind", "workspace", "runtime"),
+    )
+
+
+def _require_node_owner(
+    observed: Mapping[str, str],
+    expected: Mapping[str, str],
+    resource: str,
+) -> None:
+    _require_label_owner(
+        observed,
+        expected,
+        resource,
+        ("kind", "workspace", "runtime", "node"),
+    )
+
+
+def _require_label_owner(
+    observed: Mapping[str, str],
+    expected: Mapping[str, str],
+    resource: str,
+    keys: tuple[str, ...],
+) -> None:
+    for key in keys:
+        label = f"{_LABEL_PREFIX}.{key}"
+        if observed.get(label) != expected.get(label):
+            raise _DockerInterpreterPreconditionError(
+                f"docker.{resource}-ownership-conflict",
+                f"Docker {resource} is not owned by this runtime effect",
+            )
 
 
 def _node_fingerprint(
