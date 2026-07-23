@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import hashlib
 import subprocess
 import sys
 import tarfile
@@ -11,11 +12,13 @@ from control_plane_kit_core.configuration import (
     ConfigurationFileMode,
     ConfigurationMediaType,
 )
+from control_plane_kit_core.secrets import SecretFileMode, SecretValue
 
 from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkClient,
     DockerSdkConfigurationMount,
     DockerSdkResourceInspection,
+    DockerSdkSecretMount,
 )
 
 
@@ -157,11 +160,13 @@ class DockerSdkClientTests(unittest.TestCase):
                 "inspect_network",
                 "inspect_volume",
                 "materialize_configuration_artifact",
+                "materialize_secret_file",
                 "pull_image",
                 "remove_container",
                 "remove_network",
                 "remove_volume",
                 "run_container",
+                "secret_file_digest",
                 "start_container",
                 "stop_container",
             },
@@ -247,6 +252,9 @@ assert "docker" not in sys.modules
             configuration_mounts=(
                 DockerSdkConfigurationMount(_artifact(), "cpk-config"),
             ),
+            secret_mounts=(
+                DockerSdkSecretMount("/run/secrets/api-token", "cpk-secret"),
+            ),
         )
 
         self.assertEqual(
@@ -276,6 +284,13 @@ assert "docker" not in sys.modules
                             "Type": "volume",
                             "Source": "cpk-config",
                             "Target": "/etc/service/config.json",
+                            "ReadOnly": True,
+                            "VolumeOptions": {"Subpath": "content"},
+                        },
+                        {
+                            "Type": "volume",
+                            "Source": "cpk-secret",
+                            "Target": "/run/secrets/api-token",
                             "ReadOnly": True,
                             "VolumeOptions": {"Subpath": "content"},
                         }
@@ -383,6 +398,84 @@ assert "docker" not in sys.modules
         )
 
         self.assertIsNone(sdk.configuration_artifact_digest("missing-config"))
+
+    def test_secret_materialization_uses_bounded_helper_and_digest(self) -> None:
+        fake_client = FakeDockerClient()
+        sdk = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
+        )
+        secret = SecretValue("correct-horse-battery-staple")
+
+        sdk.materialize_secret_file(
+            "cpk-secret",
+            secret,
+            SecretFileMode.OWNER_READ_ONLY,
+        )
+        digest = sdk.secret_file_digest("cpk-secret")
+
+        helpers = fake_client.containers.created
+        self.assertEqual(len(helpers), 2)
+        self.assertEqual(helpers[0]["network_disabled"], True)
+        self.assertEqual(helpers[0]["read_only"], True)
+        self.assertEqual(helpers[0]["cap_drop"], ["ALL"])
+        self.assertEqual(helpers[0]["security_opt"], ["no-new-privileges"])
+        self.assertEqual(
+            helpers[0]["volumes"],
+            {"cpk-secret": {"bind": "/artifact", "mode": "rw"}},
+        )
+        self.assertEqual(
+            helpers[1]["volumes"],
+            {"cpk-secret": {"bind": "/artifact", "mode": "ro"}},
+        )
+        self.assertEqual(
+            digest,
+            hashlib.sha256(secret.reveal().encode("utf-8")).hexdigest(),
+        )
+        self.assertNotIn(secret.reveal(), repr(fake_client.containers.created))
+        self.assertNotIn(secret.reveal(), repr(sdk))
+        self.assertTrue(
+            all(
+                resource.force_removed
+                for resource in fake_client.containers.created_containers
+            )
+        )
+
+    def test_secret_value_is_not_passed_as_helper_command(self) -> None:
+        fake_client = FakeDockerClient()
+        sdk = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
+        )
+        secret = SecretValue("secret-content-not-in-argv")
+
+        sdk.materialize_secret_file(
+            "cpk-secret",
+            secret,
+            SecretFileMode.OWNER_READ_ONLY,
+        )
+
+        helper_command = fake_client.containers.created[0]["command"]
+        self.assertNotIn(secret.reveal(), helper_command)
+        helper = fake_client.containers.created_containers[0]
+        with tarfile.open(fileobj=BytesIO(helper.archives["/artifact"]), mode="r") as tar:
+            member = tar.extractfile("content")
+            self.assertIsNotNone(member)
+            assert member is not None
+            self.assertEqual(member.read().decode("utf-8"), secret.reveal())
+        self.assertEqual(
+            helper.execs,
+            [["chmod", SecretFileMode.OWNER_READ_ONLY.value, "/artifact/content"]],
+        )
+
+    def test_missing_secret_content_returns_absent_digest(self) -> None:
+        fake_client = FakeDockerClient()
+        sdk = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
+        )
+
+        self.assertIsNone(sdk.secret_file_digest("missing-secret"))
 
 
 def _artifact(content: str = '{"workers":2}\n') -> ConfigurationArtifact:

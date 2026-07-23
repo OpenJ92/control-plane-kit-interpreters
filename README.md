@@ -50,6 +50,7 @@ pull image
 inspect/run/start/stop/remove container
 remove network/volume
 materialize and verify configuration artifacts
+materialize and verify secret files
 ```
 
 The client is lazy: importing the module does not import the optional `docker`
@@ -61,6 +62,13 @@ The Docker SDK client writes bounded, secret-free content into owned Docker
 volumes through a short-lived helper container, verifies the stored digest, and
 mounts only the `content` subpath read-only into workload containers. Host paths
 never enter graph data.
+
+Secret files use a separate runtime-only path. Core may durably describe
+`SecretReference` and `SecretFileDelivery`, but operations supplies authorized
+`SecretValue` material at dispatch time. The Docker SDK client writes that value
+through the same bounded helper-container pattern, mounts only the `content`
+subpath read-only, and exposes only digests as verification evidence. Secret
+bytes must not appear in descriptors, labels, logs, argv, or durable evidence.
 
 ## Probe And Verification Adapters
 

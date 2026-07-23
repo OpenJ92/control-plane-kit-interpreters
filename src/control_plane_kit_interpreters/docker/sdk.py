@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 from control_plane_kit_core.configuration import ConfigurationArtifact
+from control_plane_kit_core.secrets import SecretFileMode, SecretValue
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,21 @@ class DockerSdkConfigurationMount:
             "Type": "volume",
             "Source": self.volume_name,
             "Target": self.artifact.target_path,
+            "ReadOnly": True,
+            "VolumeOptions": {"Subpath": "content"},
+        }
+
+
+@dataclass(frozen=True)
+class DockerSdkSecretMount:
+    target_path: str
+    volume_name: str
+
+    def docker_mount(self) -> Mapping[str, object]:
+        return {
+            "Type": "volume",
+            "Source": self.volume_name,
+            "Target": self.target_path,
             "ReadOnly": True,
             "VolumeOptions": {"Subpath": "content"},
         }
@@ -109,6 +125,7 @@ class DockerSdkClient:
         volumes: Mapping[str, str],
         command: Sequence[str] = (),
         configuration_mounts: Sequence[DockerSdkConfigurationMount] = (),
+        secret_mounts: Sequence[DockerSdkSecretMount] = (),
     ) -> None:
         mounts = {
             volume_name: {"bind": target_path, "mode": "rw"}
@@ -125,6 +142,13 @@ class DockerSdkClient:
                 for mount in sorted(
                     configuration_mounts,
                     key=lambda value: value.artifact.artifact_id,
+                )
+            ]
+            + [
+                dict(mount.docker_mount())
+                for mount in sorted(
+                    secret_mounts,
+                    key=lambda value: value.target_path,
                 )
             ],
         }
@@ -177,6 +201,38 @@ class DockerSdkClient:
         finally:
             helper.remove(force=True)
         return digest
+
+    def materialize_secret_file(
+        self,
+        volume_name: str,
+        value: SecretValue,
+        file_mode: SecretFileMode,
+    ) -> None:
+        if not isinstance(value, SecretValue):
+            raise TypeError("secret file materialization requires SecretValue")
+        if not isinstance(file_mode, SecretFileMode):
+            raise TypeError("secret file materialization requires SecretFileMode")
+        helper = self._create_configuration_helper(
+            volume_name,
+            readonly=False,
+        )
+        try:
+            helper.start()
+            helper.put_archive(
+                "/artifact",
+                _secret_archive(value, file_mode),
+            )
+            result = helper.exec_run(
+                ["chmod", file_mode.value, "/artifact/content"]
+            )
+            exit_code = _exit_code(result)
+            if exit_code != 0:
+                raise RuntimeError("secret helper chmod failed")
+        finally:
+            helper.remove(force=True)
+
+    def secret_file_digest(self, volume_name: str) -> str | None:
+        return self.configuration_artifact_digest(volume_name)
 
     def start_container(self, name: str) -> None:
         self.client.containers.get(name).start()
@@ -271,6 +327,17 @@ def _artifact_archive(artifact: ConfigurationArtifact) -> bytes:
     info = tarfile.TarInfo("content")
     info.size = len(encoded)
     info.mode = int(artifact.file_mode.value, 8)
+    archive = BytesIO()
+    with tarfile.open(fileobj=archive, mode="w") as tar:
+        tar.addfile(info, BytesIO(encoded))
+    return archive.getvalue()
+
+
+def _secret_archive(value: SecretValue, file_mode: SecretFileMode) -> bytes:
+    encoded = value.reveal().encode("utf-8")
+    info = tarfile.TarInfo("content")
+    info.size = len(encoded)
+    info.mode = int(file_mode.value, 8)
     archive = BytesIO()
     with tarfile.open(fileobj=archive, mode="w") as tar:
         tar.addfile(info, BytesIO(encoded))
