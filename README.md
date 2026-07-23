@@ -49,8 +49,11 @@ inspect/create volume
 pull image
 inspect/run/start/stop/remove container
 remove network/volume
+publish explicit TCP/UDP host port bindings
 materialize and verify configuration artifacts
 materialize and verify secret files
+derive runtime-private and host-observed endpoint observations
+verify requested host publication postconditions
 ```
 
 The client is lazy: importing the module does not import the optional `docker`
@@ -69,6 +72,16 @@ Secret files use a separate runtime-only path. Core may durably describe
 through the same bounded helper-container pattern, mounts only the `content`
 subpath read-only, and exposes only digests as verification evidence. Secret
 bytes must not appear in descriptors, labels, logs, argv, or durable evidence.
+
+Host publication is opt-in. `DockerSdkPortBinding` interprets graph-derived
+provider ports and explicit host publication policy into Docker SDK `ports`
+arguments. `DockerSdkPublishedPort` records what Docker actually published
+after container start, and `verify_published_ports()` proves the requested
+transport, host address, and fixed host port when one was requested.
+`runtime_endpoint_observations()` maps those verified facts to core
+`RuntimeEndpointObservation` values. Runtime-private, host-local, and public
+contexts remain distinct; UDP publication is never inferred from TCP. Endpoint
+observations are evidence for operations to persist, not graph truth.
 
 ## Probe And Verification Adapters
 

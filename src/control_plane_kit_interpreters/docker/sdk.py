@@ -4,12 +4,19 @@ from dataclasses import dataclass
 import hashlib
 from io import BytesIO
 from importlib import import_module
+from ipaddress import ip_address
 import tarfile
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 from control_plane_kit_core.configuration import ConfigurationArtifact
+from control_plane_kit_core.probe_intents import (
+    EndpointContext,
+    LiteralEndpointMaterial,
+    RuntimeEndpointObservation,
+)
 from control_plane_kit_core.secrets import SecretFileMode, SecretValue
+from control_plane_kit_core.types import Protocol, Transport
 
 
 @dataclass(frozen=True)
@@ -18,6 +25,47 @@ class DockerSdkResourceInspection:
     running: bool
     image: str | None
     labels: Mapping[str, str]
+    published_ports: tuple["DockerSdkPublishedPort", ...] = ()
+
+
+@dataclass(frozen=True, order=True)
+class DockerSdkPublishedPort:
+    container_port: int
+    transport: Transport
+    host_address: str
+    host_port: int
+
+    def __post_init__(self) -> None:
+        _validate_port(self.container_port, "published container")
+        _validate_port(self.host_port, "published host")
+        if not isinstance(self.transport, Transport):
+            raise TypeError("published port transport must be Transport")
+        _validate_host_address(self.host_address)
+
+
+@dataclass(frozen=True, order=True)
+class DockerSdkPortBinding:
+    socket_name: str
+    protocol: Protocol
+    container_port: int
+    host_address: str
+    host_port: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.socket_name, str) or not self.socket_name.strip():
+            raise ValueError("Docker port binding socket name must not be empty")
+        if not isinstance(self.protocol, Protocol):
+            raise TypeError("Docker port binding protocol must be Protocol")
+        _validate_port(self.container_port, "Docker container")
+        _validate_host_address(self.host_address)
+        if self.host_port is not None:
+            _validate_port(self.host_port, "Docker host")
+
+    def docker_port_key(self) -> str:
+        return f"{self.container_port}/{self.protocol.transport.value}"
+
+    def docker_port_value(self) -> tuple[str, int]:
+        return (self.host_address, 0 if self.host_port is None else self.host_port)
 
 
 @dataclass(frozen=True)
@@ -126,6 +174,7 @@ class DockerSdkClient:
         command: Sequence[str] = (),
         configuration_mounts: Sequence[DockerSdkConfigurationMount] = (),
         secret_mounts: Sequence[DockerSdkSecretMount] = (),
+        port_bindings: Sequence[DockerSdkPortBinding] = (),
     ) -> None:
         mounts = {
             volume_name: {"bind": target_path, "mode": "rw"}
@@ -151,6 +200,10 @@ class DockerSdkClient:
                     key=lambda value: value.target_path,
                 )
             ],
+            "ports": {
+                binding.docker_port_key(): binding.docker_port_value()
+                for binding in sorted(port_bindings)
+            },
         }
         if command:
             kwargs["command"] = list(command)
@@ -292,6 +345,7 @@ class DockerSdkClient:
             running=running,
             image=image,
             labels=self._labels(resource),
+            published_ports=self._published_ports(resource),
         )
 
     def _labels(self, resource: Any) -> Mapping[str, str]:
@@ -321,6 +375,127 @@ class DockerSdkClient:
             return str(short_id)
         return None
 
+    def _published_ports(self, container: Any) -> tuple[DockerSdkPublishedPort, ...]:
+        attrs = getattr(container, "attrs", {})
+        settings = attrs.get("NetworkSettings", {}) if isinstance(attrs, Mapping) else {}
+        ports = settings.get("Ports", {}) if isinstance(settings, Mapping) else {}
+        if ports is None:
+            return ()
+        if not isinstance(ports, Mapping):
+            raise RuntimeError("Docker published port inspection was malformed")
+        values: list[DockerSdkPublishedPort] = []
+        for key, bindings in ports.items():
+            if not isinstance(key, str) or "/" not in key:
+                raise RuntimeError("Docker published port inspection was malformed")
+            port_value, transport_value = key.rsplit("/", 1)
+            try:
+                container_port = int(port_value)
+                transport = Transport(transport_value)
+            except ValueError as error:
+                raise RuntimeError(
+                    "Docker published port inspection was malformed"
+                ) from error
+            if bindings is None:
+                continue
+            if not isinstance(bindings, Sequence) or isinstance(bindings, (str, bytes)):
+                raise RuntimeError("Docker published port inspection was malformed")
+            for binding in bindings:
+                if not isinstance(binding, Mapping):
+                    raise RuntimeError("Docker published port inspection was malformed")
+                host_address = binding.get("HostIp")
+                host_port = binding.get("HostPort")
+                if not isinstance(host_address, str) or not isinstance(host_port, str):
+                    raise RuntimeError("Docker published port inspection was malformed")
+                try:
+                    values.append(
+                        DockerSdkPublishedPort(
+                            container_port,
+                            transport,
+                            host_address,
+                            int(host_port),
+                        )
+                    )
+                except ValueError as error:
+                    raise RuntimeError(
+                        "Docker published port inspection was malformed"
+                    ) from error
+        return tuple(sorted(values))
+
+
+def runtime_endpoint_observations(
+    *,
+    subject_id: str,
+    graph_id: str,
+    private_host: str,
+    provider_ports: Sequence[DockerSdkPortBinding],
+    published_ports: Sequence[DockerSdkPublishedPort] = (),
+) -> tuple[RuntimeEndpointObservation, ...]:
+    observations: list[RuntimeEndpointObservation] = []
+    for binding in sorted(provider_ports):
+        observations.append(
+            RuntimeEndpointObservation(
+                subject_id,
+                binding.socket_name,
+                graph_id,
+                binding.protocol,
+                EndpointContext.RUNTIME_PRIVATE,
+                LiteralEndpointMaterial(
+                    _endpoint_url(
+                        binding.protocol,
+                        private_host,
+                        binding.container_port,
+                    )
+                ),
+            )
+        )
+        for published in sorted(published_ports):
+            if (
+                published.container_port == binding.container_port
+                and published.transport is binding.protocol.transport
+            ):
+                observations.append(
+                    RuntimeEndpointObservation(
+                        subject_id,
+                        binding.socket_name,
+                        graph_id,
+                        binding.protocol,
+                        _host_endpoint_context(published.host_address),
+                        LiteralEndpointMaterial(
+                            _endpoint_url(
+                                binding.protocol,
+                                published.host_address,
+                                published.host_port,
+                            )
+                        ),
+                    )
+                )
+    return tuple(observations)
+
+
+def verify_published_ports(
+    requested: Sequence[DockerSdkPortBinding],
+    published: Sequence[DockerSdkPublishedPort],
+) -> tuple[DockerSdkPublishedPort, ...]:
+    verified: list[DockerSdkPublishedPort] = []
+    for binding in sorted(requested):
+        matches = tuple(
+            value
+            for value in sorted(published)
+            if value.container_port == binding.container_port
+            and value.transport is binding.protocol.transport
+            and value.host_address == binding.host_address
+            and (
+                binding.host_port is None
+                or value.host_port == binding.host_port
+            )
+        )
+        if not matches:
+            raise RuntimeError(
+                "Docker host publication postcondition was not observed"
+            )
+        verified.extend(matches)
+    return tuple(verified)
+
 
 def _artifact_archive(artifact: ConfigurationArtifact) -> bytes:
     encoded = artifact.content.encode("utf-8")
@@ -342,6 +517,38 @@ def _secret_archive(value: SecretValue, file_mode: SecretFileMode) -> bytes:
     with tarfile.open(fileobj=archive, mode="w") as tar:
         tar.addfile(info, BytesIO(encoded))
     return archive.getvalue()
+
+
+def _endpoint_url(protocol: Protocol, host: str, port: int) -> str:
+    scheme = sorted(protocol.endpoint_schemes())[0]
+    return f"{scheme}://{_url_host(host)}:{port}"
+
+
+def _url_host(host: str) -> str:
+    try:
+        parsed = ip_address(host)
+    except ValueError:
+        return host
+    return f"[{host}]" if parsed.version == 6 else host
+
+
+def _host_endpoint_context(host: str) -> EndpointContext:
+    parsed = ip_address(host)
+    return EndpointContext.PUBLIC if parsed.is_global else EndpointContext.HOST_LOCAL
+
+
+def _validate_host_address(value: str) -> None:
+    if not isinstance(value, str):
+        raise TypeError("Docker host address must be text")
+    try:
+        ip_address(value)
+    except ValueError as error:
+        raise ValueError("Docker host address must be an IP address") from error
+
+
+def _validate_port(value: int, label: str) -> None:
+    if type(value) is not int or value < 1 or value > 65_535:
+        raise ValueError(f"{label} port must be between 1 and 65535")
 
 
 def _content_digest(archive_chunks: Any) -> str:
