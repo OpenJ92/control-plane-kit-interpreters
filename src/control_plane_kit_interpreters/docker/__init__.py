@@ -10,8 +10,10 @@ from control_plane_kit_interpreters.docker.sdk import (
     runtime_endpoint_observations,
     verify_published_ports,
 )
+from control_plane_kit_interpreters.docker.runtime import DockerRuntimeInterpreter
 
 __all__ = [
+    "DockerRuntimeInterpreter",
     "DockerSdkClient",
     "DockerSdkConfigurationMount",
     "DockerSdkPortBinding",

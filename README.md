@@ -37,6 +37,44 @@ import control_plane_kit_interpreters
 It must not import Docker SDK, cpk-server, FastAPI, psycopg, stores, or any
 runtime authority.
 
+## Docker Runtime Interpreter
+
+`control_plane_kit_interpreters.docker.DockerRuntimeInterpreter` is the first
+runtime interpreter for the extracted effect boundary:
+
+```text
+RuntimeEffectRequest -> IO RuntimeEffectResult
+```
+
+It consumes core `RuntimeEffectRequest` values produced by operations and
+executes only Docker requests. It does not import operations stores, cpk-server,
+server products, FastAPI, or Postgres. Product material arrives as
+`RuntimeProductMaterial`, already selected from registered descriptor truth by
+operations.
+
+The initial interpreter slice supports generic Docker runtime and node
+lifecycle work:
+
+```text
+StartRuntime        -> create or verify owned Docker network
+StopRuntime         -> logical runtime barrier; no destructive network removal
+StartNode           -> pull digest image, create owned container, report observations
+ReconcileNode       -> same desired-container convergence path as StartNode
+StopNode            -> stop only the owned container
+RemoveNodeResource  -> remove only the owned container
+```
+
+Ownership is label/fingerprint based. Existing Docker resources are inspected
+before mutation; unowned or mismatched resources fail before pull/create/remove.
+Private-only networking is the default. Host publication remains explicit and
+continues to use the lower-level `DockerSdkPortBinding`/published-port proof
+surface.
+
+Secret-bearing products currently fail closed unless secret values have been
+resolved by a future authority boundary. That is intentional: secret references
+may be durable graph data, but secret values are not part of
+`RuntimeEffectRequest`.
+
 ## Docker SDK Client
 
 `control_plane_kit_interpreters.docker.DockerSdkClient` is the first concrete

@@ -125,7 +125,7 @@ class FakeManager:
     def create_container(self, image: str, **kwargs: object) -> FakeResource:
         resource = FakeResource(
             str(kwargs["name"]),
-            labels={},
+            labels=dict(kwargs.get("labels", {})),
             image=image,
             running=False,
         )
