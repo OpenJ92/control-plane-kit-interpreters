@@ -12,13 +12,19 @@ from control_plane_kit_core.configuration import (
     ConfigurationFileMode,
     ConfigurationMediaType,
 )
+from control_plane_kit_core.probe_intents import EndpointContext
 from control_plane_kit_core.secrets import SecretFileMode, SecretValue
+from control_plane_kit_core.types import Protocol, Transport
 
 from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkClient,
     DockerSdkConfigurationMount,
+    DockerSdkPortBinding,
+    DockerSdkPublishedPort,
     DockerSdkResourceInspection,
     DockerSdkSecretMount,
+    runtime_endpoint_observations,
+    verify_published_ports,
 )
 
 
@@ -53,12 +59,14 @@ class FakeResource:
         labels: dict[str, str] | None = None,
         image: str | None = None,
         running: bool = False,
+        published_ports: dict[str, object] | None = None,
     ) -> None:
         self.name = name
         self.image = FakeImage([image]) if image else None
         self.attrs = {
             "Config": {"Labels": labels or {}},
             "State": {"Running": running},
+            "NetworkSettings": {"Ports": published_ports or {}},
         }
         self.started = False
         self.stopped = False
@@ -212,6 +220,10 @@ assert "docker" not in sys.modules
             labels={"cpk.owner": "workspace-a"},
             image="ghcr.io/openj92/example@sha256:abc",
             running=True,
+            published_ports={
+                "8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "49152"}],
+                "53/udp": [{"HostIp": "127.0.0.1", "HostPort": "10053"}],
+            },
         )
         sdk = DockerSdkClient(
             client=fake_client,
@@ -227,6 +239,20 @@ assert "docker" not in sys.modules
                 running=True,
                 image="ghcr.io/openj92/example@sha256:abc",
                 labels={"cpk.owner": "workspace-a"},
+                published_ports=(
+                    DockerSdkPublishedPort(
+                        53,
+                        Transport.UDP,
+                        "127.0.0.1",
+                        10053,
+                    ),
+                    DockerSdkPublishedPort(
+                        8080,
+                        Transport.TCP,
+                        "127.0.0.1",
+                        49152,
+                    ),
+                ),
             ),
         )
 
@@ -254,6 +280,22 @@ assert "docker" not in sys.modules
             ),
             secret_mounts=(
                 DockerSdkSecretMount("/run/secrets/api-token", "cpk-secret"),
+            ),
+            port_bindings=(
+                DockerSdkPortBinding(
+                    "internal",
+                    Protocol.HTTP,
+                    8080,
+                    "127.0.0.1",
+                    None,
+                ),
+                DockerSdkPortBinding(
+                    "dns",
+                    Protocol.DNS_UDP,
+                    53,
+                    "127.0.0.1",
+                    10053,
+                ),
             ),
         )
 
@@ -296,6 +338,10 @@ assert "docker" not in sys.modules
                         }
                     ],
                     "command": ["python", "-V"],
+                    "ports": {
+                        "53/udp": ("127.0.0.1", 10053),
+                        "8080/tcp": ("127.0.0.1", 0),
+                    },
                 }
             ],
         )
@@ -476,6 +522,122 @@ assert "docker" not in sys.modules
         )
 
         self.assertIsNone(sdk.secret_file_digest("missing-secret"))
+
+    def test_runtime_endpoint_observations_preserve_private_and_host_context(self) -> None:
+        observations = runtime_endpoint_observations(
+            subject_id="api",
+            graph_id="graph-a",
+            private_host="api",
+            provider_ports=(
+                DockerSdkPortBinding(
+                    "internal",
+                    Protocol.HTTP,
+                    8080,
+                    "127.0.0.1",
+                    None,
+                ),
+                DockerSdkPortBinding(
+                    "dns-udp",
+                    Protocol.DNS_UDP,
+                    53,
+                    "127.0.0.1",
+                    None,
+                ),
+            ),
+            published_ports=(
+                DockerSdkPublishedPort(53, Transport.UDP, "127.0.0.1", 10053),
+                DockerSdkPublishedPort(8080, Transport.TCP, "127.0.0.1", 49152),
+            ),
+        )
+
+        self.assertEqual(
+            [
+                (
+                    value.socket_name,
+                    value.protocol,
+                    value.context,
+                    value.address.value,
+                )
+                for value in observations
+            ],
+            [
+                (
+                    "dns-udp",
+                    Protocol.DNS_UDP,
+                    EndpointContext.RUNTIME_PRIVATE,
+                    "dns+udp://api:53",
+                ),
+                (
+                    "dns-udp",
+                    Protocol.DNS_UDP,
+                    EndpointContext.HOST_LOCAL,
+                    "dns+udp://127.0.0.1:10053",
+                ),
+                (
+                    "internal",
+                    Protocol.HTTP,
+                    EndpointContext.RUNTIME_PRIVATE,
+                    "http://api:8080",
+                ),
+                (
+                    "internal",
+                    Protocol.HTTP,
+                    EndpointContext.HOST_LOCAL,
+                    "http://127.0.0.1:49152",
+                ),
+            ],
+        )
+
+    def test_udp_publication_is_not_inferred_from_tcp_publication(self) -> None:
+        observations = runtime_endpoint_observations(
+            subject_id="dns",
+            graph_id="graph-a",
+            private_host="dns",
+            provider_ports=(
+                DockerSdkPortBinding(
+                    "dns-udp",
+                    Protocol.DNS_UDP,
+                    53,
+                    "127.0.0.1",
+                    None,
+                ),
+            ),
+            published_ports=(
+                DockerSdkPublishedPort(53, Transport.TCP, "127.0.0.1", 10053),
+            ),
+        )
+
+        self.assertEqual(len(observations), 1)
+        self.assertIs(observations[0].context, EndpointContext.RUNTIME_PRIVATE)
+
+    def test_publication_postcondition_requires_exact_transport_and_host(self) -> None:
+        requested = (
+            DockerSdkPortBinding(
+                "dns-udp",
+                Protocol.DNS_UDP,
+                53,
+                "127.0.0.1",
+                10053,
+            ),
+        )
+
+        self.assertEqual(
+            verify_published_ports(
+                requested,
+                (
+                    DockerSdkPublishedPort(53, Transport.UDP, "127.0.0.1", 10053),
+                ),
+            ),
+            (DockerSdkPublishedPort(53, Transport.UDP, "127.0.0.1", 10053),),
+        )
+        with self.assertRaisesRegex(RuntimeError, "postcondition"):
+            verify_published_ports(
+                requested,
+                (
+                    DockerSdkPublishedPort(53, Transport.TCP, "127.0.0.1", 10053),
+                    DockerSdkPublishedPort(53, Transport.UDP, "0.0.0.0", 10053),
+                ),
+            )
 
 
 def _artifact(content: str = '{"workers":2}\n') -> ConfigurationArtifact:
