@@ -36,6 +36,24 @@ import control_plane_kit_interpreters
 It must not import Docker SDK, cpk-server, FastAPI, psycopg, stores, or any
 runtime authority.
 
+## Docker SDK Client
+
+`control_plane_kit_interpreters.docker.DockerSdkClient` is the first concrete
+backend adapter. It is intentionally only the SDK client for the Docker
+realization boundary pinned by operations:
+
+```text
+inspect/create network
+inspect/create volume
+pull image
+inspect/run/start/stop/remove container
+remove network
+```
+
+The client is lazy: importing the module does not import the optional `docker`
+package. Instantiating the client without an injected SDK client calls
+`docker.from_env()` at the concrete effect boundary.
+
 Run validation with:
 
 ```bash
