@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import socket
 import unittest
 
@@ -37,6 +38,7 @@ from control_plane_kit_core.products import (
     ProductRuntimeContract,
     ProviderRuntimePort,
 )
+from control_plane_kit_core.runtime_authority import RuntimeAuthorityReference
 from control_plane_kit_core.runtime_effects import (
     ImagePullAuthority,
     RuntimeEffectKind,
@@ -851,6 +853,147 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertEqual(result.failure.code, "docker.health-check-unsupported")
 
 
+    def test_local_runtime_authority_uses_ambient_docker_client(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+
+        result = interpreter.execute_with_authority(
+            _request(
+                StartRuntime(RuntimeTarget("docker")),
+                products=(),
+                authority_ref=RuntimeAuthorityReference("local-docker"),
+            ),
+            _local_runtime_authority(),
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(result.evidence["action"], "created")
+        self.assertEqual(len(fake_client.networks.created), 1)
+
+    def test_remote_tls_runtime_authority_resolves_secret_refs_before_docker_mutation(self) -> None:
+        fake_client = FakeDockerClient()
+        fake_module = FakeDockerModule(fake_client)
+        resolver = MappingSecretResolver(
+            fake_client,
+            {
+                "secret://local/docker/ca": "ca-certificate-secret",
+                "secret://local/docker/cert": "client-certificate-secret",
+                "secret://local/docker/key": "client-key-secret",
+            },
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=FakeDockerClient(),
+                docker_module=fake_module,
+            ),
+            secret_resolver=resolver,
+        )
+
+        result = interpreter.execute_with_authority(
+            _request(
+                StartRuntime(RuntimeTarget("docker")),
+                products=(),
+                authority_ref=RuntimeAuthorityReference("remote-docker"),
+            ),
+            _remote_tls_runtime_authority(),
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(
+            resolver.requests,
+            [
+                "secret://local/docker/ca",
+                "secret://local/docker/cert",
+                "secret://local/docker/key",
+            ],
+        )
+        self.assertEqual(resolver.networks_created_during_resolution, [0, 0, 0])
+        self.assertEqual(len(fake_client.networks.created), 1)
+        self.assertEqual(
+            fake_module.docker_clients[0]["base_url"],
+            "tcp://mac-mini.local:2376",
+        )
+        self.assertNotIn("client-key-secret", repr(result.descriptor()))
+        self.assertNotIn("client-key-secret", repr(interpreter))
+
+    def test_remote_tls_runtime_authority_missing_secret_fails_before_docker_mutation(self) -> None:
+        fake_client = FakeDockerClient()
+        resolver = MappingSecretResolver(fake_client, {})
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            secret_resolver=resolver,
+        )
+
+        result = interpreter.execute_with_authority(
+            _request(
+                StartRuntime(RuntimeTarget("docker")),
+                products=(),
+                authority_ref=RuntimeAuthorityReference("remote-docker"),
+            ),
+            _remote_tls_runtime_authority(),
+        )
+
+        self.assertIs(result.kind, EffectResultKind.FAILED)
+        self.assertEqual(result.failure.code, "docker.runtime-authority-secret-missing")
+        self.assertEqual(fake_client.networks.created, [])
+        self.assertNotIn("secret://local/docker/ca", repr(result.descriptor()))
+
+    def test_remote_tls_runtime_authority_requires_secret_resolver(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+
+        result = interpreter.execute_with_authority(
+            _request(
+                StartRuntime(RuntimeTarget("docker")),
+                products=(),
+                authority_ref=RuntimeAuthorityReference("remote-docker"),
+            ),
+            _remote_tls_runtime_authority(),
+        )
+
+        self.assertIs(result.kind, EffectResultKind.FAILED)
+        self.assertEqual(
+            result.failure.code,
+            "docker.runtime-authority-secret-resolver-required",
+        )
+        self.assertEqual(fake_client.networks.created, [])
+
+    def test_unsupported_runtime_authority_kind_is_explicit_without_docker_mutation(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+
+        result = interpreter.execute_with_authority(
+            _request(
+                StartRuntime(RuntimeTarget("docker")),
+                products=(),
+                authority_ref=RuntimeAuthorityReference("unknown-docker"),
+            ),
+            _unsupported_runtime_authority(),
+        )
+
+        self.assertIs(result.kind, EffectResultKind.UNSUPPORTED)
+        self.assertEqual(result.failure.code, "docker.runtime-authority-kind-unsupported")
+        self.assertEqual(fake_client.networks.created, [])
+
+
 
 class FakeImagePullCredentialResolver:
     def __init__(self, result) -> None:
@@ -880,6 +1023,73 @@ class FakeSecretResolver:
             len(self.fake_client.networks.created)
         )
         return self.result
+
+
+class MappingSecretResolver:
+    authority = SecretProviderAuthority(
+        SecretProviderId("local"),
+        (("docker",),),
+    )
+
+    def __init__(self, fake_client: FakeDockerClient, values: dict[str, str]) -> None:
+        self.fake_client = fake_client
+        self.values = values
+        self.requests: list[str] = []
+        self.networks_created_during_resolution: list[int] = []
+
+    def resolve(self, reference: SecretReference) -> SecretResolution:
+        self.requests.append(reference.reference_id)
+        self.networks_created_during_resolution.append(
+            len(self.fake_client.networks.created)
+        )
+        value = self.values.get(reference.reference_id)
+        if value is None:
+            return SecretMissing(reference)
+        return SecretResolved(reference, SecretValue(value))
+
+
+@dataclass(frozen=True)
+class FakeRuntimeAuthority:
+    runtime_kind: RuntimeKind
+    authority_kind: str
+    authority: object
+
+
+@dataclass(frozen=True)
+class FakeRemoteDockerTlsAuthority:
+    endpoint: str
+    ca_certificate: SecretReference
+    client_certificate: SecretReference
+    client_key: SecretReference
+
+
+def _local_runtime_authority() -> FakeRuntimeAuthority:
+    return FakeRuntimeAuthority(
+        RuntimeKind.DOCKER,
+        "local-docker-socket",
+        object(),
+    )
+
+
+def _remote_tls_runtime_authority() -> FakeRuntimeAuthority:
+    return FakeRuntimeAuthority(
+        RuntimeKind.DOCKER,
+        "remote-docker-tls",
+        FakeRemoteDockerTlsAuthority(
+            endpoint="tcp://mac-mini.local:2376",
+            ca_certificate=SecretReference("secret://local/docker/ca"),
+            client_certificate=SecretReference("secret://local/docker/cert"),
+            client_key=SecretReference("secret://local/docker/key"),
+        ),
+    )
+
+
+def _unsupported_runtime_authority() -> FakeRuntimeAuthority:
+    return FakeRuntimeAuthority(
+        RuntimeKind.DOCKER,
+        "ssh-docker-tunnel",
+        object(),
+    )
 
 
 class FakePostgresTransport:
@@ -917,6 +1127,7 @@ def _request(
     *,
     products: tuple[RuntimeProductMaterial, ...] | None = None,
     desired_graph_id: str = "graph-desired",
+    authority_ref: RuntimeAuthorityReference | None = None,
 ) -> RuntimeEffectRequest:
     return RuntimeEffectRequest(
         effect_id="effect-a",
@@ -934,6 +1145,7 @@ def _request(
         activity_id=ActivityId("activity-a"),
         operation=operation,
         products=(_material(_product()),) if products is None else products,
+        authority_ref=authority_ref,
     )
 
 

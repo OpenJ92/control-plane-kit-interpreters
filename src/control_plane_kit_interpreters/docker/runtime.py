@@ -26,7 +26,12 @@ from control_plane_kit_core.runtime_effects import (
     RuntimeEffectResult,
     RuntimeProductMaterial,
 )
-from control_plane_kit_core.secrets import SecretResolver
+from control_plane_kit_core.secrets import (
+    SecretReference,
+    SecretResolutionError,
+    SecretResolver,
+    require_resolved_secret,
+)
 from control_plane_kit_core.types import RuntimeKind
 from control_plane_kit_core.verification import (
     HttpCheck,
@@ -39,6 +44,7 @@ from control_plane_kit_core.verification import (
 from control_plane_kit_interpreters.docker.sdk import (
     DockerRegistryAuthConfig,
     DockerSdkClient,
+    DockerTlsClientConfig,
     DockerSdkConfigurationMount,
     DockerSdkPortBinding,
     DockerSdkSecretMount,
@@ -120,6 +126,33 @@ class DockerRuntimeInterpreter:
                     _bounded_error_message(error),
                 ),
             )
+
+    def execute_with_authority(
+        self,
+        request: RuntimeEffectRequest,
+        authority: object,
+    ) -> RuntimeEffectResult:
+        if not isinstance(request, RuntimeEffectRequest):
+            raise TypeError("DockerRuntimeInterpreter requires RuntimeEffectRequest")
+        if request.kind is not RuntimeEffectKind.REALIZE_ACTIVITY:
+            return _unsupported(request, "docker.unsupported-effect-kind")
+        if request.runtime_kind is not RuntimeKind.DOCKER:
+            return _unsupported(request, "docker.unsupported-runtime-kind")
+        try:
+            client = _client_for_runtime_authority(self.client, authority, self.secret_resolver)
+        except _DockerInterpreterUnsupportedAuthorityError as error:
+            return _unsupported(request, error.code)
+        except _DockerInterpreterPreconditionError as error:
+            return _failed(request, error.code, str(error))
+        except Exception as error:
+            return RuntimeEffectResult.uncertain(
+                request.effect_id,
+                RuntimeEffectFailure(
+                    "docker.runtime-authority-uncertain",
+                    _bounded_error_message(error),
+                ),
+            )
+        return replace(self, client=client).execute(request)
 
     def _reconcile_runtime(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         runtime_id = _runtime_target(request.operation)
@@ -668,6 +701,12 @@ class _DockerInterpreterPreconditionError(ValueError):
         self.code = code
 
 
+class _DockerInterpreterUnsupportedAuthorityError(ValueError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 def _unsupported(request: RuntimeEffectRequest, code: str) -> RuntimeEffectResult:
     return RuntimeEffectResult.unsupported(
         request.effect_id,
@@ -694,6 +733,81 @@ def _single_product(request: RuntimeEffectRequest) -> RuntimeProductMaterial:
         )
     return request.products[0]
 
+
+
+def _client_for_runtime_authority(
+    ambient_client: DockerSdkClient,
+    authority: object,
+    resolver: SecretResolver | None,
+) -> DockerSdkClient:
+    if _authority_value(getattr(authority, "runtime_kind", None)) != RuntimeKind.DOCKER.value:
+        raise _DockerInterpreterUnsupportedAuthorityError(
+            "docker.runtime-authority-runtime-unsupported"
+        )
+    authority_kind = _authority_value(getattr(authority, "authority_kind", None))
+    if authority_kind == "local-docker-socket":
+        return ambient_client
+    if authority_kind != "remote-docker-tls":
+        raise _DockerInterpreterUnsupportedAuthorityError(
+            "docker.runtime-authority-kind-unsupported"
+        )
+    material = getattr(authority, "authority", None)
+    endpoint = getattr(material, "endpoint", None)
+    if not isinstance(endpoint, str) or not endpoint.startswith("tcp://"):
+        raise _DockerInterpreterPreconditionError(
+            "docker.runtime-authority-malformed",
+            "remote Docker authority endpoint is malformed",
+        )
+    if resolver is None:
+        raise _DockerInterpreterPreconditionError(
+            "docker.runtime-authority-secret-resolver-required",
+            "remote Docker authority requires a configured secret resolver",
+        )
+    ca_certificate = _resolve_runtime_authority_secret(
+        resolver,
+        getattr(material, "ca_certificate", None),
+    )
+    client_certificate = _resolve_runtime_authority_secret(
+        resolver,
+        getattr(material, "client_certificate", None),
+    )
+    client_key = _resolve_runtime_authority_secret(
+        resolver,
+        getattr(material, "client_key", None),
+    )
+    return DockerSdkClient(
+        docker_module=ambient_client.docker_module,
+        tls_config=DockerTlsClientConfig(
+            endpoint=endpoint,
+            ca_certificate=ca_certificate,
+            client_certificate=client_certificate,
+            client_key=client_key,
+        ),
+    )
+
+
+def _resolve_runtime_authority_secret(
+    resolver: SecretResolver,
+    reference: object,
+):
+    if not isinstance(reference, SecretReference):
+        raise _DockerInterpreterPreconditionError(
+            "docker.runtime-authority-secret-reference-malformed",
+            "remote Docker authority secret reference is malformed",
+        )
+    try:
+        return require_resolved_secret(resolver, reference)
+    except SecretResolutionError as error:
+        code = getattr(error, "code", None)
+        suffix = _authority_value(code) if code is not None else "malformed"
+        raise _DockerInterpreterPreconditionError(
+            f"docker.runtime-authority-secret-{suffix}",
+            "remote Docker authority secret could not be resolved",
+        ) from error
+
+
+def _authority_value(value: object) -> object:
+    return getattr(value, "value", value)
 
 
 def _image_pull_auth_config(
