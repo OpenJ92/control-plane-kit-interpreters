@@ -26,6 +26,7 @@ from control_plane_kit_core.runtime_effects import (
     RuntimeEffectResult,
     RuntimeProductMaterial,
 )
+from control_plane_kit_core.secrets import SecretResolver
 from control_plane_kit_core.types import RuntimeKind
 from control_plane_kit_core.verification import (
     HttpCheck,
@@ -39,6 +40,7 @@ from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkClient,
     DockerSdkConfigurationMount,
     DockerSdkPortBinding,
+    DockerSdkSecretMount,
     runtime_endpoint_observations,
     verify_published_ports,
 )
@@ -48,6 +50,9 @@ from control_plane_kit_interpreters.secrets import (
     ImagePullCredentialMissing,
     ImagePullCredentialResolved,
     ImagePullCredentialResolver,
+    ResolvedSecretDeliveries,
+    SecretFileRuntimeMaterial,
+    resolve_secret_deliveries,
 )
 from control_plane_kit_interpreters.verification import (
     HttpVerificationInterpreter,
@@ -66,6 +71,7 @@ class DockerRuntimeInterpreter:
     client: DockerSdkClient
     http_transport: object | None = None
     image_pull_credentials: ImagePullCredentialResolver | None = None
+    secret_resolver: SecretResolver | None = None
 
     def execute(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         if not isinstance(request, RuntimeEffectRequest):
@@ -189,7 +195,7 @@ class DockerRuntimeInterpreter:
 
     def _start_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         material = _single_product(request)
-        _reject_unresolved_secret_deliveries(material)
+        secrets = _resolve_product_secret_deliveries(material, self.secret_resolver)
         auth_config = _image_pull_auth_config(material, self.image_pull_credentials)
         runtime_id = material.runtime_id
         network_name = _network_name(request, runtime_id)
@@ -210,6 +216,7 @@ class DockerRuntimeInterpreter:
                 container_name,
                 labels,
                 auth_config,
+                secrets,
             )
             action = "created"
         else:
@@ -250,7 +257,7 @@ class DockerRuntimeInterpreter:
 
     def _reconcile_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         material = _single_product(request)
-        _reject_unresolved_secret_deliveries(material)
+        secrets = _resolve_product_secret_deliveries(material, self.secret_resolver)
         auth_config = _image_pull_auth_config(material, self.image_pull_credentials)
         runtime_id = material.runtime_id
         network_name = _network_name(request, runtime_id)
@@ -271,6 +278,7 @@ class DockerRuntimeInterpreter:
                 container_name,
                 labels,
                 auth_config,
+                secrets,
             )
             action = "created"
         elif _fingerprint_matches(inspection.labels, labels):
@@ -289,6 +297,7 @@ class DockerRuntimeInterpreter:
                 container_name,
                 labels,
                 auth_config,
+                secrets,
             )
             action = "recreated"
 
@@ -466,6 +475,7 @@ class DockerRuntimeInterpreter:
         container_name: str,
         labels: Mapping[str, str],
         auth_config: DockerRegistryAuthConfig | None,
+        secrets: ResolvedSecretDeliveries,
     ) -> None:
         contract = material.product.runtime_contract
         retained_volumes = {
@@ -511,6 +521,40 @@ class DockerRuntimeInterpreter:
             else:
                 _require_node_owner(inspection.labels, volume_labels, "retained volume")
 
+        secret_mounts = []
+        for secret in secrets.files:
+            volume_name = _secret_volume_name(request, material.node_id, secret)
+            volume_labels = {
+                **labels,
+                f"{_LABEL_PREFIX}.volume.kind": "secret-file",
+                f"{_LABEL_PREFIX}.secret.target": secret.target_path,
+                f"{_LABEL_PREFIX}.secret.reference": secret.reference.reference_id,
+            }
+            inspection = self.client.inspect_volume(volume_name)
+            expected_digest = _secret_value_digest(secret)
+            if inspection is None:
+                self.client.create_volume(name=volume_name, labels=volume_labels)
+                self.client.materialize_secret_file(
+                    volume_name,
+                    secret.value,
+                    secret.file_mode,
+                )
+            else:
+                _require_node_owner(inspection.labels, volume_labels, "secret volume")
+                digest = self.client.secret_file_digest(volume_name)
+                if digest is None:
+                    self.client.materialize_secret_file(
+                        volume_name,
+                        secret.value,
+                        secret.file_mode,
+                    )
+                elif digest != expected_digest:
+                    raise _DockerInterpreterPreconditionError(
+                        "docker.secret-digest-conflict",
+                        "owned secret volume has unexpected digest",
+                    )
+            secret_mounts.append(DockerSdkSecretMount(secret.target_path, volume_name))
+
         self.client.pull_image(
             material.product.image.execution_reference,
             auth_config=auth_config,
@@ -520,19 +564,21 @@ class DockerRuntimeInterpreter:
             image=material.product.image.execution_reference,
             network=_network_name(request, material.runtime_id),
             aliases=(material.node_id,),
-            environment={
-                **{
+            environment=_container_environment(
+                {
                     binding.name: binding.value
                     for binding in contract.public_environment
                 },
-                **{
+                {
                     binding.name: binding.value
                     for binding in material.socket_environment
                 },
-            },
+                secrets.environment,
+            ),
             labels=labels,
             volumes=retained_volumes,
             configuration_mounts=tuple(configuration_mounts),
+            secret_mounts=tuple(secret_mounts),
             port_bindings=(),
         )
 
@@ -666,12 +712,62 @@ def _runtime_target(operation: ActivityOperation) -> str:
     return runtime_id
 
 
-def _reject_unresolved_secret_deliveries(material: RuntimeProductMaterial) -> None:
-    if material.product.runtime_contract.secret_deliveries:
+def _resolve_product_secret_deliveries(
+    material: RuntimeProductMaterial,
+    resolver: SecretResolver | None,
+) -> ResolvedSecretDeliveries:
+    deliveries = material.product.runtime_contract.secret_deliveries
+    try:
+        return resolve_secret_deliveries(deliveries, resolver=resolver)
+    except Exception as error:
+        code = getattr(error, "code", None)
+        if resolver is None and deliveries:
+            error_code = "docker.secret-resolution-required"
+            message = "Docker runtime interpreter requires secret resolver"
+        elif code is not None:
+            error_code = f"docker.secret-resolution-{code.value}"
+            message = str(error)
+        else:
+            error_code = "docker.secret-resolution-malformed"
+            message = "secret resolver returned malformed material"
         raise _DockerInterpreterPreconditionError(
-            "docker.secret-resolution-required",
-            "Docker runtime interpreter requires resolved secret material",
-        )
+            error_code,
+            message,
+        ) from error
+
+
+def _container_environment(
+    *parts: Mapping[str, str],
+) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for part in parts:
+        for name, value in part.items():
+            previous = values.setdefault(name, value)
+            if previous != value:
+                raise _DockerInterpreterPreconditionError(
+                    "docker.environment-binding-conflict",
+                    "container environment bindings conflict",
+                )
+    return values
+
+
+def _secret_volume_name(
+    request: RuntimeEffectRequest,
+    node_id: str,
+    secret: SecretFileRuntimeMaterial,
+) -> str:
+    return _volume_name(
+        request,
+        node_id,
+        "secret-" + _digest(
+            secret.target_path,
+            secret.reference.reference_id,
+        )[:16],
+    )
+
+
+def _secret_value_digest(secret: SecretFileRuntimeMaterial) -> str:
+    return hashlib.sha256(secret.value.reveal().encode("utf-8")).hexdigest()
 
 
 def _private_provider_ports(

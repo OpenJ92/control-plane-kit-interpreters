@@ -45,7 +45,15 @@ from control_plane_kit_core.runtime_effects import (
 )
 from control_plane_kit_core.secrets import (
     SecretEnvironmentDelivery,
+    SecretFileDelivery,
+    SecretFileMode,
+    SecretFilePathBinding,
+    SecretMissing,
+    SecretProviderAuthority,
+    SecretProviderId,
     SecretReference,
+    SecretResolved,
+    SecretResolution,
     SecretValue,
 )
 from control_plane_kit_core.types import Protocol, RuntimeKind
@@ -346,7 +354,133 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
 
         self.assertIs(result.kind, EffectResultKind.FAILED)
         self.assertEqual(result.failure.code, "docker.secret-resolution-required")
+        self.assertEqual(fake_client.networks.created, [])
+        self.assertEqual(fake_client.images.pulled, [])
         self.assertEqual(fake_client.containers.created, [])
+
+    def test_start_node_resolves_secret_environment_before_docker_mutation(self) -> None:
+        fake_client = FakeDockerClient()
+        resolver = FakeSecretResolver(
+            fake_client,
+            SecretResolved(
+                SecretReference("secret://local/api-token"),
+                SecretValue("resolved-api-token"),
+            ),
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            secret_resolver=resolver,
+        )
+
+        result = interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(_material(_product_with_secret_delivery()),),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(resolver.requests, ["secret://local/api-token"])
+        self.assertEqual(resolver.networks_created_during_resolution, [0])
+        container = _workload_container_record(fake_client)
+        self.assertEqual(
+            container["environment"],
+            {
+                "API_TOKEN": "resolved-api-token",
+                "PORT": "8080",
+            },
+        )
+        self.assertNotIn("resolved-api-token", repr(result))
+
+    def test_start_node_missing_secret_fails_before_docker_mutation(self) -> None:
+        fake_client = FakeDockerClient()
+        resolver = FakeSecretResolver(
+            fake_client,
+            SecretMissing(SecretReference("secret://local/api-token")),
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            secret_resolver=resolver,
+        )
+
+        result = interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(_material(_product_with_secret_delivery()),),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.FAILED)
+        self.assertEqual(result.failure.code, "docker.secret-resolution-missing")
+        self.assertEqual(fake_client.networks.created, [])
+        self.assertEqual(fake_client.volumes.created, [])
+        self.assertEqual(fake_client.images.pulled, [])
+        self.assertEqual(fake_client.containers.created, [])
+
+    def test_start_node_resolves_file_secret_as_read_only_mount(self) -> None:
+        fake_client = FakeDockerClient()
+        resolver = FakeSecretResolver(
+            fake_client,
+            SecretResolved(
+                SecretReference("secret://local/api-token"),
+                SecretValue("file-secret-content"),
+            ),
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            secret_resolver=resolver,
+        )
+
+        result = interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(_material(_product_with_file_secret_delivery()),),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        secret_volumes = [
+            volume
+            for volume in fake_client.volumes.created
+            if volume["labels"]["org.openj92.cpk.volume.kind"] == "secret-file"
+        ]
+        self.assertEqual(len(secret_volumes), 1)
+        self.assertNotIn("file-secret-content", repr(secret_volumes))
+        container = _workload_container_record(fake_client)
+        self.assertEqual(
+            container["environment"],
+            {
+                "API_TOKEN_FILE": "/run/secrets/api-token",
+                "PORT": "8080",
+            },
+        )
+        secret_mounts = [
+            mount
+            for mount in container["mounts"]
+            if mount["Target"] == "/run/secrets/api-token"
+        ]
+        self.assertEqual(
+            secret_mounts,
+            [
+                {
+                    "Type": "volume",
+                    "Source": secret_volumes[0]["name"],
+                    "Target": "/run/secrets/api-token",
+                    "ReadOnly": True,
+                    "VolumeOptions": {"Subpath": "content"},
+                }
+            ],
+        )
+        self.assertNotIn("file-secret-content", repr(result))
 
     def test_start_node_resolves_pull_authority_before_image_pull(self) -> None:
         fake_client = FakeDockerClient()
@@ -608,6 +742,26 @@ class FakeImagePullCredentialResolver:
         return self.result
 
 
+class FakeSecretResolver:
+    authority = SecretProviderAuthority(
+        SecretProviderId("local"),
+        (("api-token",),),
+    )
+
+    def __init__(self, fake_client: FakeDockerClient, result: SecretResolution) -> None:
+        self.fake_client = fake_client
+        self.result = result
+        self.requests: list[str] = []
+        self.networks_created_during_resolution: list[int] = []
+
+    def resolve(self, reference: SecretReference) -> SecretResolution:
+        self.requests.append(reference.reference_id)
+        self.networks_created_during_resolution.append(
+            len(self.fake_client.networks.created)
+        )
+        return self.result
+
+
 def _request(
     operation,
     *,
@@ -708,6 +862,27 @@ def _product_with_secret_delivery() -> ContainerServerProduct:
                 SecretEnvironmentDelivery(
                     "API_TOKEN",
                     SecretReference("secret://local/api-token"),
+                ),
+            ),
+        ),
+    )
+
+
+def _product_with_file_secret_delivery() -> ContainerServerProduct:
+    product = _product()
+    return ContainerServerProduct(
+        identity=product.identity,
+        image=product.image,
+        runtime_contract=ProductRuntimeContract(
+            sockets=product.runtime_contract.sockets,
+            provider_ports=product.runtime_contract.provider_ports,
+            public_environment=product.runtime_contract.public_environment,
+            secret_deliveries=(
+                SecretFileDelivery(
+                    "/run/secrets/api-token",
+                    SecretReference("secret://local/api-token"),
+                    SecretFileMode.OWNER_READ_ONLY,
+                    SecretFilePathBinding("API_TOKEN_FILE"),
                 ),
             ),
         ),
