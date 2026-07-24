@@ -20,6 +20,7 @@ dependencies = [
 docker = [
   "docker>=7.1",
   "httpx>=0.28",
+  "psycopg[binary]>=3.2",
 ]
 http = [
   "httpx>=0.28",
@@ -27,6 +28,7 @@ http = [
 test = [
   "docker>=7.1",
   "httpx>=0.28",
+  "psycopg[binary]>=3.2",
 ]
 
 [tool.setuptools.packages.find]

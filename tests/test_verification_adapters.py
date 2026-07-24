@@ -11,11 +11,20 @@ from control_plane_kit_core.probe_intents import (
     LiteralEndpointMaterial,
     RuntimeEndpointObservation,
 )
+from control_plane_kit_core.secrets import (
+    LocalDevelopmentSecretResolver,
+    SecretProviderAuthority,
+    SecretProviderId,
+    SecretReference,
+    SecretResolved,
+    SecretValue,
+)
 from control_plane_kit_core.types import Protocol
 from control_plane_kit_core.verification import (
     HttpCheck,
     HttpVerificationEvidence,
     PostgresQueryCheck,
+    PostgresPasswordAuthentication,
     RedisCheck,
     RedisVerificationEvidence,
     VerificationCapability,
@@ -55,14 +64,41 @@ class ScriptedRedisTransport:
 @dataclass
 class ScriptedPostgresTransport:
     responses: list[bool | Exception]
-    calls: list[tuple[str, int, float]] = field(default_factory=list)
+    calls: list[tuple[str, int, str, str, str, float]] = field(default_factory=list)
 
-    def select_one(self, target, *, timeout_seconds: float) -> bool:
-        self.calls.append((target.connect_host, target.port, timeout_seconds))
+    def select_one(
+        self,
+        target,
+        *,
+        database: str,
+        username: str,
+        password: SecretValue,
+        timeout_seconds: float,
+    ) -> bool:
+        self.calls.append(
+            (
+                target.connect_host,
+                target.port,
+                database,
+                username,
+                password.reveal(),
+                timeout_seconds,
+            )
+        )
         result = self.responses.pop(0)
         if isinstance(result, Exception):
             raise result
         return result
+
+
+@dataclass
+class RecordingSecretResolver:
+    authority: SecretProviderAuthority
+    requests: list[str] = field(default_factory=list)
+
+    def resolve(self, reference: SecretReference) -> SecretResolved:
+        self.requests.append(reference.reference_id)
+        return SecretResolved(reference, SecretValue("postgres-secret"))
 
 
 class VerificationAdapterTests(unittest.TestCase):
@@ -145,6 +181,7 @@ class VerificationAdapterTests(unittest.TestCase):
                 runtime_private_authorities=frozenset(("postgres://db:5432",))
             ),
             transport=transport,
+            credential_resolver=_postgres_secret_resolver(),
         )
 
         result = interpreter.execute(_postgres_material(attempts=2))
@@ -152,8 +189,15 @@ class VerificationAdapterTests(unittest.TestCase):
         self.assertIs(result.outcome, VerificationOutcome.PASSED)
         self.assertIs(result.capability, VerificationCapability.POSTGRES)
         self.assertEqual(result.attempts, 2)
-        self.assertEqual(transport.calls, [("db", 5432, 5.0), ("db", 5432, 5.0)])
+        self.assertEqual(
+            transport.calls,
+            [
+                ("db", 5432, "cpk", "cpk", "postgres-secret", 5.0),
+                ("db", 5432, "cpk", "cpk", "postgres-secret", 5.0),
+            ],
+        )
         self.assertIsNone(result.evidence)
+        self.assertNotIn("postgres-secret", repr(result))
 
     def test_postgres_timeout_remains_distinct_from_failed_query(self) -> None:
         transport = ScriptedPostgresTransport([socket.timeout()])
@@ -162,9 +206,47 @@ class VerificationAdapterTests(unittest.TestCase):
                 runtime_private_authorities=frozenset(("postgres://db:5432",))
             ),
             transport=transport,
+            credential_resolver=_postgres_secret_resolver(),
         ).execute(_postgres_material())
 
         self.assertIs(result.outcome, VerificationOutcome.TIMED_OUT)
+
+    def test_postgres_requires_explicit_secret_resolution(self) -> None:
+        transport = ScriptedPostgresTransport([True])
+        no_resolver = PostgresVerificationInterpreter(
+            ProbeAddressPolicy(
+                runtime_private_authorities=frozenset(("postgres://db:5432",))
+            ),
+            transport=transport,
+        ).execute(_postgres_material())
+        no_auth = PostgresVerificationInterpreter(
+            ProbeAddressPolicy(
+                runtime_private_authorities=frozenset(("postgres://db:5432",))
+            ),
+            transport=transport,
+            credential_resolver=_postgres_secret_resolver(),
+        ).execute(_postgres_material_with_auth(authentication=False))
+
+        self.assertIs(no_resolver.outcome, VerificationOutcome.REJECTED)
+        self.assertIs(no_auth.outcome, VerificationOutcome.REJECTED)
+        self.assertEqual(transport.calls, [])
+
+    def test_postgres_authorizes_endpoint_before_resolving_secret(self) -> None:
+        resolver = RecordingSecretResolver(
+            SecretProviderAuthority(SecretProviderId("local"), (("postgres",),)),
+        )
+        transport = ScriptedPostgresTransport([True])
+        result = PostgresVerificationInterpreter(
+            ProbeAddressPolicy(
+                runtime_private_authorities=frozenset(("postgres://other:5432",))
+            ),
+            transport=transport,
+            credential_resolver=resolver,
+        ).execute(_postgres_material())
+
+        self.assertIs(result.outcome, VerificationOutcome.REJECTED)
+        self.assertEqual(resolver.requests, [])
+        self.assertEqual(transport.calls, [])
 
 
 def _http_material(*, maximum_bytes: int = 64) -> VerificationCheckMaterial:
@@ -209,6 +291,14 @@ def _redis_material(*, attempts: int = 1) -> VerificationCheckMaterial:
 
 
 def _postgres_material(*, attempts: int = 1) -> VerificationCheckMaterial:
+    return _postgres_material_with_auth(attempts=attempts)
+
+
+def _postgres_material_with_auth(
+    *,
+    attempts: int = 1,
+    authentication: bool = True,
+) -> VerificationCheckMaterial:
     return VerificationCheckMaterial(
         "db",
         "graph-1",
@@ -216,6 +306,17 @@ def _postgres_material(*, attempts: int = 1) -> VerificationCheckMaterial:
             check_id="select-one",
             provider_socket="postgres",
             policy=VerificationPolicy(maximum_attempts=attempts),
+            authentication=(
+                PostgresPasswordAuthentication(
+                    database="cpk",
+                    username="cpk",
+                    password_reference=SecretReference(
+                        "secret://local/postgres/password"
+                    ),
+                )
+                if authentication
+                else None
+            ),
         ),
         RuntimeEndpointObservation(
             "db",
@@ -225,6 +326,13 @@ def _postgres_material(*, attempts: int = 1) -> VerificationCheckMaterial:
             EndpointContext.RUNTIME_PRIVATE,
             LiteralEndpointMaterial("postgres://db:5432"),
         ),
+    )
+
+
+def _postgres_secret_resolver() -> LocalDevelopmentSecretResolver:
+    return LocalDevelopmentSecretResolver(
+        SecretProviderAuthority(SecretProviderId("local"), (("postgres",),)),
+        {"secret://local/postgres/password": "postgres-secret"},
     )
 
 

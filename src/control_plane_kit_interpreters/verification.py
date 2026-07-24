@@ -9,6 +9,12 @@ from typing import Protocol
 import httpx
 
 from control_plane_kit_core.probe_intents import RuntimeEndpointObservation
+from control_plane_kit_core.secrets import (
+    SecretResolutionError,
+    SecretResolver,
+    SecretValue,
+    require_resolved_secret,
+)
 from control_plane_kit_core.verification import (
     HttpCheck,
     HttpVerificationEvidence,
@@ -121,8 +127,44 @@ class PostgresSelectOneTransport(Protocol):
         self,
         target: AuthorizedProbeTarget,
         *,
+        database: str,
+        username: str,
+        password: SecretValue,
         timeout_seconds: float,
     ) -> bool: ...
+
+
+@dataclass(frozen=True)
+class PsycopgPostgresSelectOneTransport:
+    """Perform exactly one bounded Postgres SELECT 1 exchange."""
+
+    def select_one(
+        self,
+        target: AuthorizedProbeTarget,
+        *,
+        database: str,
+        username: str,
+        password: SecretValue,
+        timeout_seconds: float,
+    ) -> bool:
+        try:
+            import psycopg
+
+            with psycopg.connect(
+                host=target.connect_host,
+                port=target.port,
+                dbname=database,
+                user=username,
+                password=password.reveal(),
+                connect_timeout=max(1, int(timeout_seconds)),
+            ) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                    return cursor.fetchone() == (1,)
+        except TimeoutError:
+            raise
+        except Exception as error:
+            raise OSError("Postgres select-one verification failed") from error
 
 
 @dataclass(frozen=True)
@@ -328,7 +370,8 @@ class PostgresVerificationInterpreter:
     """Execute semantic Postgres readiness through an injected query transport."""
 
     policy: ProbeAddressPolicy
-    transport: PostgresSelectOneTransport
+    transport: PostgresSelectOneTransport | None = None
+    credential_resolver: SecretResolver | None = None
     secret_resolver: ProbeEndpointSecretResolver | None = None
     public_resolver: ProbePublicAddressResolver | None = None
 
@@ -343,6 +386,13 @@ class PostgresVerificationInterpreter:
                 VerificationCapability.POSTGRES,
             )
         check = material.check
+        if check.authentication is None or self.credential_resolver is None:
+            return _observation(
+                material,
+                VerificationCapability.POSTGRES,
+                VerificationOutcome.REJECTED,
+                1,
+            )
         try:
             target = authorize_probe_endpoint(
                 material.endpoint,
@@ -351,6 +401,18 @@ class PostgresVerificationInterpreter:
                 public_resolver=self.public_resolver,
             )
         except ProbeSecurityError:
+            return _observation(
+                material,
+                VerificationCapability.POSTGRES,
+                VerificationOutcome.REJECTED,
+                1,
+            )
+        try:
+            password = require_resolved_secret(
+                self.credential_resolver,
+                check.authentication.password_reference,
+            )
+        except SecretResolutionError:
             return _observation(
                 material,
                 VerificationCapability.POSTGRES,
@@ -366,10 +428,14 @@ class PostgresVerificationInterpreter:
         )
         for attempt in range(1, check.policy.maximum_attempts + 1):
             try:
+                transport = self.transport or PsycopgPostgresSelectOneTransport()
                 outcome = (
                     VerificationOutcome.PASSED
-                    if self.transport.select_one(
+                    if transport.select_one(
                         target,
+                        database=check.authentication.database,
+                        username=check.authentication.username,
+                        password=password,
                         timeout_seconds=check.policy.timeout_seconds,
                     )
                     else VerificationOutcome.FAILED

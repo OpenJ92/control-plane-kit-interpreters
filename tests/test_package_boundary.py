@@ -28,7 +28,6 @@ class PackageBoundaryTests(unittest.TestCase):
             "control_plane_kit_servers",
             "control_plane_kit_servers_cpk_server",
             "fastapi",
-            "psycopg",
         }
 
         findings: list[str] = []
@@ -36,6 +35,17 @@ class PackageBoundaryTests(unittest.TestCase):
             overlap = imported_roots(path) & forbidden
             for name in sorted(overlap):
                 findings.append(f"{path.relative_to(REPO_ROOT)} imports {name}")
+
+        self.assertEqual(findings, [])
+
+    def test_psycopg_is_lazy_and_isolated_to_verification_transport(self) -> None:
+        findings: list[str] = []
+        allowed = SRC_ROOT / "verification.py"
+        for path in sorted(SRC_ROOT.rglob("*.py")):
+            overlap = imported_roots(path) & {"psycopg"}
+            for name in sorted(overlap):
+                if path != allowed:
+                    findings.append(f"{path.relative_to(REPO_ROOT)} imports {name}")
 
         self.assertEqual(findings, [])
 
