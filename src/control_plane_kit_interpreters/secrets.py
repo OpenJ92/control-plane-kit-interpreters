@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Mapping, Protocol, TypeAlias
 
+from control_plane_kit_core.runtime_effects import ImagePullAuthority
 from control_plane_kit_core.secrets import (
     SecretDelivery,
     SecretEnvironmentDelivery,
@@ -18,6 +19,83 @@ from control_plane_kit_core.secrets import (
     SecretValue,
     require_resolved_secret,
 )
+
+
+@dataclass(frozen=True, repr=False)
+class ResolvedImagePullCredential:
+    """Ephemeral OCI registry credential resolved only by runtime interpreters."""
+
+    username: str | None = None
+    password: SecretValue | None = None
+    identitytoken: SecretValue | None = None
+
+    def __post_init__(self) -> None:
+        if self.identitytoken is not None:
+            if not isinstance(self.identitytoken, SecretValue):
+                raise SecretResolutionError(
+                    SecretResolutionCode.INVALID_RESOLVER_RESULT,
+                    "image pull identity token is malformed",
+                )
+            if self.username is not None or self.password is not None:
+                raise SecretResolutionError(
+                    SecretResolutionCode.INVALID_RESOLVER_RESULT,
+                    "image pull credential must use either identity token or username/password",
+                )
+            return
+        if not isinstance(self.username, str) or not self.username.strip():
+            raise SecretResolutionError(
+                SecretResolutionCode.INVALID_RESOLVER_RESULT,
+                "image pull credential username is malformed",
+            )
+        if not isinstance(self.password, SecretValue):
+            raise SecretResolutionError(
+                SecretResolutionCode.INVALID_RESOLVER_RESULT,
+                "image pull credential password is malformed",
+            )
+
+    def __repr__(self) -> str:
+        return "ResolvedImagePullCredential(<redacted>)"
+
+
+@dataclass(frozen=True)
+class ImagePullCredentialResolved:
+    credential: ResolvedImagePullCredential
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.credential, ResolvedImagePullCredential):
+            raise SecretResolutionError(
+                SecretResolutionCode.INVALID_RESOLVER_RESULT,
+                "image pull credential resolver returned malformed credential",
+            )
+
+
+@dataclass(frozen=True)
+class ImagePullCredentialMissing:
+    reference: SecretReference
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.reference, SecretReference):
+            raise TypeError("missing image pull credential requires SecretReference")
+
+
+@dataclass(frozen=True)
+class ImagePullCredentialDenied:
+    reference: SecretReference
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.reference, SecretReference):
+            raise TypeError("denied image pull credential requires SecretReference")
+
+
+ImagePullCredentialResolution: TypeAlias = (
+    ImagePullCredentialResolved | ImagePullCredentialMissing | ImagePullCredentialDenied
+)
+
+
+class ImagePullCredentialResolver(Protocol):
+    """Runtime authority for resolving OCI pull credentials at interpreter IO."""
+
+    def resolve(self, authority: ImagePullAuthority) -> ImagePullCredentialResolution: ...
 
 
 @dataclass(frozen=True)

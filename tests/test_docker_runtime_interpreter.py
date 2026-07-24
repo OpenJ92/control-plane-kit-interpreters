@@ -37,16 +37,27 @@ from control_plane_kit_core.products import (
     ProviderRuntimePort,
 )
 from control_plane_kit_core.runtime_effects import (
+    ImagePullAuthority,
     RuntimeEffectKind,
     RuntimeEffectRequest,
     RuntimeEffectSource,
     RuntimeProductMaterial,
 )
-from control_plane_kit_core.secrets import SecretEnvironmentDelivery, SecretReference
+from control_plane_kit_core.secrets import (
+    SecretEnvironmentDelivery,
+    SecretReference,
+    SecretValue,
+)
 from control_plane_kit_core.types import Protocol, RuntimeKind
 from control_plane_kit_core.verification import HttpCheck, VerificationContract
 
 from control_plane_kit_interpreters.docker import DockerRuntimeInterpreter, DockerSdkClient
+from control_plane_kit_interpreters.secrets import (
+    ImagePullCredentialDenied,
+    ImagePullCredentialMissing,
+    ImagePullCredentialResolved,
+    ResolvedImagePullCredential,
+)
 from test_docker_sdk_client import (
     FakeDockerClient,
     FakeDockerModule,
@@ -134,7 +145,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertEqual(result.evidence["action"], "created")
         self.assertEqual(
             fake_client.images.pulled,
-            ["ghcr.io/openj92/runtime-fixture@sha256:" + "a" * 64],
+            [{"image": "ghcr.io/openj92/runtime-fixture@sha256:" + "a" * 64}],
         )
         container = _workload_container_record(fake_client)
         self.assertEqual(
@@ -337,6 +348,200 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertEqual(result.failure.code, "docker.secret-resolution-required")
         self.assertEqual(fake_client.containers.created, [])
 
+    def test_start_node_resolves_pull_authority_before_image_pull(self) -> None:
+        fake_client = FakeDockerClient()
+        resolver = FakeImagePullCredentialResolver(
+            ImagePullCredentialResolved(
+                ResolvedImagePullCredential(
+                    username="cpk",
+                    password=SecretValue("private-registry-token"),
+                )
+            )
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            image_pull_credentials=resolver,
+        )
+
+        result = interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(
+                    _material(
+                        _product(),
+                        pull_authority=ImagePullAuthority(
+                            "ghcr.io",
+                            "openj92/runtime-fixture",
+                            SecretReference("secret://registry/ghcr/runtime-fixture"),
+                        ),
+                    ),
+                ),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(
+            fake_client.images.pulled,
+            [
+                {
+                    "image": "ghcr.io/openj92/runtime-fixture@sha256:" + "a" * 64,
+                    "auth_config": {
+                        "username": "cpk",
+                        "password": "private-registry-token",
+                    },
+                }
+            ],
+        )
+        self.assertEqual(
+            resolver.requests,
+            ["secret://registry/ghcr/runtime-fixture"],
+        )
+        self.assertNotIn("private-registry-token", repr(result))
+
+    def test_start_node_requires_resolver_when_pull_authority_is_present(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+
+        result = interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(
+                    _material(
+                        _product(),
+                        pull_authority=ImagePullAuthority(
+                            "ghcr.io",
+                            "openj92/runtime-fixture",
+                            SecretReference("secret://registry/ghcr/runtime-fixture"),
+                        ),
+                    ),
+                ),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.FAILED)
+        self.assertEqual(result.failure.code, "docker.image-pull-authority-required")
+        self.assertEqual(fake_client.images.pulled, [])
+        self.assertEqual(fake_client.containers.created, [])
+
+
+    def test_start_node_missing_pull_credential_fails_before_container_creation(self) -> None:
+        fake_client = FakeDockerClient()
+        resolver = FakeImagePullCredentialResolver(
+            ImagePullCredentialMissing(
+                SecretReference("secret://registry/ghcr/runtime-fixture")
+            )
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            image_pull_credentials=resolver,
+        )
+
+        result = interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(
+                    _material(
+                        _product(),
+                        pull_authority=ImagePullAuthority(
+                            "ghcr.io",
+                            "openj92/runtime-fixture",
+                            SecretReference("secret://registry/ghcr/runtime-fixture"),
+                        ),
+                    ),
+                ),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.FAILED)
+        self.assertEqual(result.failure.code, "docker.image-pull-credential-missing")
+        self.assertEqual(fake_client.images.pulled, [])
+        self.assertEqual(fake_client.containers.created, [])
+
+    def test_start_node_denied_pull_credential_fails_before_container_creation(self) -> None:
+        fake_client = FakeDockerClient()
+        resolver = FakeImagePullCredentialResolver(
+            ImagePullCredentialDenied(SecretReference("secret://registry/ghcr/runtime-fixture"))
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            image_pull_credentials=resolver,
+        )
+
+        result = interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(
+                    _material(
+                        _product(),
+                        pull_authority=ImagePullAuthority(
+                            "ghcr.io",
+                            "openj92/runtime-fixture",
+                            SecretReference("secret://registry/ghcr/runtime-fixture"),
+                        ),
+                    ),
+                ),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.FAILED)
+        self.assertEqual(result.failure.code, "docker.image-pull-credential-denied")
+        self.assertEqual(fake_client.images.pulled, [])
+        self.assertEqual(fake_client.containers.created, [])
+
+    def test_start_node_wrong_scope_pull_authority_fails_closed(self) -> None:
+        fake_client = FakeDockerClient()
+        resolver = FakeImagePullCredentialResolver(
+            ImagePullCredentialResolved(
+                ResolvedImagePullCredential(
+                    username="cpk",
+                    password=SecretValue("private-registry-token"),
+                )
+            )
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            image_pull_credentials=resolver,
+        )
+
+        result = interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(
+                    _material(
+                        _product(),
+                        pull_authority=ImagePullAuthority(
+                            "ghcr.io",
+                            "openj92/other",
+                            SecretReference("secret://registry/ghcr/other"),
+                        ),
+                    ),
+                ),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.FAILED)
+        self.assertEqual(result.failure.code, "docker.image-pull-authority-scope-mismatch")
+        self.assertEqual(resolver.requests, [])
+        self.assertEqual(fake_client.images.pulled, [])
+        self.assertEqual(fake_client.containers.created, [])
+
     def test_wait_for_healthy_executes_http_verification_against_runtime_endpoint(self) -> None:
         fake_client = FakeDockerClient()
         requests: list[str] = []
@@ -392,6 +597,17 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertEqual(result.failure.details["checks"][0]["outcome"], "failed")
 
 
+
+class FakeImagePullCredentialResolver:
+    def __init__(self, result) -> None:
+        self.result = result
+        self.requests: list[str] = []
+
+    def resolve(self, authority: ImagePullAuthority):
+        self.requests.append(authority.credential_reference.reference_id)
+        return self.result
+
+
 def _request(
     operation,
     *,
@@ -421,6 +637,7 @@ def _material(
     product: ContainerServerProduct,
     *,
     socket_environment: tuple[SocketDerivedEnvironmentBinding, ...] = (),
+    pull_authority: ImagePullAuthority | None = None,
 ) -> RuntimeProductMaterial:
     reference = ProductReference(
         product.identity,
@@ -432,6 +649,7 @@ def _material(
         reference=reference,
         product=product,
         socket_environment=socket_environment,
+        pull_authority=pull_authority,
     )
 
 
