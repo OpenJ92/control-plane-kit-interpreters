@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import socket
 import unittest
+from unittest.mock import call, patch
 
 import httpx
 
@@ -198,6 +199,23 @@ class VerificationAdapterTests(unittest.TestCase):
         )
         self.assertIsNone(result.evidence)
         self.assertNotIn("postgres-secret", repr(result))
+
+    def test_postgres_retries_are_paced_between_attempts(self) -> None:
+        transport = ScriptedPostgresTransport([False, False, True])
+        interpreter = PostgresVerificationInterpreter(
+            ProbeAddressPolicy(
+                runtime_private_authorities=frozenset(("postgres://db:5432",))
+            ),
+            transport=transport,
+            credential_resolver=_postgres_secret_resolver(),
+        )
+
+        with patch("control_plane_kit_interpreters.verification.time.sleep") as sleep:
+            result = interpreter.execute(_postgres_material(attempts=3))
+
+        self.assertIs(result.outcome, VerificationOutcome.PASSED)
+        self.assertEqual(result.attempts, 3)
+        sleep.assert_has_calls([call(1), call(1)])
 
     def test_postgres_timeout_remains_distinct_from_failed_query(self) -> None:
         transport = ScriptedPostgresTransport([socket.timeout()])

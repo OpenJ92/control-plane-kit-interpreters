@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import socket
+import time
 from typing import Protocol
 
 import httpx
@@ -427,6 +428,8 @@ class PostgresVerificationInterpreter:
             1,
         )
         for attempt in range(1, check.policy.maximum_attempts + 1):
+            if attempt > 1:
+                time.sleep(1)
             try:
                 transport = self.transport or PsycopgPostgresSelectOneTransport()
                 outcome = (
