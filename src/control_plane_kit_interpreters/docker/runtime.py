@@ -30,6 +30,7 @@ from control_plane_kit_core.secrets import SecretResolver
 from control_plane_kit_core.types import RuntimeKind
 from control_plane_kit_core.verification import (
     HttpCheck,
+    PostgresQueryCheck,
     VerificationCompleted,
     VerificationOutcome,
     VerificationUnsupported,
@@ -56,6 +57,8 @@ from control_plane_kit_interpreters.secrets import (
 )
 from control_plane_kit_interpreters.verification import (
     HttpVerificationInterpreter,
+    PostgresSelectOneTransport,
+    PostgresVerificationInterpreter,
     VerificationCheckMaterial,
 )
 
@@ -70,6 +73,7 @@ class DockerRuntimeInterpreter:
 
     client: DockerSdkClient
     http_transport: object | None = None
+    postgres_transport: PostgresSelectOneTransport | None = None
     image_pull_credentials: ImagePullCredentialResolver | None = None
     secret_resolver: SecretResolver | None = None
 
@@ -358,20 +362,28 @@ class DockerRuntimeInterpreter:
                     "docker.health-endpoint-missing",
                     "health check provider socket has no runtime endpoint",
                 )
-            if not isinstance(check, HttpCheck):
-                return _unsupported(request, "docker.health-check-unsupported")
             if not isinstance(endpoint.address, LiteralEndpointMaterial):
                 return _failed(
                     request,
                     "docker.health-endpoint-unresolved",
                     "health endpoint is not literal runtime material",
                 )
-            result = self._execute_http_health_check(
-                material,
-                request,
-                check,
-                endpoint,
-            )
+            if isinstance(check, HttpCheck):
+                result = self._execute_http_health_check(
+                    material,
+                    request,
+                    check,
+                    endpoint,
+                )
+            elif isinstance(check, PostgresQueryCheck):
+                result = self._execute_postgres_health_check(
+                    material,
+                    request,
+                    check,
+                    endpoint,
+                )
+            else:
+                return _unsupported(request, "docker.health-check-unsupported")
             if isinstance(result, VerificationUnsupported):
                 return _unsupported(request, "docker.health-check-unsupported")
             if not isinstance(result, VerificationCompleted):
@@ -438,6 +450,30 @@ class DockerRuntimeInterpreter:
         if isinstance(result, VerificationCompleted):
             return replace(result, attempts=check.policy.maximum_attempts)
         return result
+
+    def _execute_postgres_health_check(
+        self,
+        material: RuntimeProductMaterial,
+        request: RuntimeEffectRequest,
+        check: PostgresQueryCheck,
+        endpoint,
+    ):
+        policy = ProbeAddressPolicy(
+            runtime_private_authorities=frozenset((endpoint.address.value,)),
+        )
+        interpreter = PostgresVerificationInterpreter(
+            policy,
+            transport=self.postgres_transport,
+            credential_resolver=self.secret_resolver,
+        )
+        return interpreter.execute(
+            VerificationCheckMaterial(
+                material.node_id,
+                request.source.desired_graph_id,
+                check,
+                endpoint,
+            )
+        )
 
     def _runtime_private_endpoint_observations(
         self,

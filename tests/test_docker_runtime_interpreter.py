@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 import unittest
 
 import httpx
@@ -58,6 +59,12 @@ from control_plane_kit_core.secrets import (
 )
 from control_plane_kit_core.types import Protocol, RuntimeKind
 from control_plane_kit_core.verification import HttpCheck, VerificationContract
+from control_plane_kit_core.verification import (
+    PostgresPasswordAuthentication,
+    PostgresQueryCheck,
+    RedisCheck,
+    VerificationPolicy,
+)
 
 from control_plane_kit_interpreters.docker import DockerRuntimeInterpreter, DockerSdkClient
 from control_plane_kit_interpreters.secrets import (
@@ -730,6 +737,92 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertEqual(result.failure.code, "docker.health-check-failed")
         self.assertEqual(result.failure.details["checks"][0]["outcome"], "failed")
 
+    def test_wait_for_healthy_executes_postgres_verification_with_secret(self) -> None:
+        fake_client = FakeDockerClient()
+        transport = FakePostgresTransport([True])
+        resolver = FakeSecretResolver(
+            fake_client,
+            SecretResolved(
+                SecretReference("secret://local/postgres/password"),
+                SecretValue("postgres-secret"),
+            ),
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            postgres_transport=transport,
+            secret_resolver=resolver,
+        )
+
+        result = interpreter.execute(
+            _request(
+                WaitForHealthy(NodeTarget("api")),
+                products=(_material(_product_with_postgres_health_check()),),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(result.evidence["action"], "verified-healthy")
+        self.assertEqual(
+            transport.calls,
+            [("api", 5432, "cpk", "cpk", "postgres-secret", 5.0)],
+        )
+        self.assertEqual(resolver.requests, ["secret://local/postgres/password"])
+        self.assertEqual(result.evidence["checks"][0]["outcome"], "passed")
+        self.assertNotIn("postgres-secret", repr(result))
+
+    def test_wait_for_healthy_fails_when_postgres_verification_fails(self) -> None:
+        fake_client = FakeDockerClient()
+        transport = FakePostgresTransport([socket.timeout()])
+        resolver = FakeSecretResolver(
+            fake_client,
+            SecretResolved(
+                SecretReference("secret://local/postgres/password"),
+                SecretValue("postgres-secret"),
+            ),
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            postgres_transport=transport,
+            secret_resolver=resolver,
+        )
+
+        result = interpreter.execute(
+            _request(
+                WaitForHealthy(NodeTarget("api")),
+                products=(_material(_product_with_postgres_health_check()),),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.FAILED)
+        self.assertEqual(result.failure.code, "docker.health-check-failed")
+        self.assertEqual(result.failure.details["checks"][0]["outcome"], "timed-out")
+        self.assertNotIn("postgres-secret", repr(result))
+
+    def test_wait_for_healthy_rejects_unsupported_verification_kind(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+
+        result = interpreter.execute(
+            _request(
+                WaitForHealthy(NodeTarget("api")),
+                products=(_material(_product_with_redis_health_check()),),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.UNSUPPORTED)
+        self.assertEqual(result.failure.code, "docker.health-check-unsupported")
+
 
 
 class FakeImagePullCredentialResolver:
@@ -760,6 +853,36 @@ class FakeSecretResolver:
             len(self.fake_client.networks.created)
         )
         return self.result
+
+
+class FakePostgresTransport:
+    def __init__(self, results: list[bool | Exception]) -> None:
+        self.results = results
+        self.calls: list[tuple[str, int, str, str, str, float]] = []
+
+    def select_one(
+        self,
+        target,
+        *,
+        database: str,
+        username: str,
+        password: SecretValue,
+        timeout_seconds: float,
+    ) -> bool:
+        self.calls.append(
+            (
+                target.connect_host,
+                target.port,
+                database,
+                username,
+                password.reveal(),
+                timeout_seconds,
+            )
+        )
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 def _request(
@@ -842,6 +965,60 @@ def _product_with_health_check() -> ContainerServerProduct:
                         check_id="ready",
                         provider_socket="http",
                         path="/health/ready",
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def _product_with_postgres_health_check() -> ContainerServerProduct:
+    product = _product()
+    return ContainerServerProduct(
+        identity=product.identity,
+        image=product.image,
+        runtime_contract=ProductRuntimeContract(
+            sockets=BlockSockets(
+                providers=(ProviderSocket("postgres", Protocol.POSTGRES),),
+            ),
+            provider_ports=(ProviderRuntimePort("postgres", 5432),),
+            public_environment=product.runtime_contract.public_environment,
+            verification=VerificationContract(
+                (
+                    PostgresQueryCheck(
+                        check_id="select-one",
+                        provider_socket="postgres",
+                        authentication=PostgresPasswordAuthentication(
+                            database="cpk",
+                            username="cpk",
+                            password_reference=SecretReference(
+                                "secret://local/postgres/password"
+                            ),
+                        ),
+                        policy=VerificationPolicy(timeout_seconds=5.0),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def _product_with_redis_health_check() -> ContainerServerProduct:
+    product = _product()
+    return ContainerServerProduct(
+        identity=product.identity,
+        image=product.image,
+        runtime_contract=ProductRuntimeContract(
+            sockets=BlockSockets(
+                providers=(ProviderSocket("redis", Protocol.REDIS),),
+            ),
+            provider_ports=(ProviderRuntimePort("redis", 6379),),
+            public_environment=product.runtime_contract.public_environment,
+            verification=VerificationContract(
+                (
+                    RedisCheck(
+                        check_id="redis-ping",
+                        provider_socket="redis",
                     ),
                 ),
             ),
