@@ -24,6 +24,7 @@ from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkPublishedPort,
     DockerSdkResourceInspection,
     DockerSdkSecretMount,
+    DockerTlsClientConfig,
     runtime_endpoint_observations,
     verify_published_ports,
 )
@@ -37,13 +38,30 @@ class FakeErrors:
     NotFound = FakeNotFound
 
 
+class FakeTlsFactory:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def TLSConfig(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(dict(kwargs))
+        return {"tls_config": dict(kwargs)}
+
+
 class FakeDockerModule:
     errors = FakeErrors
 
     def __init__(self, client: FakeDockerClient) -> None:
         self.client = client
+        self.tls = FakeTlsFactory()
+        self.docker_clients: list[dict[str, object]] = []
+        self.from_env_calls = 0
 
     def from_env(self) -> FakeDockerClient:
+        self.from_env_calls += 1
+        return self.client
+
+    def DockerClient(self, **kwargs: object) -> FakeDockerClient:
+        self.docker_clients.append(dict(kwargs))
         return self.client
 
 
@@ -210,6 +228,38 @@ assert "docker" not in sys.modules
         client = DockerSdkClient(docker_module=FakeDockerModule(fake_client))
 
         self.assertIs(client.client, fake_client)
+
+    def test_tls_client_creation_uses_docker_client_without_leaking_secret_material(self) -> None:
+        fake_client = FakeDockerClient()
+        fake_module = FakeDockerModule(fake_client)
+        config = DockerTlsClientConfig(
+            endpoint="tcp://mac-mini.local:2376",
+            ca_certificate=SecretValue("ca-certificate-secret"),
+            client_certificate=SecretValue("client-certificate-secret"),
+            client_key=SecretValue("client-key-secret"),
+        )
+
+        client = DockerSdkClient(docker_module=fake_module, tls_config=config)
+
+        self.assertIs(client.client, fake_client)
+        self.assertEqual(fake_module.from_env_calls, 0)
+        self.assertEqual(
+            fake_module.docker_clients,
+            [
+                {
+                    "base_url": "tcp://mac-mini.local:2376",
+                    "tls": {"tls_config": fake_module.tls.calls[0]},
+                }
+            ],
+        )
+        tls_call = fake_module.tls.calls[0]
+        self.assertEqual(tls_call["verify"], True)
+        self.assertTrue(str(tls_call["ca_cert"]).endswith("ca.pem"))
+        self.assertTrue(str(tls_call["client_cert"][0]).endswith("cert.pem"))
+        self.assertTrue(str(tls_call["client_cert"][1]).endswith("key.pem"))
+        self.assertNotIn("ca-certificate-secret", repr(config))
+        self.assertNotIn("client-certificate-secret", repr(client))
+        self.assertNotIn("client-key-secret", repr(fake_module.docker_clients))
 
     def test_missing_resources_are_absent_only_for_sdk_not_found_errors(self) -> None:
         sdk = DockerSdkClient(

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
+import os
 from io import BytesIO
 from importlib import import_module
 from ipaddress import ip_address
+from pathlib import Path
 import tarfile
+import tempfile
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
@@ -17,6 +20,30 @@ from control_plane_kit_core.probe_intents import (
 )
 from control_plane_kit_core.secrets import SecretFileMode, SecretValue
 from control_plane_kit_core.types import Protocol, Transport
+
+
+@dataclass(frozen=True, repr=False)
+class DockerTlsClientConfig:
+    """Ephemeral remote Docker TLS client material with redacted representation."""
+
+    endpoint: str
+    ca_certificate: SecretValue
+    client_certificate: SecretValue
+    client_key: SecretValue
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.endpoint, str) or not self.endpoint.startswith("tcp://"):
+            raise ValueError("Docker TLS endpoint must be a tcp:// URL")
+        for name, value in (
+            ("ca_certificate", self.ca_certificate),
+            ("client_certificate", self.client_certificate),
+            ("client_key", self.client_key),
+        ):
+            if not isinstance(value, SecretValue):
+                raise TypeError(f"Docker TLS {name} must be SecretValue")
+
+    def __repr__(self) -> str:
+        return "DockerTlsClientConfig(<redacted>)"
 
 
 @dataclass(frozen=True, repr=False)
@@ -136,6 +163,8 @@ class DockerSdkSecretMount:
 class DockerSdkClient:
     client: Any | None = None
     docker_module: Any | None = None
+    tls_config: DockerTlsClientConfig | None = field(default=None, repr=False)
+    _tls_directory: tempfile.TemporaryDirectory[str] | None = field(default=None, init=False, repr=False)
     configuration_helper_image: str = (
         "python:3.14-slim@sha256:"
         "cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6"
@@ -150,7 +179,39 @@ class DockerSdkClient:
             docker_module = import_module("docker")
 
         self.docker_module = docker_module
-        self.client = docker_module.from_env()
+        if self.tls_config is None:
+            self.client = docker_module.from_env()
+        else:
+            self.client = self._remote_tls_client(docker_module, self.tls_config)
+
+    def _remote_tls_client(
+        self,
+        docker_module: Any,
+        tls_config: DockerTlsClientConfig,
+    ) -> Any:
+        directory = tempfile.TemporaryDirectory(prefix="cpk-docker-tls-")
+        self._tls_directory = directory
+        root = Path(directory.name)
+        ca_path = _write_secret_file(root / "ca.pem", tls_config.ca_certificate)
+        cert_path = _write_secret_file(root / "cert.pem", tls_config.client_certificate)
+        key_path = _write_secret_file(root / "key.pem", tls_config.client_key)
+        tls_factory = getattr(getattr(docker_module, "tls", None), "TLSConfig", None)
+        if tls_factory is None:
+            raise RuntimeError("Docker SDK TLSConfig is unavailable")
+        tls = tls_factory(
+            ca_cert=str(ca_path),
+            client_cert=(str(cert_path), str(key_path)),
+            verify=True,
+        )
+        return docker_module.DockerClient(
+            base_url=tls_config.endpoint,
+            tls=tls,
+        )
+
+    def __del__(self) -> None:
+        directory = self._tls_directory
+        if directory is not None:
+            directory.cleanup()
 
     def inspect_network(self, name: str) -> DockerSdkResourceInspection | None:
         try:
@@ -488,6 +549,12 @@ class DockerSdkClient:
                 ) from error
             values[name] = address
         return dict(sorted(values.items()))
+
+
+def _write_secret_file(path: Path, value: SecretValue) -> Path:
+    path.write_text(value.reveal(), encoding="utf-8")
+    os.chmod(path, 0o600)
+    return path
 
 
 def runtime_endpoint_observations(

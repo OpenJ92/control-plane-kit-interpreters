@@ -8,6 +8,7 @@ from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkPublishedPort,
     DockerSdkResourceInspection,
     DockerSdkSecretMount,
+    DockerTlsClientConfig,
     runtime_endpoint_observations,
     verify_published_ports,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "DockerSdkPublishedPort",
     "DockerSdkResourceInspection",
     "DockerSdkSecretMount",
+    "DockerTlsClientConfig",
     "runtime_endpoint_observations",
     "verify_published_ports",
 ]
