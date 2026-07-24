@@ -19,6 +19,39 @@ from control_plane_kit_core.secrets import SecretFileMode, SecretValue
 from control_plane_kit_core.types import Protocol, Transport
 
 
+@dataclass(frozen=True, repr=False)
+class DockerRegistryAuthConfig:
+    """Bounded Docker SDK auth config with redacted representation."""
+
+    username: str | None = None
+    password: SecretValue | None = None
+    identitytoken: SecretValue | None = None
+
+    def __post_init__(self) -> None:
+        if self.identitytoken is not None:
+            if not isinstance(self.identitytoken, SecretValue):
+                raise TypeError("Docker registry identity token must be SecretValue")
+            if self.username is not None or self.password is not None:
+                raise ValueError(
+                    "Docker registry auth config must use either identity token or username/password"
+                )
+            return
+        if not isinstance(self.username, str) or not self.username.strip():
+            raise ValueError("Docker registry auth config username must not be empty")
+        if not isinstance(self.password, SecretValue):
+            raise TypeError("Docker registry auth config password must be SecretValue")
+
+    def docker_auth_config(self) -> Mapping[str, str]:
+        if self.identitytoken is not None:
+            return {"identitytoken": self.identitytoken.reveal()}
+        assert self.username is not None
+        assert self.password is not None
+        return {"username": self.username, "password": self.password.reveal()}
+
+    def __repr__(self) -> str:
+        return "DockerRegistryAuthConfig(<redacted>)"
+
+
 @dataclass(frozen=True)
 class DockerSdkResourceInspection:
     name: str
@@ -145,8 +178,19 @@ class DockerSdkClient:
     def create_volume(self, *, name: str, labels: Mapping[str, str]) -> None:
         self.client.volumes.create(name=name, labels=dict(labels))
 
-    def pull_image(self, image: str) -> None:
-        self.client.images.pull(image)
+    def pull_image(
+        self,
+        image: str,
+        *,
+        auth_config: DockerRegistryAuthConfig | None = None,
+    ) -> None:
+        if auth_config is None:
+            self.client.images.pull(image)
+            return
+        self.client.images.pull(
+            image,
+            auth_config=dict(auth_config.docker_auth_config()),
+        )
 
     def inspect_container(self, name: str) -> DockerSdkResourceInspection | None:
         try:

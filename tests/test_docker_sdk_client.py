@@ -17,6 +17,7 @@ from control_plane_kit_core.secrets import SecretFileMode, SecretValue
 from control_plane_kit_core.types import Protocol, Transport
 
 from control_plane_kit_interpreters.docker.sdk import (
+    DockerRegistryAuthConfig,
     DockerSdkClient,
     DockerSdkConfigurationMount,
     DockerSdkPortBinding,
@@ -115,7 +116,7 @@ class FakeManager:
         self.created: list[dict[str, object]] = []
         self.created_containers: list[FakeResource] = []
         self.volume_archives: dict[str, dict[str, bytes]] = {}
-        self.pulled: list[str] = []
+        self.pulled: list[object] = []
 
     def get(self, name: str) -> FakeResource:
         try:
@@ -145,8 +146,8 @@ class FakeManager:
         self.created.append({"image": image, **kwargs})
         return resource
 
-    def pull(self, image: str) -> None:
-        self.pulled.append(image)
+    def pull(self, image: str, **kwargs: object) -> None:
+        self.pulled.append({"image": image, **kwargs})
 
 
 class FakeDockerClient:
@@ -318,7 +319,7 @@ assert "docker" not in sys.modules
         )
         self.assertEqual(
             fake_client.images.pulled,
-            ["ghcr.io/openj92/example@sha256:abc"],
+            [{"image": "ghcr.io/openj92/example@sha256:abc"}],
         )
         self.assertEqual(
             fake_client.containers.created,
@@ -359,6 +360,37 @@ assert "docker" not in sys.modules
             [{"container": "web", "aliases": ["web", "api"]}],
         )
         self.assertTrue(fake_client.containers.resources["web"].started)
+
+    def test_pull_image_passes_bounded_auth_config_to_sdk_boundary(self) -> None:
+        fake_client = FakeDockerClient()
+        sdk = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
+        )
+        auth = DockerRegistryAuthConfig(
+            username="cpk",
+            password=SecretValue("registry-token-not-for-evidence"),
+        )
+
+        sdk.pull_image(
+            "ghcr.io/openj92/private@sha256:" + "c" * 64,
+            auth_config=auth,
+        )
+
+        self.assertEqual(
+            fake_client.images.pulled,
+            [
+                {
+                    "image": "ghcr.io/openj92/private@sha256:" + "c" * 64,
+                    "auth_config": {
+                        "username": "cpk",
+                        "password": "registry-token-not-for-evidence",
+                    },
+                }
+            ],
+        )
+        self.assertNotIn("registry-token-not-for-evidence", repr(auth))
+        self.assertNotIn("registry-token-not-for-evidence", repr(sdk))
 
     def test_container_and_network_lifecycle_delegate_to_sdk_resources(self) -> None:
         fake_client = FakeDockerClient()

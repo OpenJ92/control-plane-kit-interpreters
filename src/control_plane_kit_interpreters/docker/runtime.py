@@ -35,6 +35,7 @@ from control_plane_kit_core.verification import (
 )
 
 from control_plane_kit_interpreters.docker.sdk import (
+    DockerRegistryAuthConfig,
     DockerSdkClient,
     DockerSdkConfigurationMount,
     DockerSdkPortBinding,
@@ -42,6 +43,12 @@ from control_plane_kit_interpreters.docker.sdk import (
     verify_published_ports,
 )
 from control_plane_kit_interpreters.probes.security import ProbeAddressPolicy
+from control_plane_kit_interpreters.secrets import (
+    ImagePullCredentialDenied,
+    ImagePullCredentialMissing,
+    ImagePullCredentialResolved,
+    ImagePullCredentialResolver,
+)
 from control_plane_kit_interpreters.verification import (
     HttpVerificationInterpreter,
     VerificationCheckMaterial,
@@ -58,6 +65,7 @@ class DockerRuntimeInterpreter:
 
     client: DockerSdkClient
     http_transport: object | None = None
+    image_pull_credentials: ImagePullCredentialResolver | None = None
 
     def execute(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         if not isinstance(request, RuntimeEffectRequest):
@@ -182,6 +190,7 @@ class DockerRuntimeInterpreter:
     def _start_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         material = _single_product(request)
         _reject_unresolved_secret_deliveries(material)
+        auth_config = _image_pull_auth_config(material, self.image_pull_credentials)
         runtime_id = material.runtime_id
         network_name = _network_name(request, runtime_id)
         runtime_labels = _runtime_labels(request, runtime_id)
@@ -195,7 +204,13 @@ class DockerRuntimeInterpreter:
         labels = _node_labels(request, material)
         inspection = self.client.inspect_container(container_name)
         if inspection is None:
-            self._create_node_container(request, material, container_name, labels)
+            self._create_node_container(
+                request,
+                material,
+                container_name,
+                labels,
+                auth_config,
+            )
             action = "created"
         else:
             _require_owned(inspection.labels, labels, "container")
@@ -236,6 +251,7 @@ class DockerRuntimeInterpreter:
     def _reconcile_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         material = _single_product(request)
         _reject_unresolved_secret_deliveries(material)
+        auth_config = _image_pull_auth_config(material, self.image_pull_credentials)
         runtime_id = material.runtime_id
         network_name = _network_name(request, runtime_id)
         runtime_labels = _runtime_labels(request, runtime_id)
@@ -249,7 +265,13 @@ class DockerRuntimeInterpreter:
         labels = _node_labels(request, material)
         inspection = self.client.inspect_container(container_name)
         if inspection is None:
-            self._create_node_container(request, material, container_name, labels)
+            self._create_node_container(
+                request,
+                material,
+                container_name,
+                labels,
+                auth_config,
+            )
             action = "created"
         elif _fingerprint_matches(inspection.labels, labels):
             _require_owned(inspection.labels, labels, "container")
@@ -261,7 +283,13 @@ class DockerRuntimeInterpreter:
         else:
             _require_node_owner(inspection.labels, labels, "container")
             self.client.remove_container(container_name)
-            self._create_node_container(request, material, container_name, labels)
+            self._create_node_container(
+                request,
+                material,
+                container_name,
+                labels,
+                auth_config,
+            )
             action = "recreated"
 
         published = ()
@@ -437,6 +465,7 @@ class DockerRuntimeInterpreter:
         material: RuntimeProductMaterial,
         container_name: str,
         labels: Mapping[str, str],
+        auth_config: DockerRegistryAuthConfig | None,
     ) -> None:
         contract = material.product.runtime_contract
         retained_volumes = {
@@ -482,7 +511,10 @@ class DockerRuntimeInterpreter:
             else:
                 _require_node_owner(inspection.labels, volume_labels, "retained volume")
 
-        self.client.pull_image(material.product.image.execution_reference)
+        self.client.pull_image(
+            material.product.image.execution_reference,
+            auth_config=auth_config,
+        )
         self.client.run_container(
             name=container_name,
             image=material.product.image.execution_reference,
@@ -580,6 +612,48 @@ def _single_product(request: RuntimeEffectRequest) -> RuntimeProductMaterial:
         )
     return request.products[0]
 
+
+
+def _image_pull_auth_config(
+    material: RuntimeProductMaterial,
+    resolver: ImagePullCredentialResolver | None,
+) -> DockerRegistryAuthConfig | None:
+    authority = material.pull_authority
+    if authority is None:
+        return None
+    if not authority.permits(material.product.image):
+        raise _DockerInterpreterPreconditionError(
+            "docker.image-pull-authority-scope-mismatch",
+            "image pull authority does not cover product image",
+        )
+    if resolver is None:
+        raise _DockerInterpreterPreconditionError(
+            "docker.image-pull-authority-required",
+            "image pull authority requires a configured credential resolver",
+        )
+    result = resolver.resolve(authority)
+    match result:
+        case ImagePullCredentialResolved(credential=credential):
+            return DockerRegistryAuthConfig(
+                username=credential.username,
+                password=credential.password,
+                identitytoken=credential.identitytoken,
+            )
+        case ImagePullCredentialMissing():
+            raise _DockerInterpreterPreconditionError(
+                "docker.image-pull-credential-missing",
+                "image pull credential could not be resolved",
+            )
+        case ImagePullCredentialDenied():
+            raise _DockerInterpreterPreconditionError(
+                "docker.image-pull-credential-denied",
+                "image pull credential is outside interpreter authority",
+            )
+        case _:
+            raise _DockerInterpreterPreconditionError(
+                "docker.image-pull-credential-malformed",
+                "image pull credential resolver returned malformed result",
+            )
 
 def _runtime_target(operation: ActivityOperation) -> str:
     target = getattr(operation, "target", None)
