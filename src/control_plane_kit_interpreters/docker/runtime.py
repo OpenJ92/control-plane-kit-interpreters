@@ -603,7 +603,7 @@ class DockerRuntimeInterpreter:
             environment=_container_environment(
                 {
                     binding.name: binding.value
-                    for binding in contract.public_environment
+                    for binding in material.public_environment
                 },
                 {
                     binding.name: binding.value

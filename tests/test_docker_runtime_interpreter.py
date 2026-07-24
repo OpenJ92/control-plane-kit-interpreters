@@ -219,6 +219,33 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
             },
         )
 
+    def test_start_node_uses_selected_public_environment_material(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+
+        result = interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(
+                    _material(
+                        _product(),
+                        public_environment=(
+                            PublicStaticEnvironmentBinding("PORT", "9090"),
+                        ),
+                    ),
+                ),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        container = _workload_container_record(fake_client)
+        self.assertEqual(container["environment"], {"PORT": "9090"})
+
     def test_start_node_uses_existing_owned_runtime_network_from_prior_graph(self) -> None:
         fake_client = FakeDockerClient()
         interpreter = DockerRuntimeInterpreter(
@@ -913,6 +940,7 @@ def _request(
 def _material(
     product: ContainerServerProduct,
     *,
+    public_environment: tuple[PublicStaticEnvironmentBinding, ...] | None = None,
     socket_environment: tuple[SocketDerivedEnvironmentBinding, ...] = (),
     pull_authority: ImagePullAuthority | None = None,
 ) -> RuntimeProductMaterial:
@@ -925,6 +953,11 @@ def _material(
         runtime_id="docker",
         reference=reference,
         product=product,
+        public_environment=(
+            product.runtime_contract.public_environment
+            if public_environment is None
+            else public_environment
+        ),
         socket_environment=socket_environment,
         pull_authority=pull_authority,
     )
