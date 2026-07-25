@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from control_plane_kit_interpreters.docker.sdk import (
+    DockerLocalAmbientClientConfig,
     DockerRegistryAuthConfig,
+    DockerSdkBindMount,
     DockerSdkClient,
     DockerSdkConfigurationMount,
     DockerSdkPortBinding,
@@ -16,7 +18,9 @@ from control_plane_kit_interpreters.docker.runtime import DockerRuntimeInterpret
 
 __all__ = [
     "DockerRegistryAuthConfig",
+    "DockerLocalAmbientClientConfig",
     "DockerRuntimeInterpreter",
+    "DockerSdkBindMount",
     "DockerSdkClient",
     "DockerSdkConfigurationMount",
     "DockerSdkPortBinding",
