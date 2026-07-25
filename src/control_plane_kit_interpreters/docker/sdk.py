@@ -23,6 +23,14 @@ from control_plane_kit_core.types import Protocol, Transport
 
 
 @dataclass(frozen=True, repr=False)
+class DockerLocalAmbientClientConfig:
+    """Explicit local Docker authority material using the process Docker context."""
+
+    def __repr__(self) -> str:
+        return "DockerLocalAmbientClientConfig()"
+
+
+@dataclass(frozen=True, repr=False)
 class DockerTlsClientConfig:
     """Ephemeral remote Docker TLS client material with redacted representation."""
 
@@ -164,6 +172,7 @@ class DockerSdkClient:
     client: Any | None = None
     docker_module: Any | None = None
     tls_config: DockerTlsClientConfig | None = field(default=None, repr=False)
+    connect_on_init: bool = field(default=True, repr=False)
     _tls_directory: tempfile.TemporaryDirectory[str] | None = field(default=None, init=False, repr=False)
     configuration_helper_image: str = (
         "python:3.14-slim@sha256:"
@@ -171,18 +180,50 @@ class DockerSdkClient:
     )
 
     def __post_init__(self) -> None:
-        if self.client is not None:
-            return
-
         docker_module = self.docker_module
         if docker_module is None:
             docker_module = import_module("docker")
 
         self.docker_module = docker_module
+        if self.client is not None or not self.connect_on_init:
+            return
+
+        self.client = self._connect()
+
+    @classmethod
+    def from_authority(
+        cls,
+        authority: DockerLocalAmbientClientConfig | DockerTlsClientConfig,
+        *,
+        docker_module: Any | None = None,
+        connect_on_init: bool = True,
+    ) -> "DockerSdkClient":
+        if isinstance(authority, DockerLocalAmbientClientConfig):
+            return cls(
+                docker_module=docker_module,
+                connect_on_init=connect_on_init,
+            )
+        if isinstance(authority, DockerTlsClientConfig):
+            return cls(
+                docker_module=docker_module,
+                tls_config=authority,
+                connect_on_init=connect_on_init,
+            )
+        raise TypeError("Docker SDK client authority is unsupported")
+
+    def _connect(self) -> Any:
+        docker_module = self.docker_module
+        if docker_module is None:
+            docker_module = import_module("docker")
+            self.docker_module = docker_module
         if self.tls_config is None:
-            self.client = docker_module.from_env()
-        else:
-            self.client = self._remote_tls_client(docker_module, self.tls_config)
+            return docker_module.from_env()
+        return self._remote_tls_client(docker_module, self.tls_config)
+
+    def _client(self) -> Any:
+        if self.client is None:
+            self.client = self._connect()
+        return self.client
 
     def _remote_tls_client(
         self,
@@ -215,7 +256,7 @@ class DockerSdkClient:
 
     def inspect_network(self, name: str) -> DockerSdkResourceInspection | None:
         try:
-            network = self.client.networks.get(name)
+            network = self._client().networks.get(name)
         except Exception as error:
             if self._is_not_found(error):
                 return None
@@ -224,11 +265,11 @@ class DockerSdkClient:
         return self._inspection(network, running=False, image=None)
 
     def create_network(self, *, name: str, labels: Mapping[str, str]) -> None:
-        self.client.networks.create(name=name, labels=dict(labels))
+        self._client().networks.create(name=name, labels=dict(labels))
 
     def inspect_volume(self, name: str) -> DockerSdkResourceInspection | None:
         try:
-            volume = self.client.volumes.get(name)
+            volume = self._client().volumes.get(name)
         except Exception as error:
             if self._is_not_found(error):
                 return None
@@ -237,7 +278,7 @@ class DockerSdkClient:
         return self._inspection(volume, running=False, image=None)
 
     def create_volume(self, *, name: str, labels: Mapping[str, str]) -> None:
-        self.client.volumes.create(name=name, labels=dict(labels))
+        self._client().volumes.create(name=name, labels=dict(labels))
 
     def pull_image(
         self,
@@ -246,16 +287,16 @@ class DockerSdkClient:
         auth_config: DockerRegistryAuthConfig | None = None,
     ) -> None:
         if auth_config is None:
-            self.client.images.pull(image)
+            self._client().images.pull(image)
             return
-        self.client.images.pull(
+        self._client().images.pull(
             image,
             auth_config=dict(auth_config.docker_auth_config()),
         )
 
     def inspect_container(self, name: str) -> DockerSdkResourceInspection | None:
         try:
-            container = self.client.containers.get(name)
+            container = self._client().containers.get(name)
         except Exception as error:
             if self._is_not_found(error):
                 return None
@@ -313,8 +354,8 @@ class DockerSdkClient:
         }
         if command:
             kwargs["command"] = list(command)
-        container = self.client.containers.create(image, **kwargs)
-        self.client.networks.get(network).connect(container, aliases=list(aliases))
+        container = self._client().containers.create(image, **kwargs)
+        self._client().networks.get(network).connect(container, aliases=list(aliases))
         container.start()
 
     def materialize_configuration_artifact(
@@ -394,19 +435,19 @@ class DockerSdkClient:
         return self.configuration_artifact_digest(volume_name)
 
     def start_container(self, name: str) -> None:
-        self.client.containers.get(name).start()
+        self._client().containers.get(name).start()
 
     def stop_container(self, name: str) -> None:
-        self.client.containers.get(name).stop()
+        self._client().containers.get(name).stop()
 
     def remove_container(self, name: str) -> None:
-        self.client.containers.get(name).remove(force=True)
+        self._client().containers.get(name).remove(force=True)
 
     def remove_network(self, name: str) -> None:
-        self.client.networks.get(name).remove()
+        self._client().networks.get(name).remove()
 
     def remove_volume(self, name: str) -> None:
-        self.client.volumes.get(name).remove()
+        self._client().volumes.get(name).remove()
 
     def _create_configuration_helper(
         self,
@@ -414,7 +455,7 @@ class DockerSdkClient:
         *,
         readonly: bool,
     ) -> Any:
-        return self.client.containers.create(
+        return self._client().containers.create(
             self.configuration_helper_image,
             command=["sleep", "30"],
             detach=True,

@@ -17,6 +17,7 @@ from control_plane_kit_core.secrets import SecretFileMode, SecretValue
 from control_plane_kit_core.types import Protocol, Transport
 
 from control_plane_kit_interpreters.docker.sdk import (
+    DockerLocalAmbientClientConfig,
     DockerRegistryAuthConfig,
     DockerSdkClient,
     DockerSdkConfigurationMount,
@@ -190,6 +191,7 @@ class DockerSdkClientTests(unittest.TestCase):
                 "configuration_artifact_digest",
                 "create_network",
                 "create_volume",
+                "from_authority",
                 "inspect_container",
                 "inspect_network",
                 "inspect_volume",
@@ -229,6 +231,23 @@ assert "docker" not in sys.modules
 
         self.assertIs(client.client, fake_client)
 
+    def test_from_authority_can_defer_local_ambient_connection_until_effect(self) -> None:
+        fake_client = FakeDockerClient()
+        fake_module = FakeDockerModule(fake_client)
+        client = DockerSdkClient.from_authority(
+            DockerLocalAmbientClientConfig(),
+            docker_module=fake_module,
+            connect_on_init=False,
+        )
+
+        self.assertIsNone(client.client)
+        self.assertEqual(fake_module.from_env_calls, 0)
+
+        self.assertIsNone(client.inspect_network("missing"))
+
+        self.assertIs(client.client, fake_client)
+        self.assertEqual(fake_module.from_env_calls, 1)
+
     def test_tls_client_creation_uses_docker_client_without_leaking_secret_material(self) -> None:
         fake_client = FakeDockerClient()
         fake_module = FakeDockerModule(fake_client)
@@ -239,7 +258,10 @@ assert "docker" not in sys.modules
             client_key=SecretValue("client-key-secret"),
         )
 
-        client = DockerSdkClient(docker_module=fake_module, tls_config=config)
+        client = DockerSdkClient.from_authority(
+            config,
+            docker_module=fake_module,
+        )
 
         self.assertIs(client.client, fake_client)
         self.assertEqual(fake_module.from_env_calls, 0)

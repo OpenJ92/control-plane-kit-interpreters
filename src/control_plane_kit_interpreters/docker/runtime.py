@@ -42,6 +42,7 @@ from control_plane_kit_core.verification import (
 )
 
 from control_plane_kit_interpreters.docker.sdk import (
+    DockerLocalAmbientClientConfig,
     DockerRegistryAuthConfig,
     DockerSdkClient,
     DockerTlsClientConfig,
@@ -746,7 +747,10 @@ def _client_for_runtime_authority(
         )
     authority_kind = _authority_value(getattr(authority, "authority_kind", None))
     if authority_kind == "local-docker-socket":
-        return ambient_client
+        return DockerSdkClient.from_authority(
+            DockerLocalAmbientClientConfig(),
+            docker_module=ambient_client.docker_module,
+        )
     if authority_kind != "remote-docker-tls":
         raise _DockerInterpreterUnsupportedAuthorityError(
             "docker.runtime-authority-kind-unsupported"
@@ -775,14 +779,14 @@ def _client_for_runtime_authority(
         resolver,
         getattr(material, "client_key", None),
     )
-    return DockerSdkClient(
-        docker_module=ambient_client.docker_module,
-        tls_config=DockerTlsClientConfig(
+    return DockerSdkClient.from_authority(
+        DockerTlsClientConfig(
             endpoint=endpoint,
             ca_certificate=ca_certificate,
             client_certificate=client_certificate,
             client_key=client_key,
         ),
+        docker_module=ambient_client.docker_module,
     )
 
 
