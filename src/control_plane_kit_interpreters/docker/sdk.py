@@ -341,6 +341,7 @@ class DockerSdkClient:
         configuration_mounts: Sequence[DockerSdkConfigurationMount] = (),
         secret_mounts: Sequence[DockerSdkSecretMount] = (),
         bind_mounts: Sequence[DockerSdkBindMount] = (),
+        supplementary_groups: Sequence[str] = (),
         port_bindings: Sequence[DockerSdkPortBinding] = (),
     ) -> None:
         mounts = {
@@ -381,6 +382,8 @@ class DockerSdkClient:
         }
         if command:
             kwargs["command"] = list(command)
+        if supplementary_groups:
+            kwargs["group_add"] = list(supplementary_groups)
         container = self._client().containers.create(image, **kwargs)
         self._client().networks.get(network).connect(container, aliases=list(aliases))
         container.start()

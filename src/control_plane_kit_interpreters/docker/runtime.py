@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import hashlib
+import os
 import re
 import time
 from typing import Mapping
@@ -76,6 +77,12 @@ _LOCAL_DOCKER_SOCKET_PATH = "/var/run/docker.sock"
 
 _LABEL_PREFIX = "org.openj92.cpk"
 _SEGMENT = re.compile(r"[^a-zA-Z0-9_.-]+")
+
+
+@dataclass(frozen=True)
+class _AuthorityDeliveryMaterial:
+    mounts: tuple[DockerSdkBindMount, ...] = ()
+    supplementary_groups: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -239,7 +246,7 @@ class DockerRuntimeInterpreter:
 
     def _start_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         material = _single_product(request)
-        authority_delivery_mounts = _authority_delivery_mounts(request)
+        authority_delivery = _authority_delivery_material(request)
         secrets = _resolve_product_secret_deliveries(material, self.secret_resolver)
         auth_config = _image_pull_auth_config(material, self.image_pull_credentials)
         runtime_id = material.runtime_id
@@ -262,7 +269,7 @@ class DockerRuntimeInterpreter:
                 labels,
                 auth_config,
                 secrets,
-                authority_delivery_mounts,
+                authority_delivery,
             )
             action = "created"
         else:
@@ -303,7 +310,7 @@ class DockerRuntimeInterpreter:
 
     def _reconcile_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         material = _single_product(request)
-        authority_delivery_mounts = _authority_delivery_mounts(request)
+        authority_delivery = _authority_delivery_material(request)
         secrets = _resolve_product_secret_deliveries(material, self.secret_resolver)
         auth_config = _image_pull_auth_config(material, self.image_pull_credentials)
         runtime_id = material.runtime_id
@@ -326,7 +333,7 @@ class DockerRuntimeInterpreter:
                 labels,
                 auth_config,
                 secrets,
-                authority_delivery_mounts,
+                authority_delivery,
             )
             action = "created"
         elif _fingerprint_matches(inspection.labels, labels):
@@ -346,7 +353,7 @@ class DockerRuntimeInterpreter:
                 labels,
                 auth_config,
                 secrets,
-                authority_delivery_mounts,
+                authority_delivery,
             )
             action = "recreated"
 
@@ -557,7 +564,7 @@ class DockerRuntimeInterpreter:
         labels: Mapping[str, str],
         auth_config: DockerRegistryAuthConfig | None,
         secrets: ResolvedSecretDeliveries,
-        authority_delivery_mounts: tuple[DockerSdkBindMount, ...],
+        authority_delivery: _AuthorityDeliveryMaterial,
     ) -> None:
         contract = material.product.runtime_contract
         retained_volumes = {
@@ -661,7 +668,8 @@ class DockerRuntimeInterpreter:
             volumes=retained_volumes,
             configuration_mounts=tuple(configuration_mounts),
             secret_mounts=tuple(secret_mounts),
-            bind_mounts=authority_delivery_mounts,
+            bind_mounts=authority_delivery.mounts,
+            supplementary_groups=authority_delivery.supplementary_groups,
             port_bindings=(),
         )
 
@@ -803,10 +811,11 @@ def _client_for_runtime_authority(
     )
 
 
-def _authority_delivery_mounts(
+def _authority_delivery_material(
     request: RuntimeEffectRequest,
-) -> tuple[DockerSdkBindMount, ...]:
+) -> _AuthorityDeliveryMaterial:
     mounts = []
+    supplementary_groups = []
     for delivery in request.authority_deliveries:
         if (
             delivery.delivery_kind
@@ -819,11 +828,25 @@ def _authority_delivery_mounts(
                     read_only=False,
                 )
             )
+            supplementary_groups.append(_local_docker_socket_group())
             continue
         raise _DockerInterpreterUnsupportedAuthorityError(
             "docker.runtime-authority-delivery-unsupported"
         )
-    return tuple(mounts)
+    return _AuthorityDeliveryMaterial(
+        mounts=tuple(mounts),
+        supplementary_groups=tuple(supplementary_groups),
+    )
+
+
+def _local_docker_socket_group() -> str:
+    try:
+        return str(os.stat(_LOCAL_DOCKER_SOCKET_PATH).st_gid)
+    except OSError as error:
+        raise _DockerInterpreterPreconditionError(
+            "docker.local-socket-delivery-unavailable",
+            "local Docker socket delivery requires an accessible Docker socket",
+        ) from error
 
 
 def _resolve_runtime_authority_secret(
