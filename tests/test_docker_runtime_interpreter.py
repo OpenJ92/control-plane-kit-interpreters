@@ -38,7 +38,11 @@ from control_plane_kit_core.products import (
     ProductRuntimeContract,
     ProviderRuntimePort,
 )
-from control_plane_kit_core.runtime_authority import RuntimeAuthorityReference
+from control_plane_kit_core.runtime_authority import (
+    RuntimeAuthorityAccessDelivery,
+    RuntimeAuthorityAccessDeliveryKind,
+    RuntimeAuthorityReference,
+)
 from control_plane_kit_core.runtime_effects import (
     ImagePullAuthority,
     RuntimeEffectKind,
@@ -875,6 +879,91 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertEqual(result.evidence["action"], "created")
         self.assertEqual(len(fake_client.networks.created), 1)
 
+    def test_local_runtime_authority_does_not_mount_socket_without_delivery(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+
+        result = interpreter.execute_with_authority(
+            _request(
+                StartNode(NodeTarget("api")),
+                authority_ref=RuntimeAuthorityReference("local-docker"),
+            ),
+            _local_runtime_authority(),
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(_bind_mounts(_workload_container_record(fake_client)), [])
+
+    def test_explicit_local_socket_delivery_mounts_socket_at_docker_boundary(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+        delivery = RuntimeAuthorityAccessDelivery(
+            RuntimeAuthorityReference("local-docker"),
+            RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT,
+        )
+
+        result = interpreter.execute_with_authority(
+            _request(
+                StartNode(NodeTarget("api")),
+                authority_ref=RuntimeAuthorityReference("local-docker"),
+                authority_deliveries=(delivery,),
+            ),
+            _local_runtime_authority(),
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(
+            _bind_mounts(_workload_container_record(fake_client)),
+            [
+                {
+                    "Type": "bind",
+                    "Source": "/var/run/docker.sock",
+                    "Target": "/var/run/docker.sock",
+                    "ReadOnly": False,
+                }
+            ],
+        )
+        self.assertNotIn("/var/run/docker.sock", repr(result.descriptor()))
+
+    def test_unsupported_authority_delivery_fails_without_docker_mutation(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+        delivery = RuntimeAuthorityAccessDelivery(
+            RuntimeAuthorityReference("local-docker"),
+            RuntimeAuthorityAccessDeliveryKind.CLOUD_CREDENTIAL_SECRET_SESSION,
+        )
+
+        result = interpreter.execute_with_authority(
+            _request(
+                StartNode(NodeTarget("api")),
+                authority_ref=RuntimeAuthorityReference("local-docker"),
+                authority_deliveries=(delivery,),
+            ),
+            _local_runtime_authority(),
+        )
+
+        self.assertIs(result.kind, EffectResultKind.UNSUPPORTED)
+        self.assertEqual(
+            result.failure.code,
+            "docker.runtime-authority-delivery-unsupported",
+        )
+        self.assertEqual(_workload_container_records(fake_client), [])
+
     def test_remote_tls_runtime_authority_resolves_secret_refs_before_docker_mutation(self) -> None:
         fake_client = FakeDockerClient()
         fake_module = FakeDockerModule(fake_client)
@@ -1128,6 +1217,7 @@ def _request(
     products: tuple[RuntimeProductMaterial, ...] | None = None,
     desired_graph_id: str = "graph-desired",
     authority_ref: RuntimeAuthorityReference | None = None,
+    authority_deliveries: tuple[RuntimeAuthorityAccessDelivery, ...] = (),
 ) -> RuntimeEffectRequest:
     return RuntimeEffectRequest(
         effect_id="effect-a",
@@ -1146,6 +1236,7 @@ def _request(
         operation=operation,
         products=(_material(_product()),) if products is None else products,
         authority_ref=authority_ref,
+        authority_deliveries=authority_deliveries,
     )
 
 
@@ -1334,6 +1425,12 @@ def _workload_container_records(fake_client: FakeDockerClient) -> list[dict[str,
         for record in fake_client.containers.created
         if record.get("image") == image
     ]
+
+
+def _bind_mounts(record: dict[str, object]) -> list[object]:
+    mounts = record.get("mounts")
+    assert isinstance(mounts, list)
+    return [mount for mount in mounts if isinstance(mount, dict) and mount.get("Type") == "bind"]
 
 
 if __name__ == "__main__":

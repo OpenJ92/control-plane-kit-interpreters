@@ -167,6 +167,25 @@ class DockerSdkSecretMount:
         }
 
 
+@dataclass(frozen=True)
+class DockerSdkBindMount:
+    source_path: str
+    target_path: str
+    read_only: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_absolute_path(self.source_path, "Docker bind mount source")
+        _validate_absolute_path(self.target_path, "Docker bind mount target")
+
+    def docker_mount(self) -> Mapping[str, object]:
+        return {
+            "Type": "bind",
+            "Source": self.source_path,
+            "Target": self.target_path,
+            "ReadOnly": self.read_only,
+        }
+
+
 @dataclass
 class DockerSdkClient:
     client: Any | None = None
@@ -321,6 +340,7 @@ class DockerSdkClient:
         command: Sequence[str] = (),
         configuration_mounts: Sequence[DockerSdkConfigurationMount] = (),
         secret_mounts: Sequence[DockerSdkSecretMount] = (),
+        bind_mounts: Sequence[DockerSdkBindMount] = (),
         port_bindings: Sequence[DockerSdkPortBinding] = (),
     ) -> None:
         mounts = {
@@ -345,6 +365,13 @@ class DockerSdkClient:
                 for mount in sorted(
                     secret_mounts,
                     key=lambda value: value.target_path,
+                )
+            ]
+            + [
+                dict(mount.docker_mount())
+                for mount in sorted(
+                    bind_mounts,
+                    key=lambda value: (value.target_path, value.source_path),
                 )
             ],
             "ports": {
@@ -720,6 +747,13 @@ def _validate_host_address(value: str) -> None:
         ip_address(value)
     except ValueError as error:
         raise ValueError("Docker host address must be an IP address") from error
+
+
+def _validate_absolute_path(value: str, label: str) -> None:
+    if not isinstance(value, str) or not value.startswith("/") or "\x00" in value:
+        raise ValueError(f"{label} must be an absolute path")
+    if "://" in value:
+        raise ValueError(f"{label} must not be a URL")
 
 
 def _validate_port(value: int, label: str) -> None:

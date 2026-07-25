@@ -19,6 +19,7 @@ from control_plane_kit_core.types import Protocol, Transport
 from control_plane_kit_interpreters.docker.sdk import (
     DockerLocalAmbientClientConfig,
     DockerRegistryAuthConfig,
+    DockerSdkBindMount,
     DockerSdkClient,
     DockerSdkConfigurationMount,
     DockerSdkPortBinding,
@@ -432,6 +433,43 @@ assert "docker" not in sys.modules
             [{"container": "web", "aliases": ["web", "api"]}],
         )
         self.assertTrue(fake_client.containers.resources["web"].started)
+
+    def test_bind_mounts_are_explicit_create_container_material(self) -> None:
+        fake_client = FakeDockerClient()
+        sdk = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
+        )
+        sdk.create_network(name="cpk-net", labels={"cpk.workspace": "w"})
+
+        sdk.run_container(
+            name="web",
+            image="ghcr.io/openj92/example@sha256:abc",
+            network="cpk-net",
+            aliases=("web",),
+            environment={},
+            labels={"cpk.workspace": "w"},
+            volumes={},
+            bind_mounts=(
+                DockerSdkBindMount(
+                    "/var/run/docker.sock",
+                    "/var/run/docker.sock",
+                    read_only=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(
+            fake_client.containers.created[0]["mounts"],
+            [
+                {
+                    "Type": "bind",
+                    "Source": "/var/run/docker.sock",
+                    "Target": "/var/run/docker.sock",
+                    "ReadOnly": False,
+                }
+            ],
+        )
 
     def test_pull_image_passes_bounded_auth_config_to_sdk_boundary(self) -> None:
         fake_client = FakeDockerClient()

@@ -19,6 +19,7 @@ from control_plane_kit_core.planning import (
     WaitForHealthy,
 )
 from control_plane_kit_core.probe_intents import LiteralEndpointMaterial
+from control_plane_kit_core.runtime_authority import RuntimeAuthorityAccessDeliveryKind
 from control_plane_kit_core.runtime_effects import (
     RuntimeEffectFailure,
     RuntimeEffectKind,
@@ -44,6 +45,7 @@ from control_plane_kit_core.verification import (
 from control_plane_kit_interpreters.docker.sdk import (
     DockerLocalAmbientClientConfig,
     DockerRegistryAuthConfig,
+    DockerSdkBindMount,
     DockerSdkClient,
     DockerTlsClientConfig,
     DockerSdkConfigurationMount,
@@ -68,6 +70,8 @@ from control_plane_kit_interpreters.verification import (
     PostgresVerificationInterpreter,
     VerificationCheckMaterial,
 )
+
+_LOCAL_DOCKER_SOCKET_PATH = "/var/run/docker.sock"
 
 
 _LABEL_PREFIX = "org.openj92.cpk"
@@ -117,6 +121,8 @@ class DockerRuntimeInterpreter:
                         request,
                         "docker.unsupported-activity-operation",
                     )
+        except _DockerInterpreterUnsupportedAuthorityError as error:
+            return _unsupported(request, error.code)
         except _DockerInterpreterPreconditionError as error:
             return _failed(request, error.code, str(error))
         except Exception as error:
@@ -233,6 +239,7 @@ class DockerRuntimeInterpreter:
 
     def _start_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         material = _single_product(request)
+        authority_delivery_mounts = _authority_delivery_mounts(request)
         secrets = _resolve_product_secret_deliveries(material, self.secret_resolver)
         auth_config = _image_pull_auth_config(material, self.image_pull_credentials)
         runtime_id = material.runtime_id
@@ -255,6 +262,7 @@ class DockerRuntimeInterpreter:
                 labels,
                 auth_config,
                 secrets,
+                authority_delivery_mounts,
             )
             action = "created"
         else:
@@ -295,6 +303,7 @@ class DockerRuntimeInterpreter:
 
     def _reconcile_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         material = _single_product(request)
+        authority_delivery_mounts = _authority_delivery_mounts(request)
         secrets = _resolve_product_secret_deliveries(material, self.secret_resolver)
         auth_config = _image_pull_auth_config(material, self.image_pull_credentials)
         runtime_id = material.runtime_id
@@ -317,6 +326,7 @@ class DockerRuntimeInterpreter:
                 labels,
                 auth_config,
                 secrets,
+                authority_delivery_mounts,
             )
             action = "created"
         elif _fingerprint_matches(inspection.labels, labels):
@@ -336,6 +346,7 @@ class DockerRuntimeInterpreter:
                 labels,
                 auth_config,
                 secrets,
+                authority_delivery_mounts,
             )
             action = "recreated"
 
@@ -546,6 +557,7 @@ class DockerRuntimeInterpreter:
         labels: Mapping[str, str],
         auth_config: DockerRegistryAuthConfig | None,
         secrets: ResolvedSecretDeliveries,
+        authority_delivery_mounts: tuple[DockerSdkBindMount, ...],
     ) -> None:
         contract = material.product.runtime_contract
         retained_volumes = {
@@ -649,6 +661,7 @@ class DockerRuntimeInterpreter:
             volumes=retained_volumes,
             configuration_mounts=tuple(configuration_mounts),
             secret_mounts=tuple(secret_mounts),
+            bind_mounts=authority_delivery_mounts,
             port_bindings=(),
         )
 
@@ -788,6 +801,29 @@ def _client_for_runtime_authority(
         ),
         docker_module=ambient_client.docker_module,
     )
+
+
+def _authority_delivery_mounts(
+    request: RuntimeEffectRequest,
+) -> tuple[DockerSdkBindMount, ...]:
+    mounts = []
+    for delivery in request.authority_deliveries:
+        if (
+            delivery.delivery_kind
+            is RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT
+        ):
+            mounts.append(
+                DockerSdkBindMount(
+                    source_path=_LOCAL_DOCKER_SOCKET_PATH,
+                    target_path=_LOCAL_DOCKER_SOCKET_PATH,
+                    read_only=False,
+                )
+            )
+            continue
+        raise _DockerInterpreterUnsupportedAuthorityError(
+            "docker.runtime-authority-delivery-unsupported"
+        )
+    return tuple(mounts)
 
 
 def _resolve_runtime_authority_secret(
