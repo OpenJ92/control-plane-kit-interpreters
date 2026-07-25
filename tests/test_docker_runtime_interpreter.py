@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import socket
 import unittest
+from unittest.mock import patch
 
 import httpx
 
@@ -912,18 +913,23 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
             RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT,
         )
 
-        result = interpreter.execute_with_authority(
-            _request(
-                StartNode(NodeTarget("api")),
-                authority_ref=RuntimeAuthorityReference("local-docker"),
-                authority_deliveries=(delivery,),
-            ),
-            _local_runtime_authority(),
-        )
+        with patch(
+            "control_plane_kit_interpreters.docker.runtime.os.stat",
+            return_value=type("SocketStat", (), {"st_gid": 987})(),
+        ):
+            result = interpreter.execute_with_authority(
+                _request(
+                    StartNode(NodeTarget("api")),
+                    authority_ref=RuntimeAuthorityReference("local-docker"),
+                    authority_deliveries=(delivery,),
+                ),
+                _local_runtime_authority(),
+            )
 
         self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        record = _workload_container_record(fake_client)
         self.assertEqual(
-            _bind_mounts(_workload_container_record(fake_client)),
+            _bind_mounts(record),
             [
                 {
                     "Type": "bind",
@@ -933,6 +939,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                 }
             ],
         )
+        self.assertEqual(record["group_add"], ["987"])
         self.assertNotIn("/var/run/docker.sock", repr(result.descriptor()))
 
     def test_unsupported_authority_delivery_fails_without_docker_mutation(self) -> None:

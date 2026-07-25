@@ -457,6 +457,7 @@ assert "docker" not in sys.modules
                     read_only=False,
                 ),
             ),
+            supplementary_groups=("987",),
         )
 
         self.assertEqual(
@@ -470,6 +471,7 @@ assert "docker" not in sys.modules
                 }
             ],
         )
+        self.assertEqual(fake_client.containers.created[0]["group_add"], ["987"])
 
     def test_pull_image_passes_bounded_auth_config_to_sdk_boundary(self) -> None:
         fake_client = FakeDockerClient()
