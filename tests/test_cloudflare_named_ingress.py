@@ -43,11 +43,13 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
         allocation = interpreter.create(
             _ingress(),
             authority=_authority(),
+            allocation_name="cpk-gateway-001-c0303ba7369e",
             origin_service_url="http://gateway:8000",
         )
 
         self.assertEqual(allocation.tunnel_id, "tunnel-001")
         self.assertEqual(allocation.dns_record_id, "dns-001")
+        self.assertEqual(allocation.tunnel_name, "cpk-gateway-001-c0303ba7369e")
         self.assertEqual(allocation.hostname, "cpk-gateway-001.openj92.dev")
         self.assertEqual(allocation.endpoint_url, "https://cpk-gateway-001.openj92.dev")
         self.assertEqual(allocation.tunnel_token.reveal(), TUNNEL_TOKEN)
@@ -68,7 +70,10 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
         tunnel_create = transport.requests[0]
         self.assertEqual(
             tunnel_create.json,
-            {"name": "cpk-gateway-001", "config_src": "cloudflare"},
+            {
+                "name": "cpk-gateway-001-c0303ba7369e",
+                "config_src": "cloudflare",
+            },
         )
         tunnel_config = transport.requests[1]
         self.assertEqual(
@@ -130,6 +135,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
             interpreter.create(
                 _ingress(),
                 authority=_authority(),
+                allocation_name="cpk-gateway-001-c0303ba7369e",
                 origin_service_url="http://gateway:8000",
             )
 
@@ -154,10 +160,29 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                     hostname="gateway-001.cpk.openj92.dev",
                 ),
                 authority=_authority(),
+                allocation_name="cpk-gateway-001-c0303ba7369e",
                 origin_service_url="http://gateway:8000",
             )
 
         self.assertIn("hostname", str(raised.exception))
+        self.assertEqual(transport.requests, [])
+
+    def test_allocation_name_fails_closed_before_api_mutation(self) -> None:
+        transport = FakeCloudflareTransport()
+        interpreter = CloudflareNamedIngressInterpreter(
+            transport=transport,
+            secret_resolver=_resolver(),
+        )
+
+        with self.assertRaises(CloudflareApiError) as raised:
+            interpreter.create(
+                _ingress(),
+                authority=_authority(),
+                allocation_name="cpk gateway 001",
+                origin_service_url="http://gateway:8000",
+            )
+
+        self.assertIn("allocation_name", str(raised.exception))
         self.assertEqual(transport.requests, [])
 
     def test_teardown_deletes_only_recorded_owned_resources(self) -> None:
@@ -196,6 +221,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
             interpreter.create(
                 _ingress(),
                 authority=_authority(),
+                allocation_name="cpk-gateway-001-c0303ba7369e",
                 origin_service_url="http://gateway:8000",
             )
 

@@ -146,12 +146,14 @@ class CloudflareNamedIngressInterpreter:
         ingress: NamedPublicIngress,
         *,
         authority: CloudflareZoneAuthority,
+        allocation_name: str,
         origin_service_url: str,
     ) -> CloudflareIngressAllocation:
         if not isinstance(ingress, NamedPublicIngress):
             raise CloudflareApiError("create requires NamedPublicIngress")
         if not isinstance(authority, CloudflareZoneAuthority):
             raise CloudflareApiError("create requires CloudflareZoneAuthority")
+        _validate_identifier(allocation_name, "allocation_name")
         _validate_origin_service(origin_service_url)
         if not authority.allows_hostname(ingress.hostname):
             raise CloudflareApiError("hostname is outside admitted authority policy")
@@ -170,7 +172,7 @@ class CloudflareNamedIngressInterpreter:
             api_token=api_token,
             transport=self.transport,
         )
-        tunnel_name = _tunnel_name(ingress)
+        tunnel_name = allocation_name
         tunnel_id = client.create_tunnel(tunnel_name)
         client.configure_tunnel(
             tunnel_id,
@@ -401,10 +403,6 @@ def _dns_record_body(hostname: str, content: str) -> dict[str, object]:
         "name": hostname,
         "content": content,
     }
-
-
-def _tunnel_name(ingress: NamedPublicIngress) -> str:
-    return f"cpk-{ingress.ingress_id}"
 
 
 def _result_text(body: Mapping[str, object], key: str) -> str:
