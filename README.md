@@ -121,6 +121,21 @@ transport, host address, and fixed host port when one was requested.
 contexts remain distinct; UDP publication is never inferred from TCP. Endpoint
 observations are evidence for operations to persist, not graph truth.
 
+## Cloudflare Named Ingress Interpreter
+
+`control_plane_kit_interpreters.cloudflare.CloudflareNamedIngressInterpreter`
+is the first provider-specific public ingress interpreter. Core remains
+provider-neutral around `NamedPublicIngress`, `PublicIngressTarget`,
+`IngressAuthorityReference`, and `PublicIngressObservation`. Operations owns
+durable ingress authority admission and resource evidence.
+
+The Cloudflare interpreter resolves the admitted API token reference only at the
+IO boundary, then constructs Cloudflare API calls to create a remotely managed
+tunnel, configure hostname ingress to a runtime-local gateway URL, upsert a DNS
+CNAME, retrieve the generated tunnel token, observe tunnel status, and delete
+only recorded owned resources. Generated tunnel-token delivery into the
+`cloudflared` connector is a separate activity-ordering concern.
+
 ## Probe And Verification Adapters
 
 `control_plane_kit_interpreters.probes` owns concrete address authorization,
