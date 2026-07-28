@@ -150,6 +150,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                     ingress_id="gateway-001",
                     authority_ref=IngressAuthorityReference("openj92-ingress"),
                     target=PublicIngressTarget("gateway", "control"),
+                    connector_node_id="cloudflared-gateway-001",
                     hostname="gateway-001.cpk.openj92.dev",
                 ),
                 authority=_authority(),
@@ -277,6 +278,7 @@ def _ingress() -> NamedPublicIngress:
         ingress_id="gateway-001",
         authority_ref=IngressAuthorityReference("openj92-ingress"),
         target=PublicIngressTarget("gateway", "control"),
+        connector_node_id="cloudflared-gateway-001",
         hostname="cpk-gateway-001.openj92.dev",
     )
 
