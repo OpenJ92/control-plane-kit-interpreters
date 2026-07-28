@@ -17,6 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cloudflare = [
+  "httpx>=0.28",
+]
 docker = [
   "docker>=7.1",
   "httpx>=0.28",
