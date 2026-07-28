@@ -19,7 +19,7 @@ from control_plane_kit_core.planning import (
     StopRuntime,
     WaitForHealthy,
 )
-from control_plane_kit_core.probe_intents import LiteralEndpointMaterial
+from control_plane_kit_core.probe_intents import EndpointContext, LiteralEndpointMaterial
 from control_plane_kit_core.runtime_authority import RuntimeAuthorityAccessDeliveryKind
 from control_plane_kit_core.runtime_effects import (
     RuntimeEffectFailure,
@@ -37,7 +37,9 @@ from control_plane_kit_core.secrets import (
 from control_plane_kit_core.types import RuntimeKind
 from control_plane_kit_core.verification import (
     HttpCheck,
+    HttpVerificationEvidence,
     PostgresQueryCheck,
+    VerificationCapability,
     VerificationCompleted,
     VerificationOutcome,
     VerificationUnsupported,
@@ -70,6 +72,7 @@ from control_plane_kit_interpreters.verification import (
     PostgresSelectOneTransport,
     PostgresVerificationInterpreter,
     VerificationCheckMaterial,
+    verification_identity,
 )
 
 _LOCAL_DOCKER_SOCKET_PATH = "/var/run/docker.sock"
@@ -470,6 +473,13 @@ class DockerRuntimeInterpreter:
         check: HttpCheck,
         endpoint,
     ):
+        if endpoint.context is EndpointContext.RUNTIME_PRIVATE:
+            return self._execute_runtime_private_http_health_check(
+                material,
+                request,
+                check,
+                endpoint,
+            )
         single_attempt = replace(
             check,
             policy=replace(check.policy, maximum_attempts=1),
@@ -502,6 +512,62 @@ class DockerRuntimeInterpreter:
         if isinstance(result, VerificationCompleted):
             return replace(result, attempts=check.policy.maximum_attempts)
         return result
+
+    def _execute_runtime_private_http_health_check(
+        self,
+        material: RuntimeProductMaterial,
+        request: RuntimeEffectRequest,
+        check: HttpCheck,
+        endpoint,
+    ):
+        materialized = VerificationCheckMaterial(
+            material.node_id,
+            request.source.desired_graph_id,
+            check,
+            endpoint,
+        )
+        result = None
+        for attempt in range(1, check.policy.maximum_attempts + 1):
+            if attempt > 1:
+                time.sleep(1)
+            probe = self.client.run_http_probe(
+                network=_network_name(request, material.runtime_id),
+                url=endpoint.address.value + check.path,
+                timeout_seconds=check.policy.timeout_seconds,
+                maximum_response_bytes=check.policy.maximum_evidence_bytes,
+            )
+            evidence = (
+                None
+                if probe.status_code is None
+                else HttpVerificationEvidence(
+                    probe.status_code,
+                    min(
+                        probe.response_size,
+                        check.policy.maximum_evidence_bytes,
+                    ),
+                )
+            )
+            if probe.timed_out:
+                outcome = VerificationOutcome.TIMED_OUT
+            elif probe.exit_code != 0 or probe.status_code is None:
+                outcome = VerificationOutcome.FAILED
+            elif probe.response_size > check.policy.maximum_evidence_bytes:
+                outcome = VerificationOutcome.MALFORMED
+            elif probe.status_code in check.expected_statuses:
+                outcome = VerificationOutcome.PASSED
+            else:
+                outcome = VerificationOutcome.FAILED
+            result = VerificationCompleted(
+                verification_identity(materialized),
+                VerificationCapability.HTTP,
+                outcome,
+                attempt,
+                evidence,
+            )
+            if result.outcome is VerificationOutcome.PASSED:
+                return result
+        assert result is not None
+        return replace(result, attempts=check.policy.maximum_attempts)
 
     def _execute_postgres_health_check(
         self,

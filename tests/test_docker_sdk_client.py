@@ -103,6 +103,8 @@ class FakeResource:
         self.archives: dict[str, bytes] = {}
         self.execs: list[list[str]] = []
         self.connections: list[dict[str, object]] = []
+        self.wait_result: object = {"StatusCode": 0}
+        self.log_output: bytes = b"200 3\n"
 
     def start(self) -> None:
         self.started = True
@@ -125,6 +127,12 @@ class FakeResource:
     def exec_run(self, command: list[str]) -> tuple[int, bytes]:
         self.execs.append(command)
         return (0, b"")
+
+    def wait(self, *, timeout: int | None = None) -> object:
+        return self.wait_result
+
+    def logs(self, *, stdout: bool, stderr: bool, tail: int) -> bytes:
+        return self.log_output
 
     def connect(self, container: FakeResource, *, aliases: list[str]) -> None:
         self.connections.append({"container": container.name, "aliases": aliases})
@@ -202,6 +210,7 @@ class DockerSdkClientTests(unittest.TestCase):
                 "remove_container",
                 "remove_network",
                 "remove_volume",
+                "run_http_probe",
                 "run_container",
                 "secret_file_digest",
                 "start_container",
@@ -225,6 +234,31 @@ assert "docker" not in sys.modules
         )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_http_probe_runs_bounded_helper_in_runtime_network(self) -> None:
+        fake_client = FakeDockerClient()
+        client = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
+        )
+
+        result = client.run_http_probe(
+            network="cpk-net-workspace-docker",
+            url="http://hello:8000/health/ready",
+            timeout_seconds=5.0,
+            maximum_response_bytes=128,
+        )
+
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.response_size, 3)
+        self.assertEqual(result.exit_code, 0)
+        helper = fake_client.containers.created[0]
+        self.assertEqual(helper["network"], "cpk-net-workspace-docker")
+        self.assertEqual(helper["read_only"], True)
+        self.assertEqual(helper["cap_drop"], ["ALL"])
+        self.assertEqual(helper["security_opt"], ["no-new-privileges"])
+        self.assertIn("http://hello:8000/health/ready", helper["command"])
+        self.assertTrue(fake_client.containers.created_containers[0].force_removed)
 
     def test_client_creation_lazily_uses_docker_from_env(self) -> None:
         fake_client = FakeDockerClient()
