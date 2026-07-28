@@ -186,6 +186,17 @@ class DockerSdkBindMount:
         }
 
 
+@dataclass(frozen=True)
+class DockerSdkHttpProbeResult:
+    status_code: int | None
+    response_size: int
+    exit_code: int
+
+    @property
+    def timed_out(self) -> bool:
+        return self.exit_code == 124
+
+
 @dataclass
 class DockerSdkClient:
     client: Any | None = None
@@ -478,6 +489,62 @@ class DockerSdkClient:
 
     def remove_volume(self, name: str) -> None:
         self._client().volumes.get(name).remove()
+
+    def run_http_probe(
+        self,
+        *,
+        network: str,
+        url: str,
+        timeout_seconds: float,
+        maximum_response_bytes: int,
+    ) -> DockerSdkHttpProbeResult:
+        if not isinstance(network, str) or not network.strip():
+            raise ValueError("HTTP probe network must not be empty")
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            raise ValueError("HTTP probe URL must be absolute")
+        timeout = max(1, min(int(timeout_seconds), 30))
+        maximum_bytes = max(0, min(int(maximum_response_bytes), 65536))
+        script = (
+            "import sys,urllib.request\n"
+            "url=sys.argv[1]\n"
+            "limit=int(sys.argv[2])\n"
+            "timeout=float(sys.argv[3])\n"
+            "try:\n"
+            "    with urllib.request.urlopen(url, timeout=timeout) as response:\n"
+            "        data=response.read(limit + 1)\n"
+            "        print(f'{response.status} {len(data)}')\n"
+            "except TimeoutError:\n"
+            "    sys.exit(124)\n"
+            "except Exception:\n"
+            "    sys.exit(1)\n"
+        )
+        helper = self._client().containers.create(
+            self.configuration_helper_image,
+            command=["python", "-c", script, url, str(maximum_bytes), str(timeout)],
+            detach=True,
+            name=f"cpk-http-probe-{uuid4().hex}",
+            network=network,
+            read_only=True,
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges"],
+        )
+        try:
+            helper.start()
+            wait_result = helper.wait(timeout=timeout + 2)
+            exit_code = _wait_status_code(wait_result)
+            output = _container_logs(helper, maximum_bytes=128).strip()
+        finally:
+            helper.remove(force=True)
+        status_code = None
+        response_size = 0
+        if exit_code == 0 and output:
+            parts = output.split(maxsplit=1)
+            try:
+                status_code = int(parts[0])
+                response_size = int(parts[1]) if len(parts) > 1 else 0
+            except ValueError:
+                exit_code = 1
+        return DockerSdkHttpProbeResult(status_code, response_size, exit_code)
 
     def _create_configuration_helper(
         self,
@@ -780,3 +847,22 @@ def _exit_code(result: Any) -> int:
     if value is None:
         raise RuntimeError("configuration helper returned malformed exec result")
     return int(value)
+
+
+def _wait_status_code(result: Any) -> int:
+    if isinstance(result, Mapping):
+        status = result.get("StatusCode")
+        if isinstance(status, int):
+            return status
+    if isinstance(result, int):
+        return result
+    raise RuntimeError("Docker wait result was malformed")
+
+
+def _container_logs(container: Any, *, maximum_bytes: int) -> str:
+    logs = container.logs(stdout=True, stderr=False, tail=1)
+    if isinstance(logs, bytes):
+        return logs[:maximum_bytes].decode("utf-8", errors="replace")
+    if isinstance(logs, str):
+        return logs[:maximum_bytes]
+    raise RuntimeError("Docker logs result was malformed")

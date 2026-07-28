@@ -74,6 +74,7 @@ from control_plane_kit_core.verification import (
 )
 
 from control_plane_kit_interpreters.docker import DockerRuntimeInterpreter, DockerSdkClient
+from control_plane_kit_interpreters.docker.sdk import DockerSdkHttpProbeResult
 from control_plane_kit_interpreters.secrets import (
     ImagePullCredentialDenied,
     ImagePullCredentialMissing,
@@ -719,18 +720,11 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
 
     def test_wait_for_healthy_executes_http_verification_against_runtime_endpoint(self) -> None:
         fake_client = FakeDockerClient()
-        requests: list[str] = []
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            requests.append(str(request.url))
-            return httpx.Response(200, text="ok")
-
         interpreter = DockerRuntimeInterpreter(
             DockerSdkClient(
                 client=fake_client,
                 docker_module=FakeDockerModule(fake_client),
-            ),
-            http_transport=httpx.MockTransport(handler),
+            )
         )
 
         result = interpreter.execute(
@@ -742,7 +736,9 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
 
         self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
         self.assertEqual(result.evidence["action"], "verified-healthy")
-        self.assertEqual(requests, ["http://api:8080/health/ready"])
+        helper = fake_client.containers.created[0]
+        self.assertTrue(str(helper["network"]).startswith("cpk-net-workspace-a-docker-"))
+        self.assertIn("http://api:8080/health/ready", helper["command"])
         self.assertEqual(
             result.evidence["checks"][0]["outcome"],
             "passed",
@@ -750,14 +746,13 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
 
     def test_wait_for_healthy_fails_when_http_verification_fails(self) -> None:
         fake_client = FakeDockerClient()
+        client = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
+        )
+        client.run_http_probe = lambda **_: DockerSdkHttpProbeResult(503, 9, 0)  # type: ignore[method-assign]
         interpreter = DockerRuntimeInterpreter(
-            DockerSdkClient(
-                client=fake_client,
-                docker_module=FakeDockerModule(fake_client),
-            ),
-            http_transport=httpx.MockTransport(
-                lambda request: httpx.Response(503, text="not ready")
-            ),
+            client,
         )
 
         result = interpreter.execute(
