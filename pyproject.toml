@@ -13,7 +13,7 @@ authors = [
   { name = "OpenJ92" }
 ]
 dependencies = [
-  "control-plane-kit-core @ https://github.com/OpenJ92/control-plane-kit/archive/97c8a6627e9319083ec8ada02260762a7a404cc3.zip#subdirectory=control-plane-kit-core",
+  "control-plane-kit-core @ https://github.com/OpenJ92/control-plane-kit/archive/d5c254665f7816ebd95476204be4e72f67bc545e.zip#subdirectory=control-plane-kit-core",
 ]
 
 [project.optional-dependencies]
@@ -28,9 +28,14 @@ docker = [
 http = [
   "httpx>=0.28",
 ]
+gateway = [
+  "httpx>=0.28",
+  "PyJWT[crypto]>=2.10,<3",
+]
 test = [
   "docker>=7.1",
   "httpx>=0.28",
+  "PyJWT[crypto]>=2.10,<3",
   "psycopg[binary]>=3.2",
 ]
 

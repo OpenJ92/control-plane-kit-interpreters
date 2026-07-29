@@ -142,6 +142,15 @@ only recorded owned resources. Generated tunnel-token delivery into the
 TCP/UDP reachability, and HTTP application-health probes. The probe intent and
 observation values remain in `control-plane-kit-core`.
 
+Install the `gateway` extra to use
+`control_plane_kit_interpreters.probes.SignedGatewayProbeClient`. The client
+authorizes a typed runtime endpoint observation, resolves an Ed25519 signing
+key only at the IO boundary, binds one exact delegated grant to one canonical
+request, and performs a bounded redirect-free `POST /cpk/probes`. It returns
+only closed result codes and bounded evidence. Operations owns durable probe
+intent and result records; cpk-server remains the composition root that adapts
+between the operations dispatcher protocol and this concrete client.
+
 `control_plane_kit_interpreters.verification` owns concrete semantic check
 interpreters for HTTP, Redis, and Postgres. Postgres readiness is represented as
 a semantic `select_one` transport result, not as raw TCP reachability. The

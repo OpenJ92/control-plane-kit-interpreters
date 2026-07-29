@@ -10,6 +10,13 @@ from control_plane_kit_interpreters.probes.clients import (
     UdpTransportProbeAdapter,
     UnsupportedTransportProbe,
 )
+from control_plane_kit_interpreters.probes.gateway import (
+    Ed25519GatewayProbeSigner,
+    GatewayProbeClientCode,
+    GatewayProbeClientError,
+    GatewayProbeClientResult,
+    SignedGatewayProbeClient,
+)
 from control_plane_kit_interpreters.probes.security import (
     AuthorizedProbeTarget,
     ProbeAddressPolicy,
@@ -23,11 +30,16 @@ __all__ = [
     "AuthorizedProbeTarget",
     "DefaultDatagramExchangeClient",
     "DefaultSocketConnector",
+    "Ed25519GatewayProbeSigner",
+    "GatewayProbeClientCode",
+    "GatewayProbeClientError",
+    "GatewayProbeClientResult",
     "HttpApplicationHealthProbeAdapter",
     "ProbeAddressPolicy",
     "ProbeSecurityCode",
     "ProbeSecurityError",
     "StaticRuntimeEndpointProvider",
+    "SignedGatewayProbeClient",
     "TcpTransportProbeAdapter",
     "TransportProbeRouter",
     "UdpTransportProbeAdapter",
