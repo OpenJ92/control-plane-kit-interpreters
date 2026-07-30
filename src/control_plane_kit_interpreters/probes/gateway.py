@@ -20,9 +20,11 @@ from control_plane_kit_core.probe_intents import (
     RuntimeEndpointObservation,
 )
 from control_plane_kit_core.secrets import (
+    AuthorizedSecretResolver,
     SecretReference,
-    SecretResolver,
-    require_resolved_secret,
+    SecretResolutionGrant,
+    SecretUseIntent,
+    require_authorized_secret,
 )
 from control_plane_kit_core.types import Protocol
 
@@ -77,18 +79,27 @@ class GatewayProbeClientResult:
 @dataclass(frozen=True, repr=False)
 class Ed25519GatewayProbeSigner:
     private_key_reference: SecretReference
-    secret_resolver: SecretResolver = field(repr=False, compare=False)
+    authorized_secret_resolver: AuthorizedSecretResolver = field(
+        repr=False,
+        compare=False,
+    )
 
     def sign(
         self,
         grant: DelegatedGatewayProbeGrant,
         request: GatewayProbeRequest,
+        secret_resolution_grant: SecretResolutionGrant,
     ) -> str:
         _require_exact_grant(grant, request)
+        _require_signing_key_grant(
+            grant,
+            secret_resolution_grant,
+            self.private_key_reference,
+        )
         try:
-            private_key = require_resolved_secret(
-                self.secret_resolver,
-                self.private_key_reference,
+            private_key = require_authorized_secret(
+                self.authorized_secret_resolver,
+                secret_resolution_grant,
             )
             return jwt.encode(
                 {
@@ -150,6 +161,7 @@ class SignedGatewayProbeClient:
         grant: DelegatedGatewayProbeGrant,
         request: GatewayProbeRequest,
         endpoint: RuntimeEndpointObservation,
+        secret_resolution_grant: SecretResolutionGrant,
     ) -> GatewayProbeClientResult:
         _require_exact_grant(grant, request)
         _require_gateway_endpoint(grant, endpoint)
@@ -158,7 +170,11 @@ class SignedGatewayProbeClient:
             self.address_policy,
             public_resolver=self.public_resolver,
         )
-        token = self.signer.sign(grant, request)
+        token = self.signer.sign(
+            grant,
+            request,
+            secret_resolution_grant,
+        )
         timeout = httpx.Timeout(
             self.timeout_seconds,
             connect=min(self.timeout_seconds, 5.0),
@@ -259,6 +275,26 @@ def _require_gateway_endpoint(
     ):
         raise GatewayProbeClientError(
             "gateway endpoint observation does not match delegated authority"
+        )
+
+
+def _require_signing_key_grant(
+    grant: DelegatedGatewayProbeGrant,
+    secret_resolution_grant: SecretResolutionGrant,
+    private_key_reference: SecretReference,
+) -> None:
+    if (
+        not isinstance(secret_resolution_grant, SecretResolutionGrant)
+        or secret_resolution_grant.workspace_id != grant.workspace_id
+        or secret_resolution_grant.operation_id != grant.operation_id
+        or secret_resolution_grant.probe_id != grant.operation_id
+        or not secret_resolution_grant.permits(
+            private_key_reference,
+            SecretUseIntent.GATEWAY_PROBE_SIGNING_KEY,
+        )
+    ):
+        raise GatewayProbeClientError(
+            "gateway signing requires exact committed secret authorization"
         )
 
 
