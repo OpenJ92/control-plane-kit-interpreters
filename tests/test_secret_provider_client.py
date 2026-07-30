@@ -8,6 +8,7 @@ import unittest
 import httpx
 
 from control_plane_kit_core.secrets import (
+    SecretCustodyGrant,
     SecretProviderEndpointReference,
     SecretReference,
     SecretUseIntent,
@@ -15,6 +16,7 @@ from control_plane_kit_core.secrets import (
 )
 from control_plane_kit_interpreters.secret_provider import (
     ControlPlaneKitSecretsClient,
+    ControlPlaneKitSecretsCustodian,
     SecretProviderBootstrapError,
     SecretProviderBootstrapRegistry,
     SecretProviderClientCode,
@@ -26,6 +28,117 @@ from control_plane_kit_interpreters.secret_provider import (
 
 
 class SecretProviderClientTests(unittest.TestCase):
+    def test_custodian_writes_and_revokes_exact_granted_reference(self) -> None:
+        reference = SecretReference("secret://provider-a/generated/tunnel-001")
+        secret_id = canonical_provider_secret_id(reference)
+        paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            if request.url.path.endswith("/revoke"):
+                return _response(
+                    {
+                        "outcome": "revoked",
+                        "metadata": [
+                            _metadata(
+                                workspace_id="workspace-1",
+                                secret_id=secret_id,
+                                status="revoked",
+                                revoked_at="2026-07-30T00:00:01Z",
+                            )
+                        ],
+                    }
+                )
+            return _response(
+                {
+                    "outcome": "stored",
+                    "metadata": _metadata(
+                        workspace_id="workspace-1",
+                        secret_id=secret_id,
+                        status="active",
+                    ),
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            endpoint = SecretProviderEndpointReference("provider-main")
+            credential = SecretReference("secret://bootstrap/provider-token")
+            credential_file = Path(directory) / "provider.token"
+            credential_file.write_text("provider-token", encoding="utf-8")
+            custodian = ControlPlaneKitSecretsCustodian(
+                SecretProviderBootstrapRegistry(
+                    endpoints={endpoint: "https://secrets.internal.example"},
+                    credential_files={credential: credential_file},
+                ),
+                transport=httpx.MockTransport(handler),
+            )
+            grant = SecretCustodyGrant(
+                custody_id="scust_" + "a" * 64,
+                workspace_id="workspace-1",
+                provider_registration_id="sprov_" + "b" * 64,
+                endpoint_reference=endpoint,
+                credential_reference=credential,
+                reference=reference,
+                intent=SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN,
+                actor_subject="cloudflare-interpreter",
+                correlation_id="secret-custody-" + "c" * 64,
+                custody_fingerprint="d" * 64,
+                run_id="run-1",
+                activity_id="activity-1",
+                effect_id="effect-1",
+            )
+
+            receipt = custodian.store(grant, SecretValue("tunnel-token-value"))
+            custodian.revoke(grant)
+
+        self.assertTrue(receipt.matches(grant))
+        self.assertEqual(receipt.version_number, 1)
+        self.assertEqual(
+            paths,
+            [
+                f"/v1/workspaces/workspace-1/secrets/{secret_id}",
+                f"/v1/workspaces/workspace-1/secrets/{secret_id}/revoke",
+            ],
+        )
+        self.assertNotIn("tunnel-token-value", repr(custodian))
+
+    def test_custodian_revocation_is_idempotent_when_reference_is_absent(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            endpoint = SecretProviderEndpointReference("provider-main")
+            credential = SecretReference("secret://bootstrap/provider-token")
+            credential_file = Path(directory) / "provider.token"
+            credential_file.write_text("provider-token", encoding="utf-8")
+            custodian = ControlPlaneKitSecretsCustodian(
+                SecretProviderBootstrapRegistry(
+                    endpoints={endpoint: "https://secrets.internal.example"},
+                    credential_files={credential: credential_file},
+                ),
+                transport=httpx.MockTransport(
+                    lambda _request: _response(
+                        _error("missing", "secret-missing"),
+                        404,
+                    )
+                ),
+            )
+            grant = SecretCustodyGrant(
+                custody_id="scust_" + "a" * 64,
+                workspace_id="workspace-1",
+                provider_registration_id="sprov_" + "b" * 64,
+                endpoint_reference=endpoint,
+                credential_reference=credential,
+                reference=SecretReference(
+                    "secret://provider-a/generated/tunnel-absent"
+                ),
+                intent=SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN,
+                actor_subject="cloudflare-interpreter",
+                correlation_id="secret-custody-" + "c" * 64,
+                custody_fingerprint="d" * 64,
+            )
+
+            custodian.revoke(grant)
+
     def test_canonical_secret_id_preserves_complete_reference_without_collision(
         self,
     ) -> None:
