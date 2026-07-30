@@ -14,6 +14,7 @@ from control_plane_kit_core.secrets import (
     SecretReferenceEnvironmentDelivery,
     SecretResolutionCode,
     SecretResolutionError,
+    SecretUseIntent,
 )
 
 from control_plane_kit_interpreters.secrets import (
@@ -30,11 +31,16 @@ class SecretDeliveryTests(unittest.TestCase):
         reference = SecretReference("secret://local/workspace-a/api-token")
         result = resolve_secret_deliveries(
             (
-                SecretEnvironmentDelivery("API_TOKEN", reference),
+                SecretEnvironmentDelivery(
+                    "API_TOKEN",
+                    reference,
+                    SecretUseIntent.APPLICATION_CONTROL_TOKEN,
+                ),
                 SecretReferenceEnvironmentDelivery("API_TOKEN_REF", reference),
                 SecretFileDelivery(
                     "/run/secrets/api-token",
                     reference,
+                    SecretUseIntent.APPLICATION_CONTROL_TOKEN,
                     SecretFileMode.OWNER_READ_ONLY,
                     SecretFilePathBinding("API_TOKEN_FILE"),
                 ),
@@ -72,6 +78,7 @@ class SecretDeliveryTests(unittest.TestCase):
                     SecretEnvironmentDelivery(
                         "API_TOKEN",
                         SecretReference("secret://local/workspace-a/api-token"),
+                        SecretUseIntent.APPLICATION_CONTROL_TOKEN,
                     ),
                 ),
                 resolver=None,
@@ -98,6 +105,7 @@ class SecretDeliveryTests(unittest.TestCase):
                             SecretFileDelivery(
                                 "/run/secrets/api-token",
                                 SecretReference("secret://local/workspace-a/api-token"),
+                                SecretUseIntent.APPLICATION_CONTROL_TOKEN,
                             ),
                         ),
                         resolver=resolver,
@@ -113,6 +121,7 @@ class SecretDeliveryTests(unittest.TestCase):
                     SecretEnvironmentDelivery(
                         "API_TOKEN",
                         SecretReference("secret://local/workspace-a/api-token"),
+                        SecretUseIntent.APPLICATION_CONTROL_TOKEN,
                     ),
                     SecretReferenceEnvironmentDelivery(
                         "API_TOKEN",
