@@ -11,9 +11,14 @@ import httpx
 
 from control_plane_kit_core.probe_intents import RuntimeEndpointObservation
 from control_plane_kit_core.secrets import (
+    AuthorizedSecretResolver,
+    SecretResolutionCode,
     SecretResolutionError,
+    SecretResolutionGrant,
     SecretResolver,
+    SecretUseIntent,
     SecretValue,
+    require_authorized_secret,
     require_resolved_secret,
 )
 from control_plane_kit_core.verification import (
@@ -375,6 +380,8 @@ class PostgresVerificationInterpreter:
     credential_resolver: SecretResolver | None = None
     secret_resolver: ProbeEndpointSecretResolver | None = None
     public_resolver: ProbePublicAddressResolver | None = None
+    authorized_credential_resolver: AuthorizedSecretResolver | None = None
+    credential_grant: SecretResolutionGrant | None = None
 
     @property
     def capabilities(self) -> frozenset[VerificationCapability]:
@@ -387,7 +394,10 @@ class PostgresVerificationInterpreter:
                 VerificationCapability.POSTGRES,
             )
         check = material.check
-        if check.authentication is None or self.credential_resolver is None:
+        if check.authentication is None or (
+            self.authorized_credential_resolver is None
+            and self.credential_resolver is None
+        ):
             return _observation(
                 material,
                 VerificationCapability.POSTGRES,
@@ -409,10 +419,28 @@ class PostgresVerificationInterpreter:
                 1,
             )
         try:
-            password = require_resolved_secret(
-                self.credential_resolver,
-                check.authentication.password_reference,
-            )
+            if self.authorized_credential_resolver is not None:
+                if (
+                    self.credential_grant is None
+                    or not self.credential_grant.permits(
+                        check.authentication.password_reference,
+                        SecretUseIntent.POSTGRES_PASSWORD,
+                    )
+                ):
+                    raise SecretResolutionError(
+                        SecretResolutionCode.DENIED,
+                        "Postgres verification requires committed secret authorization",
+                    )
+                password = require_authorized_secret(
+                    self.authorized_credential_resolver,
+                    self.credential_grant,
+                )
+            else:
+                assert self.credential_resolver is not None
+                password = require_resolved_secret(
+                    self.credential_resolver,
+                    check.authentication.password_reference,
+                )
         except SecretResolutionError:
             return _observation(
                 material,

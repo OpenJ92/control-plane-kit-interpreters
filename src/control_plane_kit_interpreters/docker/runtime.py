@@ -29,9 +29,14 @@ from control_plane_kit_core.runtime_effects import (
     RuntimeProductMaterial,
 )
 from control_plane_kit_core.secrets import (
+    AuthorizedSecretResolver,
     SecretReference,
+    SecretResolutionCode,
     SecretResolutionError,
+    SecretResolutionGrant,
     SecretResolver,
+    SecretUseIntent,
+    require_authorized_secret,
     require_resolved_secret,
 )
 from control_plane_kit_core.types import RuntimeKind
@@ -65,7 +70,10 @@ from control_plane_kit_interpreters.secrets import (
     ImagePullCredentialResolver,
     ResolvedSecretDeliveries,
     SecretFileRuntimeMaterial,
+    parse_image_pull_credential,
+    resolve_authorized_secret_deliveries,
     resolve_secret_deliveries,
+    secret_resolution_grant_for,
 )
 from control_plane_kit_interpreters.verification import (
     HttpVerificationInterpreter,
@@ -97,6 +105,7 @@ class DockerRuntimeInterpreter:
     postgres_transport: PostgresSelectOneTransport | None = None
     image_pull_credentials: ImagePullCredentialResolver | None = None
     secret_resolver: SecretResolver | None = None
+    authorized_secret_resolver: AuthorizedSecretResolver | None = None
 
     def execute(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         if not isinstance(request, RuntimeEffectRequest):
@@ -156,7 +165,13 @@ class DockerRuntimeInterpreter:
         if request.runtime_kind is not RuntimeKind.DOCKER:
             return _unsupported(request, "docker.unsupported-runtime-kind")
         try:
-            client = _client_for_runtime_authority(self.client, authority, self.secret_resolver)
+            client = _client_for_runtime_authority(
+                self.client,
+                authority,
+                request,
+                self.authorized_secret_resolver,
+                self.secret_resolver,
+            )
         except _DockerInterpreterUnsupportedAuthorityError as error:
             return _unsupported(request, error.code)
         except _DockerInterpreterPreconditionError as error:
@@ -250,8 +265,18 @@ class DockerRuntimeInterpreter:
     def _start_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         material = _single_product(request)
         authority_delivery = _authority_delivery_material(request)
-        secrets = _resolve_product_secret_deliveries(material, self.secret_resolver)
-        auth_config = _image_pull_auth_config(material, self.image_pull_credentials)
+        secrets = _resolve_product_secret_deliveries(
+            material,
+            request,
+            self.authorized_secret_resolver,
+            self.secret_resolver,
+        )
+        auth_config = _image_pull_auth_config(
+            material,
+            request,
+            self.authorized_secret_resolver,
+            self.image_pull_credentials,
+        )
         runtime_id = material.runtime_id
         network_name = _network_name(request, runtime_id)
         runtime_labels = _runtime_labels(request, runtime_id)
@@ -314,8 +339,18 @@ class DockerRuntimeInterpreter:
     def _reconcile_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         material = _single_product(request)
         authority_delivery = _authority_delivery_material(request)
-        secrets = _resolve_product_secret_deliveries(material, self.secret_resolver)
-        auth_config = _image_pull_auth_config(material, self.image_pull_credentials)
+        secrets = _resolve_product_secret_deliveries(
+            material,
+            request,
+            self.authorized_secret_resolver,
+            self.secret_resolver,
+        )
+        auth_config = _image_pull_auth_config(
+            material,
+            request,
+            self.authorized_secret_resolver,
+            self.image_pull_credentials,
+        )
         runtime_id = material.runtime_id
         network_name = _network_name(request, runtime_id)
         runtime_labels = _runtime_labels(request, runtime_id)
@@ -582,7 +617,19 @@ class DockerRuntimeInterpreter:
         interpreter = PostgresVerificationInterpreter(
             policy,
             transport=self.postgres_transport,
-            credential_resolver=self.secret_resolver,
+            credential_resolver=(
+                None
+                if self.authorized_secret_resolver is not None
+                else self.secret_resolver
+            ),
+            authorized_credential_resolver=self.authorized_secret_resolver,
+            credential_grant=_optional_secret_resolution_grant(
+                request,
+                None
+                if check.authentication is None
+                else check.authentication.password_reference,
+                SecretUseIntent.POSTGRES_PASSWORD,
+            ),
         )
         return interpreter.execute(
             VerificationCheckMaterial(
@@ -826,7 +873,9 @@ def _single_product(request: RuntimeEffectRequest) -> RuntimeProductMaterial:
 def _client_for_runtime_authority(
     ambient_client: DockerSdkClient,
     authority: object,
-    resolver: SecretResolver | None,
+    request: RuntimeEffectRequest,
+    authorized_resolver: AuthorizedSecretResolver | None,
+    legacy_resolver: SecretResolver | None,
 ) -> DockerSdkClient:
     if _authority_value(getattr(authority, "runtime_kind", None)) != RuntimeKind.DOCKER.value:
         raise _DockerInterpreterUnsupportedAuthorityError(
@@ -849,22 +898,31 @@ def _client_for_runtime_authority(
             "docker.runtime-authority-malformed",
             "remote Docker authority endpoint is malformed",
         )
-    if resolver is None:
+    if authorized_resolver is None and legacy_resolver is None:
         raise _DockerInterpreterPreconditionError(
             "docker.runtime-authority-secret-resolver-required",
             "remote Docker authority requires a configured secret resolver",
         )
     ca_certificate = _resolve_runtime_authority_secret(
-        resolver,
+        request,
+        authorized_resolver,
+        legacy_resolver,
         getattr(material, "ca_certificate", None),
+        SecretUseIntent.DOCKER_REMOTE_TLS_CA_CERTIFICATE,
     )
     client_certificate = _resolve_runtime_authority_secret(
-        resolver,
+        request,
+        authorized_resolver,
+        legacy_resolver,
         getattr(material, "client_certificate", None),
+        SecretUseIntent.DOCKER_REMOTE_TLS_CLIENT_CERTIFICATE,
     )
     client_key = _resolve_runtime_authority_secret(
-        resolver,
+        request,
+        authorized_resolver,
+        legacy_resolver,
         getattr(material, "client_key", None),
+        SecretUseIntent.DOCKER_REMOTE_TLS_CLIENT_KEY,
     )
     return DockerSdkClient.from_authority(
         DockerTlsClientConfig(
@@ -916,8 +974,11 @@ def _local_docker_socket_group() -> str:
 
 
 def _resolve_runtime_authority_secret(
-    resolver: SecretResolver,
+    request: RuntimeEffectRequest,
+    authorized_resolver: AuthorizedSecretResolver | None,
+    legacy_resolver: SecretResolver | None,
     reference: object,
+    intent: SecretUseIntent,
 ):
     if not isinstance(reference, SecretReference):
         raise _DockerInterpreterPreconditionError(
@@ -925,7 +986,15 @@ def _resolve_runtime_authority_secret(
             "remote Docker authority secret reference is malformed",
         )
     try:
-        return require_resolved_secret(resolver, reference)
+        if authorized_resolver is not None:
+            grant = secret_resolution_grant_for(
+                request.secret_resolution_grants,
+                reference,
+                intent,
+            )
+            return require_authorized_secret(authorized_resolver, grant)
+        assert legacy_resolver is not None
+        return require_resolved_secret(legacy_resolver, reference)
     except SecretResolutionError as error:
         code = getattr(error, "code", None)
         suffix = _authority_value(code) if code is not None else "malformed"
@@ -941,7 +1010,9 @@ def _authority_value(value: object) -> object:
 
 def _image_pull_auth_config(
     material: RuntimeProductMaterial,
-    resolver: ImagePullCredentialResolver | None,
+    request: RuntimeEffectRequest,
+    authorized_resolver: AuthorizedSecretResolver | None,
+    legacy_resolver: ImagePullCredentialResolver | None,
 ) -> DockerRegistryAuthConfig | None:
     authority = material.pull_authority
     if authority is None:
@@ -951,12 +1022,38 @@ def _image_pull_auth_config(
             "docker.image-pull-authority-scope-mismatch",
             "image pull authority does not cover product image",
         )
-    if resolver is None:
+    if authorized_resolver is not None:
+        try:
+            grant = secret_resolution_grant_for(
+                request.secret_resolution_grants,
+                authority.credential_reference,
+                SecretUseIntent.OCI_PULL_CREDENTIAL,
+            )
+            credential = parse_image_pull_credential(
+                require_authorized_secret(authorized_resolver, grant)
+            )
+        except SecretResolutionError as error:
+            if error.code is SecretResolutionCode.MISSING:
+                error_code = "docker.image-pull-credential-missing"
+                message = "image pull credential could not be resolved"
+            elif error.code is SecretResolutionCode.DENIED:
+                error_code = "docker.image-pull-credential-denied"
+                message = "image pull credential is outside interpreter authority"
+            else:
+                error_code = "docker.image-pull-credential-malformed"
+                message = "image pull credential resolver returned malformed result"
+            raise _DockerInterpreterPreconditionError(error_code, message) from error
+        return DockerRegistryAuthConfig(
+            username=credential.username,
+            password=credential.password,
+            identitytoken=credential.identitytoken,
+        )
+    if legacy_resolver is None:
         raise _DockerInterpreterPreconditionError(
             "docker.image-pull-authority-required",
             "image pull authority requires a configured credential resolver",
         )
-    result = resolver.resolve(authority)
+    result = legacy_resolver.resolve(authority)
     match result:
         case ImagePullCredentialResolved(credential=credential):
             return DockerRegistryAuthConfig(
@@ -993,26 +1090,52 @@ def _runtime_target(operation: ActivityOperation) -> str:
 
 def _resolve_product_secret_deliveries(
     material: RuntimeProductMaterial,
-    resolver: SecretResolver | None,
+    request: RuntimeEffectRequest,
+    authorized_resolver: AuthorizedSecretResolver | None,
+    legacy_resolver: SecretResolver | None,
 ) -> ResolvedSecretDeliveries:
     deliveries = material.product.runtime_contract.secret_deliveries
     try:
-        return resolve_secret_deliveries(deliveries, resolver=resolver)
-    except Exception as error:
-        code = getattr(error, "code", None)
-        if resolver is None and deliveries:
+        if authorized_resolver is not None:
+            return resolve_authorized_secret_deliveries(
+                deliveries,
+                grants=request.secret_resolution_grants,
+                resolver=authorized_resolver,
+            )
+        return resolve_secret_deliveries(deliveries, resolver=legacy_resolver)
+    except SecretResolutionError as error:
+        if authorized_resolver is None and legacy_resolver is None and deliveries:
             error_code = "docker.secret-resolution-required"
             message = "Docker runtime interpreter requires secret resolver"
-        elif code is not None:
-            error_code = f"docker.secret-resolution-{code.value}"
-            message = str(error)
         else:
-            error_code = "docker.secret-resolution-malformed"
-            message = "secret resolver returned malformed material"
+            error_code = f"docker.secret-resolution-{error.code.value}"
+            message = "secret delivery could not be resolved"
         raise _DockerInterpreterPreconditionError(
             error_code,
             message,
         ) from error
+    except Exception as error:
+        raise _DockerInterpreterPreconditionError(
+            "docker.secret-resolution-malformed",
+            "secret resolver returned malformed material",
+        ) from error
+
+
+def _optional_secret_resolution_grant(
+    request: RuntimeEffectRequest,
+    reference: SecretReference | None,
+    intent: SecretUseIntent,
+) -> SecretResolutionGrant | None:
+    if reference is None or not isinstance(reference, SecretReference):
+        return None
+    try:
+        return secret_resolution_grant_for(
+            request.secret_resolution_grants,
+            reference,
+            intent,
+        )
+    except SecretResolutionError:
+        return None
 
 
 def _container_environment(
