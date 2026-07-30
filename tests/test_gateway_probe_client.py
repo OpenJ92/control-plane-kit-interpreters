@@ -21,10 +21,14 @@ from control_plane_kit_core.probe_intents import (
 )
 from control_plane_kit_core.runtime_effects import GatewayTargetId
 from control_plane_kit_core.secrets import (
-    LocalDevelopmentSecretResolver,
-    SecretProviderAuthority,
-    SecretProviderId,
+    SecretDenied,
+    SecretProviderEndpointReference,
     SecretReference,
+    SecretResolution,
+    SecretResolutionGrant,
+    SecretResolved,
+    SecretUseIntent,
+    SecretValue,
 )
 from control_plane_kit_core.types import Protocol
 
@@ -51,12 +55,8 @@ class GatewayProbeClientTests(unittest.TestCase):
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         ).decode("ascii")
         self.reference = SecretReference("secret://test/gateway/signing-key")
-        self.resolver = LocalDevelopmentSecretResolver(
-            SecretProviderAuthority(
-                SecretProviderId("test"),
-                (("gateway",),),
-            ),
-            {self.reference.reference_id: self.private_pem},
+        self.resolver = RecordingAuthorizedSecretResolver(
+            SecretResolved(self.reference, SecretValue(self.private_pem))
         )
         self.signer = Ed25519GatewayProbeSigner(self.reference, self.resolver)
         self.request = GatewayProbeRequest(
@@ -80,6 +80,7 @@ class GatewayProbeClientTests(unittest.TestCase):
             expires_at=issued_at + 60,
             jti="jti-a",
         )
+        self.resolution_grant = _resolution_grant(self.reference, self.grant)
         self.endpoint = RuntimeEndpointObservation(
             subject_id="gateway-a",
             socket_name="control",
@@ -125,6 +126,7 @@ class GatewayProbeClientTests(unittest.TestCase):
             self.grant,
             self.request,
             self.endpoint,
+            self.resolution_grant,
         )
 
         self.assertIs(result.code, GatewayProbeClientCode.SUCCEEDED)
@@ -135,6 +137,8 @@ class GatewayProbeClientTests(unittest.TestCase):
         self.assertEqual(observed["claims"]["gateway_probe"], self.grant.descriptor())
         self.assertEqual(observed["headers"]["kid"], self.grant.key_id)
         self.assertEqual(observed["headers"]["typ"], "CPK-GATEWAY-PROBE+JWT")
+        self.assertEqual(self.resolver.grants, [self.resolution_grant])
+        self.assertNotIn(self.private_pem, repr(observed["claims"]))
         self.assertEqual(
             result.evidence,
             {
@@ -164,14 +168,24 @@ class GatewayProbeClientTests(unittest.TestCase):
             LiteralEndpointMaterial("http://evil:8000"),
         )
         with self.assertRaises(ProbeSecurityError):
-            client.dispatch(self.grant, self.request, untrusted)
+            client.dispatch(
+                self.grant,
+                self.request,
+                untrusted,
+                self.resolution_grant,
+            )
         changed = GatewayProbeRequest(
             GatewayProbeCommandKind.HTTP_STATUS,
             GatewayTargetId("hello.internal"),
             "/different",
         )
         with self.assertRaises(GatewayProbeClientError):
-            client.dispatch(self.grant, changed, self.endpoint)
+            client.dispatch(
+                self.grant,
+                changed,
+                self.endpoint,
+                self.resolution_grant,
+            )
 
         self.assertEqual(calls, 0)
 
@@ -219,14 +233,24 @@ class GatewayProbeClientTests(unittest.TestCase):
                     transport=httpx.MockTransport(handler),
                     maximum_response_bytes=128,
                 )
-                result = client.dispatch(self.grant, self.request, self.endpoint)
+                result = client.dispatch(
+                    self.grant,
+                    self.request,
+                    self.endpoint,
+                    self.resolution_grant,
+                )
                 self.assertIs(result.code, expected)
                 self.assertNotIn("evil.test", repr(result))
 
     def test_rejected_response_and_secret_failures_are_bounded_and_redacted(self) -> None:
         rejected = self.client(
             lambda request: httpx.Response(403, json={"detail": self.private_pem})
-        ).dispatch(self.grant, self.request, self.endpoint)
+        ).dispatch(
+            self.grant,
+            self.request,
+            self.endpoint,
+            self.resolution_grant,
+        )
 
         self.assertIs(rejected.code, GatewayProbeClientCode.REJECTED)
         self.assertEqual(rejected.evidence, {"http_status": 403})
@@ -245,8 +269,78 @@ class GatewayProbeClientTests(unittest.TestCase):
                 transport=httpx.MockTransport(
                     lambda request: httpx.Response(200, json={})
                 ),
-            ).dispatch(self.grant, self.request, self.endpoint)
+            ).dispatch(
+                self.grant,
+                self.request,
+                self.endpoint,
+                self.resolution_grant,
+            )
         self.assertNotIn("missing", str(raised.exception))
+        self.assertNotIn(self.private_pem, str(raised.exception))
+
+    def test_missing_or_mismatched_resolution_grant_signs_nothing_and_does_no_io(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(200, json={})
+
+        cases = (
+            None,
+            _resolution_grant(
+                SecretReference("secret://test/gateway/other-key"),
+                self.grant,
+            ),
+            _resolution_grant(
+                self.reference,
+                self.grant,
+                intent=SecretUseIntent.APPLICATION_CONTROL_TOKEN,
+            ),
+            _resolution_grant(
+                self.reference,
+                self.grant,
+                probe_id="probe-other",
+            ),
+        )
+        for resolution_grant in cases:
+            with self.subTest(resolution_grant=resolution_grant):
+                with self.assertRaises(GatewayProbeClientError):
+                    self.client(handler).dispatch(
+                        self.grant,
+                        self.request,
+                        self.endpoint,
+                        resolution_grant,
+                    )
+        self.assertEqual(self.resolver.grants, [])
+        self.assertEqual(calls, 0)
+
+    def test_provider_denial_signs_nothing_and_does_no_io(self) -> None:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(200, json={})
+
+        resolver = RecordingAuthorizedSecretResolver(SecretDenied(self.reference))
+        signer = Ed25519GatewayProbeSigner(self.reference, resolver)
+        client = SignedGatewayProbeClient(
+            signer,
+            self.policy,
+            transport=httpx.MockTransport(handler),
+        )
+
+        with self.assertRaises(GatewayProbeClientError) as raised:
+            client.dispatch(
+                self.grant,
+                self.request,
+                self.endpoint,
+                self.resolution_grant,
+            )
+
+        self.assertEqual(resolver.grants, [self.resolution_grant])
+        self.assertEqual(calls, 0)
         self.assertNotIn(self.private_pem, str(raised.exception))
 
     def client(self, handler) -> SignedGatewayProbeClient:
@@ -255,6 +349,40 @@ class GatewayProbeClientTests(unittest.TestCase):
             self.policy,
             transport=httpx.MockTransport(handler),
         )
+
+
+class RecordingAuthorizedSecretResolver:
+    def __init__(self, result: SecretResolution) -> None:
+        self.result = result
+        self.grants: list[SecretResolutionGrant] = []
+
+    def resolve(self, grant: SecretResolutionGrant) -> SecretResolution:
+        self.grants.append(grant)
+        return self.result
+
+
+def _resolution_grant(
+    reference: SecretReference,
+    grant: DelegatedGatewayProbeGrant,
+    *,
+    intent: SecretUseIntent = SecretUseIntent.GATEWAY_PROBE_SIGNING_KEY,
+    probe_id: str | None = None,
+) -> SecretResolutionGrant:
+    return SecretResolutionGrant(
+        authorization_id="suse_" + "a" * 64,
+        workspace_id=grant.workspace_id,
+        reference_registration_id="sref_" + "b" * 64,
+        provider_registration_id="sprov_" + "c" * 64,
+        endpoint_reference=SecretProviderEndpointReference("workspace-secrets"),
+        credential_reference=SecretReference("secret://bootstrap/provider-token"),
+        reference=reference,
+        intent=intent,
+        actor_subject="operator-a",
+        correlation_id="gateway-probe-" + "d" * 64,
+        intent_fingerprint="e" * 64,
+        operation_id=grant.operation_id,
+        probe_id=grant.operation_id if probe_id is None else probe_id,
+    )
 
 
 if __name__ == "__main__":
