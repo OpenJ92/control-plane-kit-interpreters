@@ -62,6 +62,7 @@ from control_plane_kit_core.secrets import (
     SecretReference,
     SecretResolved,
     SecretResolution,
+    SecretUseIntent,
     SecretValue,
 )
 from control_plane_kit_core.types import Protocol, RuntimeKind
@@ -1377,6 +1378,7 @@ def _product_with_secret_delivery() -> ContainerServerProduct:
                 SecretEnvironmentDelivery(
                     "API_TOKEN",
                     SecretReference("secret://local/api-token"),
+                    SecretUseIntent.APPLICATION_CONTROL_TOKEN,
                 ),
             ),
         ),
@@ -1396,6 +1398,7 @@ def _product_with_file_secret_delivery() -> ContainerServerProduct:
                 SecretFileDelivery(
                     "/run/secrets/api-token",
                     SecretReference("secret://local/api-token"),
+                    SecretUseIntent.APPLICATION_CONTROL_TOKEN,
                     SecretFileMode.OWNER_READ_ONLY,
                     SecretFilePathBinding("API_TOKEN_FILE"),
                 ),
