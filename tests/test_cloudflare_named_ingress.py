@@ -10,15 +10,16 @@ from control_plane_kit_core.public_ingress import (
     PublicIngressTarget,
 )
 from control_plane_kit_core.secrets import (
-    LocalDevelopmentSecretResolver,
     SecretCustodyGrant,
     SecretCustodyReceipt,
+    SecretDenied,
     SecretProviderEndpointReference,
-    SecretProviderAuthority,
-    SecretProviderId,
     SecretReference,
+    SecretResolution,
     SecretResolutionCode,
     SecretResolutionError,
+    SecretResolutionGrant,
+    SecretResolved,
     SecretUseIntent,
     SecretValue,
 )
@@ -41,9 +42,10 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
     def test_create_constructs_tunnel_config_dns_and_token_requests(self) -> None:
         transport = FakeCloudflareTransport()
         custodian = RecordingSecretCustodian()
+        resolver = _authorized_resolver()
         interpreter = CloudflareNamedIngressInterpreter(
             transport=transport,
-            secret_resolver=_resolver(),
+            authorized_secret_resolver=resolver,
             secret_custodian=custodian,
         )
 
@@ -52,6 +54,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
             authority=_authority(),
             allocation_name="cpk-gateway-001-c0303ba7369e",
             origin_service_url="http://gateway:8000",
+            secret_resolution_grant=_resolution_grant(),
             secret_custody_grant=_custody_grant(),
         )
 
@@ -62,6 +65,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
         self.assertEqual(allocation.endpoint_url, "https://cpk-gateway-001.openj92.dev")
         self.assertTrue(allocation.secret_custody_receipt.matches(_custody_grant()))
         self.assertEqual(custodian.stored_references, [_custody_grant().reference])
+        self.assertEqual(resolver.grants, [_resolution_grant()])
         self.assertTrue(custodian.received_expected_value)
         self.assertNotIn(TUNNEL_TOKEN, repr(allocation))
         self.assertEqual(
@@ -119,7 +123,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
         transport = FakeCloudflareTransport(existing_dns_record_id="dns-existing")
         client = CloudflareApiClient(
             _authority(),
-            api_token=_resolver().resolve(SecretReference("secret://local/cf/api-token")).value,
+            api_token=SecretValue(API_TOKEN),
             transport=transport,
         )
 
@@ -137,7 +141,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
             ],
         )
 
-    def test_missing_secret_resolver_fails_before_api_mutation(self) -> None:
+    def test_missing_authorized_secret_resolver_fails_before_api_mutation(self) -> None:
         transport = FakeCloudflareTransport()
         interpreter = CloudflareNamedIngressInterpreter(
             transport=transport,
@@ -150,6 +154,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                 authority=_authority(),
                 allocation_name="cpk-gateway-001-c0303ba7369e",
                 origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
                 secret_custody_grant=_custody_grant(),
             )
 
@@ -161,7 +166,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
         transport = FakeCloudflareTransport()
         interpreter = CloudflareNamedIngressInterpreter(
             transport=transport,
-            secret_resolver=_resolver(),
+            authorized_secret_resolver=_authorized_resolver(),
         )
 
         with self.assertRaises(SecretResolutionError) as raised:
@@ -170,6 +175,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                 authority=_authority(),
                 allocation_name="cpk-gateway-001-c0303ba7369e",
                 origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
                 secret_custody_grant=_custody_grant(),
             )
 
@@ -181,7 +187,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
         custodian = RecordingSecretCustodian(fail_store=True)
         interpreter = CloudflareNamedIngressInterpreter(
             transport=transport,
-            secret_resolver=_resolver(),
+            authorized_secret_resolver=_authorized_resolver(),
             secret_custodian=custodian,
         )
 
@@ -191,6 +197,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                 authority=_authority(),
                 allocation_name="cpk-gateway-001-c0303ba7369e",
                 origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
                 secret_custody_grant=_custody_grant(),
             )
 
@@ -206,9 +213,10 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
 
     def test_hostname_policy_fails_closed_before_api_mutation(self) -> None:
         transport = FakeCloudflareTransport()
+        resolver = _authorized_resolver()
         interpreter = CloudflareNamedIngressInterpreter(
             transport=transport,
-            secret_resolver=_resolver(),
+            authorized_secret_resolver=resolver,
             secret_custodian=RecordingSecretCustodian(),
         )
 
@@ -224,6 +232,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                 authority=_authority(),
                 allocation_name="cpk-gateway-001-c0303ba7369e",
                 origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
                 secret_custody_grant=_custody_grant(),
             )
 
@@ -234,7 +243,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
         transport = FakeCloudflareTransport()
         interpreter = CloudflareNamedIngressInterpreter(
             transport=transport,
-            secret_resolver=_resolver(),
+            authorized_secret_resolver=_authorized_resolver(),
             secret_custodian=RecordingSecretCustodian(),
         )
 
@@ -244,6 +253,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                 authority=_authority(),
                 allocation_name="cpk gateway 001",
                 origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
                 secret_custody_grant=_custody_grant(),
             )
 
@@ -252,9 +262,10 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
 
     def test_teardown_deletes_only_recorded_owned_resources(self) -> None:
         transport = FakeCloudflareTransport()
+        resolver = _authorized_resolver()
         interpreter = CloudflareNamedIngressInterpreter(
             transport=transport,
-            secret_resolver=_resolver(),
+            authorized_secret_resolver=resolver,
             secret_custodian=RecordingSecretCustodian(),
         )
 
@@ -266,6 +277,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                 tunnel_name="cpk-gateway-001",
                 hostname="cpk-gateway-001.openj92.dev",
             ),
+            secret_resolution_grant=_resolution_grant(),
             secret_custody_grant=_custody_grant(),
         )
 
@@ -276,12 +288,13 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                 ("DELETE", "/accounts/account-001/cfd_tunnel/tunnel-001"),
             ],
         )
+        self.assertEqual(resolver.grants, [_resolution_grant()])
 
     def test_api_errors_are_bounded_and_redacted(self) -> None:
         transport = FakeCloudflareTransport(status_code=403)
         interpreter = CloudflareNamedIngressInterpreter(
             transport=transport,
-            secret_resolver=_resolver(),
+            authorized_secret_resolver=_authorized_resolver(),
             secret_custodian=RecordingSecretCustodian(),
         )
 
@@ -291,6 +304,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                 authority=_authority(),
                 allocation_name="cpk-gateway-001-c0303ba7369e",
                 origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
                 secret_custody_grant=_custody_grant(),
             )
 
@@ -298,6 +312,86 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
         self.assertIn("403", text)
         self.assertNotIn(API_TOKEN, text)
         self.assertNotIn(TUNNEL_TOKEN, text)
+
+    def test_missing_or_mismatched_api_token_grant_fails_before_api_io(self) -> None:
+        authority = _authority()
+        wrong_reference = SecretReference("secret://workspace/other-token")
+        cases = (
+            None,
+            _resolution_grant(reference=wrong_reference),
+            _resolution_grant(intent=SecretUseIntent.OCI_PULL_CREDENTIAL),
+        )
+        for grant in cases:
+            with self.subTest(grant=grant):
+                transport = FakeCloudflareTransport()
+                resolver = _authorized_resolver()
+                interpreter = CloudflareNamedIngressInterpreter(
+                    transport=transport,
+                    authorized_secret_resolver=resolver,
+                    secret_custodian=RecordingSecretCustodian(),
+                )
+
+                with self.assertRaises(SecretResolutionError) as raised:
+                    interpreter.create(
+                        _ingress(),
+                        authority=authority,
+                        allocation_name="cpk-gateway-001-c0303ba7369e",
+                        origin_service_url="http://gateway:8000",
+                        secret_resolution_grant=grant,
+                        secret_custody_grant=_custody_grant(),
+                    )
+
+                self.assertIs(raised.exception.code, SecretResolutionCode.DENIED)
+                self.assertEqual(resolver.grants, [])
+                self.assertEqual(transport.requests, [])
+
+    def test_provider_denial_fails_before_cloudflare_api_io(self) -> None:
+        transport = FakeCloudflareTransport()
+        resolver = _authorized_resolver(
+            SecretDenied(_authority().api_token_ref),
+        )
+        interpreter = CloudflareNamedIngressInterpreter(
+            transport=transport,
+            authorized_secret_resolver=resolver,
+            secret_custodian=RecordingSecretCustodian(),
+        )
+
+        with self.assertRaises(SecretResolutionError) as raised:
+            interpreter.create(
+                _ingress(),
+                authority=_authority(),
+                allocation_name="cpk-gateway-001-c0303ba7369e",
+                origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
+                secret_custody_grant=_custody_grant(),
+            )
+
+        self.assertIs(raised.exception.code, SecretResolutionCode.DENIED)
+        self.assertEqual(resolver.grants, [_resolution_grant()])
+        self.assertEqual(transport.requests, [])
+        self.assertNotIn(API_TOKEN, repr(raised.exception))
+
+    def test_provider_exception_is_bounded_and_redacted_before_api_io(self) -> None:
+        transport = FakeCloudflareTransport()
+        interpreter = CloudflareNamedIngressInterpreter(
+            transport=transport,
+            authorized_secret_resolver=FailingAuthorizedSecretResolver(),
+            secret_custodian=RecordingSecretCustodian(),
+        )
+
+        with self.assertRaises(CloudflareApiError) as raised:
+            interpreter.create(
+                _ingress(),
+                authority=_authority(),
+                allocation_name="cpk-gateway-001-c0303ba7369e",
+                origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
+                secret_custody_grant=_custody_grant(),
+            )
+
+        self.assertEqual(str(raised.exception), "Cloudflare API token resolution failed")
+        self.assertNotIn(API_TOKEN, repr(raised.exception))
+        self.assertEqual(transport.requests, [])
 
 
 @dataclass(frozen=True)
@@ -340,6 +434,23 @@ class RecordingSecretCustodian:
 
     def __repr__(self) -> str:
         return "RecordingSecretCustodian(<redacted>)"
+
+
+@dataclass
+class RecordingAuthorizedSecretResolver:
+    result: SecretResolution
+
+    def __post_init__(self) -> None:
+        self.grants: list[SecretResolutionGrant] = []
+
+    def resolve(self, grant: SecretResolutionGrant) -> SecretResolution:
+        self.grants.append(grant)
+        return self.result
+
+
+class FailingAuthorizedSecretResolver:
+    def resolve(self, grant: SecretResolutionGrant) -> SecretResolution:
+        raise RuntimeError(API_TOKEN)
 
 
 class FakeCloudflareTransport:
@@ -411,10 +522,36 @@ def _ingress() -> NamedPublicIngress:
     )
 
 
-def _resolver() -> LocalDevelopmentSecretResolver:
-    return LocalDevelopmentSecretResolver(
-        SecretProviderAuthority(SecretProviderId("local")),
-        {"secret://local/cf/api-token": API_TOKEN},
+def _authorized_resolver(
+    result: SecretResolution | None = None,
+) -> RecordingAuthorizedSecretResolver:
+    return RecordingAuthorizedSecretResolver(
+        SecretResolved(_authority().api_token_ref, SecretValue(API_TOKEN))
+        if result is None
+        else result
+    )
+
+
+def _resolution_grant(
+    *,
+    reference: SecretReference | None = None,
+    intent: SecretUseIntent = SecretUseIntent.CLOUDFLARE_API_TOKEN,
+) -> SecretResolutionGrant:
+    return SecretResolutionGrant(
+        authorization_id="suse_" + "e" * 64,
+        workspace_id="workspace-a",
+        reference_registration_id="sref_" + "f" * 64,
+        provider_registration_id="sprov_" + "b" * 64,
+        endpoint_reference=SecretProviderEndpointReference("workspace-secrets"),
+        credential_reference=SecretReference("secret://bootstrap/provider-token"),
+        reference=_authority().api_token_ref if reference is None else reference,
+        intent=intent,
+        actor_subject="worker-a",
+        correlation_id="secret-resolution-" + "1" * 64,
+        intent_fingerprint="2" * 64,
+        run_id="run-a",
+        activity_id="allocate-gateway",
+        effect_id="event-001",
     )
 
 
