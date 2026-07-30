@@ -4,7 +4,6 @@ from dataclasses import dataclass, replace
 import hashlib
 import os
 import re
-import time
 from typing import Mapping
 
 from control_plane_kit_core.planning import (
@@ -75,6 +74,7 @@ from control_plane_kit_interpreters.secrets import (
     resolve_secret_deliveries,
     secret_resolution_grant_for,
 )
+from control_plane_kit_interpreters.timing import verification_attempts
 from control_plane_kit_interpreters.verification import (
     HttpVerificationInterpreter,
     PostgresSelectOneTransport,
@@ -527,9 +527,7 @@ class DockerRuntimeInterpreter:
             transport=self.http_transport,
         )
         result = None
-        for attempt in range(1, check.policy.maximum_attempts + 1):
-            if attempt > 1:
-                time.sleep(1)
+        for attempt in verification_attempts(check.policy):
             result = interpreter.execute(
                 VerificationCheckMaterial(
                     material.node_id,
@@ -562,9 +560,7 @@ class DockerRuntimeInterpreter:
             endpoint,
         )
         result = None
-        for attempt in range(1, check.policy.maximum_attempts + 1):
-            if attempt > 1:
-                time.sleep(1)
+        for attempt in verification_attempts(check.policy):
             probe = self.client.run_http_probe(
                 network=_network_name(request, material.runtime_id),
                 url=endpoint.address.value + check.path,
