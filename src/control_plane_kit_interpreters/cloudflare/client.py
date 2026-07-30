@@ -16,10 +16,14 @@ from control_plane_kit_core.public_ingress import (
     PublicIngressContractError,
 )
 from control_plane_kit_core.secrets import (
+    SecretCustodian,
+    SecretCustodyGrant,
+    SecretCustodyReceipt,
     SecretReference,
     SecretResolutionCode,
     SecretResolutionError,
     SecretResolver,
+    SecretUseIntent,
     SecretValue,
     require_resolved_secret,
 )
@@ -88,11 +92,11 @@ class CloudflareZoneAuthority:
 
 @dataclass(frozen=True, repr=False)
 class CloudflareIngressAllocation:
-    """Ephemeral Cloudflare allocation result; token is secret material."""
+    """Secret-free Cloudflare and provider-custody allocation result."""
 
     tunnel_id: str
     tunnel_name: str
-    tunnel_token: SecretValue
+    secret_custody_receipt: SecretCustodyReceipt
     dns_record_id: str
     hostname: str
     endpoint_url: str
@@ -104,15 +108,17 @@ class CloudflareIngressAllocation:
         _validate_hostname(self.hostname)
         if not self.endpoint_url.startswith("https://"):
             raise CloudflareApiError("endpoint_url must be https")
-        if not isinstance(self.tunnel_token, SecretValue):
-            raise CloudflareApiError("tunnel_token must be SecretValue")
+        if not isinstance(self.secret_custody_receipt, SecretCustodyReceipt):
+            raise CloudflareApiError(
+                "allocation requires secret custody receipt"
+            )
 
     def __repr__(self) -> str:
         return (
             "CloudflareIngressAllocation("
             f"tunnel_id={self.tunnel_id!r}, "
             f"tunnel_name={self.tunnel_name!r}, "
-            "tunnel_token=<redacted>, "
+            f"secret_custody_receipt={self.secret_custody_receipt!r}, "
             f"dns_record_id={self.dns_record_id!r}, "
             f"hostname={self.hostname!r})"
         )
@@ -140,6 +146,7 @@ class CloudflareNamedIngressInterpreter:
 
     transport: CloudflareHttpTransport | None = None
     secret_resolver: SecretResolver | None = None
+    secret_custodian: SecretCustodian | None = None
 
     def create(
         self,
@@ -148,6 +155,7 @@ class CloudflareNamedIngressInterpreter:
         authority: CloudflareZoneAuthority,
         allocation_name: str,
         origin_service_url: str,
+        secret_custody_grant: SecretCustodyGrant,
     ) -> CloudflareIngressAllocation:
         if not isinstance(ingress, NamedPublicIngress):
             raise CloudflareApiError("create requires NamedPublicIngress")
@@ -162,6 +170,19 @@ class CloudflareNamedIngressInterpreter:
                 SecretResolutionCode.MISSING,
                 "Cloudflare API token resolver is not configured",
             )
+        if self.secret_custodian is None:
+            raise SecretResolutionError(
+                SecretResolutionCode.MISSING,
+                "generated secret custodian is not configured",
+            )
+        if (
+            not isinstance(secret_custody_grant, SecretCustodyGrant)
+            or not secret_custody_grant.permits(
+                secret_custody_grant.reference,
+                SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN,
+            )
+        ):
+            raise CloudflareApiError("tunnel token custody grant is invalid")
 
         api_token = require_resolved_secret(
             self.secret_resolver,
@@ -173,21 +194,60 @@ class CloudflareNamedIngressInterpreter:
             transport=self.transport,
         )
         tunnel_name = allocation_name
-        tunnel_id = client.create_tunnel(tunnel_name)
-        client.configure_tunnel(
-            tunnel_id,
-            hostname=ingress.hostname,
-            origin_service_url=origin_service_url,
-        )
-        dns_record_id = client.upsert_dns_cname(
-            hostname=ingress.hostname,
-            tunnel_id=tunnel_id,
-        )
-        tunnel_token = client.get_tunnel_token(tunnel_id)
+        tunnel_id: str | None = None
+        dns_record_id: str | None = None
+        custody_receipt: SecretCustodyReceipt | None = None
+        custody_write_attempted = False
+        try:
+            tunnel_id = client.create_tunnel(tunnel_name)
+            client.configure_tunnel(
+                tunnel_id,
+                hostname=ingress.hostname,
+                origin_service_url=origin_service_url,
+            )
+            dns_record_id = client.upsert_dns_cname(
+                hostname=ingress.hostname,
+                tunnel_id=tunnel_id,
+            )
+            tunnel_token = client.get_tunnel_token(tunnel_id)
+            custody_write_attempted = True
+            custody_receipt = self.secret_custodian.store(
+                secret_custody_grant,
+                tunnel_token,
+            )
+            if not custody_receipt.matches(secret_custody_grant):
+                raise CloudflareApiError(
+                    "secret custodian returned mismatched receipt"
+                )
+        except Exception as error:
+            compensation_failed = False
+            if custody_write_attempted:
+                try:
+                    self.secret_custodian.revoke(secret_custody_grant)
+                except Exception:
+                    compensation_failed = True
+            if dns_record_id is not None:
+                try:
+                    client.delete_dns_record(dns_record_id)
+                except Exception:
+                    compensation_failed = True
+            if tunnel_id is not None:
+                try:
+                    client.delete_tunnel(tunnel_id)
+                except Exception:
+                    compensation_failed = True
+            if compensation_failed:
+                raise CloudflareApiError(
+                    "Cloudflare allocation failed and exact compensation is uncertain"
+                ) from error
+            raise
+        assert tunnel_id is not None
+        assert dns_record_id is not None
+        assert custody_receipt is not None
         return CloudflareIngressAllocation(
             tunnel_id=tunnel_id,
             tunnel_name=tunnel_name,
-            tunnel_token=tunnel_token,
+            secret_custody_receipt=custody_receipt,
             dns_record_id=dns_record_id,
             hostname=ingress.hostname,
             endpoint_url=f"https://{ingress.hostname}",
@@ -206,10 +266,17 @@ class CloudflareNamedIngressInterpreter:
         *,
         authority: CloudflareZoneAuthority,
         resources: CloudflareOwnedIngressResources,
+        secret_custody_grant: SecretCustodyGrant,
     ) -> None:
         if not authority.allows_hostname(resources.hostname):
             raise CloudflareApiError("owned hostname is outside admitted authority policy")
         client = self._client(authority)
+        if self.secret_custodian is None:
+            raise SecretResolutionError(
+                SecretResolutionCode.MISSING,
+                "generated secret custodian is not configured",
+            )
+        self.secret_custodian.revoke(secret_custody_grant)
         client.delete_dns_record(resources.dns_record_id)
         client.delete_tunnel(resources.tunnel_id)
 

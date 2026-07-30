@@ -11,11 +11,16 @@ from control_plane_kit_core.public_ingress import (
 )
 from control_plane_kit_core.secrets import (
     LocalDevelopmentSecretResolver,
+    SecretCustodyGrant,
+    SecretCustodyReceipt,
+    SecretProviderEndpointReference,
     SecretProviderAuthority,
     SecretProviderId,
     SecretReference,
     SecretResolutionCode,
     SecretResolutionError,
+    SecretUseIntent,
+    SecretValue,
 )
 
 from control_plane_kit_interpreters.cloudflare import (
@@ -35,9 +40,11 @@ TUNNEL_TOKEN = "eyJ-cloudflare-tunnel-token"
 class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
     def test_create_constructs_tunnel_config_dns_and_token_requests(self) -> None:
         transport = FakeCloudflareTransport()
+        custodian = RecordingSecretCustodian()
         interpreter = CloudflareNamedIngressInterpreter(
             transport=transport,
             secret_resolver=_resolver(),
+            secret_custodian=custodian,
         )
 
         allocation = interpreter.create(
@@ -45,6 +52,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
             authority=_authority(),
             allocation_name="cpk-gateway-001-c0303ba7369e",
             origin_service_url="http://gateway:8000",
+            secret_custody_grant=_custody_grant(),
         )
 
         self.assertEqual(allocation.tunnel_id, "tunnel-001")
@@ -52,7 +60,9 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
         self.assertEqual(allocation.tunnel_name, "cpk-gateway-001-c0303ba7369e")
         self.assertEqual(allocation.hostname, "cpk-gateway-001.openj92.dev")
         self.assertEqual(allocation.endpoint_url, "https://cpk-gateway-001.openj92.dev")
-        self.assertEqual(allocation.tunnel_token.reveal(), TUNNEL_TOKEN)
+        self.assertTrue(allocation.secret_custody_receipt.matches(_custody_grant()))
+        self.assertEqual(custodian.stored_references, [_custody_grant().reference])
+        self.assertTrue(custodian.received_expected_value)
         self.assertNotIn(TUNNEL_TOKEN, repr(allocation))
         self.assertEqual(
             [
@@ -129,7 +139,10 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
 
     def test_missing_secret_resolver_fails_before_api_mutation(self) -> None:
         transport = FakeCloudflareTransport()
-        interpreter = CloudflareNamedIngressInterpreter(transport=transport)
+        interpreter = CloudflareNamedIngressInterpreter(
+            transport=transport,
+            secret_custodian=RecordingSecretCustodian(),
+        )
 
         with self.assertRaises(SecretResolutionError) as raised:
             interpreter.create(
@@ -137,17 +150,66 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                 authority=_authority(),
                 allocation_name="cpk-gateway-001-c0303ba7369e",
                 origin_service_url="http://gateway:8000",
+                secret_custody_grant=_custody_grant(),
             )
 
         self.assertIs(raised.exception.code, SecretResolutionCode.MISSING)
         self.assertEqual(transport.requests, [])
         self.assertNotIn(API_TOKEN, repr(raised.exception))
 
+    def test_missing_secret_custodian_fails_before_api_mutation(self) -> None:
+        transport = FakeCloudflareTransport()
+        interpreter = CloudflareNamedIngressInterpreter(
+            transport=transport,
+            secret_resolver=_resolver(),
+        )
+
+        with self.assertRaises(SecretResolutionError) as raised:
+            interpreter.create(
+                _ingress(),
+                authority=_authority(),
+                allocation_name="cpk-gateway-001-c0303ba7369e",
+                origin_service_url="http://gateway:8000",
+                secret_custody_grant=_custody_grant(),
+            )
+
+        self.assertIs(raised.exception.code, SecretResolutionCode.MISSING)
+        self.assertEqual(transport.requests, [])
+
+    def test_provider_custody_failure_compensates_exact_dns_and_tunnel(self) -> None:
+        transport = FakeCloudflareTransport()
+        custodian = RecordingSecretCustodian(fail_store=True)
+        interpreter = CloudflareNamedIngressInterpreter(
+            transport=transport,
+            secret_resolver=_resolver(),
+            secret_custodian=custodian,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "provider custody failed"):
+            interpreter.create(
+                _ingress(),
+                authority=_authority(),
+                allocation_name="cpk-gateway-001-c0303ba7369e",
+                origin_service_url="http://gateway:8000",
+                secret_custody_grant=_custody_grant(),
+            )
+
+        self.assertEqual(
+            [(request.method, request.path) for request in transport.requests[-2:]],
+            [
+                ("DELETE", "/zones/zone-001/dns_records/dns-001"),
+                ("DELETE", "/accounts/account-001/cfd_tunnel/tunnel-001"),
+            ],
+        )
+        self.assertEqual(custodian.revoked_references, [_custody_grant().reference])
+        self.assertNotIn(TUNNEL_TOKEN, repr(custodian))
+
     def test_hostname_policy_fails_closed_before_api_mutation(self) -> None:
         transport = FakeCloudflareTransport()
         interpreter = CloudflareNamedIngressInterpreter(
             transport=transport,
             secret_resolver=_resolver(),
+            secret_custodian=RecordingSecretCustodian(),
         )
 
         with self.assertRaises(CloudflareApiError) as raised:
@@ -162,6 +224,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                 authority=_authority(),
                 allocation_name="cpk-gateway-001-c0303ba7369e",
                 origin_service_url="http://gateway:8000",
+                secret_custody_grant=_custody_grant(),
             )
 
         self.assertIn("hostname", str(raised.exception))
@@ -172,6 +235,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
         interpreter = CloudflareNamedIngressInterpreter(
             transport=transport,
             secret_resolver=_resolver(),
+            secret_custodian=RecordingSecretCustodian(),
         )
 
         with self.assertRaises(CloudflareApiError) as raised:
@@ -180,6 +244,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                 authority=_authority(),
                 allocation_name="cpk gateway 001",
                 origin_service_url="http://gateway:8000",
+                secret_custody_grant=_custody_grant(),
             )
 
         self.assertIn("allocation_name", str(raised.exception))
@@ -190,6 +255,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
         interpreter = CloudflareNamedIngressInterpreter(
             transport=transport,
             secret_resolver=_resolver(),
+            secret_custodian=RecordingSecretCustodian(),
         )
 
         interpreter.teardown(
@@ -200,6 +266,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                 tunnel_name="cpk-gateway-001",
                 hostname="cpk-gateway-001.openj92.dev",
             ),
+            secret_custody_grant=_custody_grant(),
         )
 
         self.assertEqual(
@@ -215,6 +282,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
         interpreter = CloudflareNamedIngressInterpreter(
             transport=transport,
             secret_resolver=_resolver(),
+            secret_custodian=RecordingSecretCustodian(),
         )
 
         with self.assertRaises(CloudflareApiError) as raised:
@@ -223,6 +291,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                 authority=_authority(),
                 allocation_name="cpk-gateway-001-c0303ba7369e",
                 origin_service_url="http://gateway:8000",
+                secret_custody_grant=_custody_grant(),
             )
 
         text = repr(raised.exception)
@@ -238,6 +307,39 @@ class RecordedRequest:
     headers: Mapping[str, str]
     json: Mapping[str, object] | None
     params: Mapping[str, str] | None
+
+
+@dataclass(repr=False)
+class RecordingSecretCustodian:
+    fail_store: bool = False
+
+    def __post_init__(self) -> None:
+        self.stored_references: list[SecretReference] = []
+        self.revoked_references: list[SecretReference] = []
+        self.received_expected_value = False
+
+    def store(
+        self,
+        grant: SecretCustodyGrant,
+        value: SecretValue,
+    ) -> SecretCustodyReceipt:
+        self.stored_references.append(grant.reference)
+        self.received_expected_value = value.reveal() == TUNNEL_TOKEN
+        if self.fail_store:
+            raise RuntimeError("provider custody failed")
+        return SecretCustodyReceipt(
+            custody_id=grant.custody_id,
+            provider_registration_id=grant.provider_registration_id,
+            reference=grant.reference,
+            version_id="version-tunnel-token",
+            version_number=1,
+        )
+
+    def revoke(self, grant: SecretCustodyGrant) -> None:
+        self.revoked_references.append(grant.reference)
+
+    def __repr__(self) -> str:
+        return "RecordingSecretCustodian(<redacted>)"
 
 
 class FakeCloudflareTransport:
@@ -313,6 +415,28 @@ def _resolver() -> LocalDevelopmentSecretResolver:
     return LocalDevelopmentSecretResolver(
         SecretProviderAuthority(SecretProviderId("local")),
         {"secret://local/cf/api-token": API_TOKEN},
+    )
+
+
+def _custody_grant() -> SecretCustodyGrant:
+    return SecretCustodyGrant(
+        custody_id="scust_" + "a" * 64,
+        workspace_id="workspace-a",
+        provider_registration_id="sprov_" + "b" * 64,
+        endpoint_reference=SecretProviderEndpointReference("workspace-secrets"),
+        credential_reference=SecretReference(
+            "secret://bootstrap/provider-token"
+        ),
+        reference=SecretReference(
+            "secret://generated/ingress/cloudflared-tunnel-token/token-001"
+        ),
+        intent=SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN,
+        actor_subject="worker-a",
+        correlation_id="secret-custody-" + "c" * 64,
+        custody_fingerprint="d" * 64,
+        run_id="run-a",
+        activity_id="allocate-gateway",
+        effect_id="event-001",
     )
 
 

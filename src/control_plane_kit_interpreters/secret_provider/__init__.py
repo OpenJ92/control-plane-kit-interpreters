@@ -16,10 +16,12 @@ from .client import (
     SecretProviderVersionMetadata,
     canonical_provider_secret_id,
 )
+from .custody import ControlPlaneKitSecretsCustodian
 
 
 __all__ = [
     "ControlPlaneKitSecretsClient",
+    "ControlPlaneKitSecretsCustodian",
     "SecretProviderBootstrapError",
     "SecretProviderBootstrapRegistry",
     "SecretProviderClientCode",
