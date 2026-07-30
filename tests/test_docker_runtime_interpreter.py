@@ -770,6 +770,38 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertEqual(result.failure.code, "docker.health-check-failed")
         self.assertEqual(result.failure.details["checks"][0]["outcome"], "failed")
 
+    def test_wait_for_healthy_uses_product_verification_cadence(self) -> None:
+        fake_client = FakeDockerClient()
+        client = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
+        )
+        responses = iter(
+            (
+                DockerSdkHttpProbeResult(503, 9, 0),
+                DockerSdkHttpProbeResult(200, 9, 0),
+            )
+        )
+        client.run_http_probe = lambda **_: next(responses)  # type: ignore[method-assign]
+        interpreter = DockerRuntimeInterpreter(client)
+        product = _product_with_health_check(
+            policy=VerificationPolicy(
+                interval_seconds=1.5,
+                maximum_attempts=2,
+            )
+        )
+
+        with patch("control_plane_kit_interpreters.timing.time.sleep") as sleep:
+            result = interpreter.execute(
+                _request(
+                    WaitForHealthy(NodeTarget("api")),
+                    products=(_material(product),),
+                )
+            )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        sleep.assert_called_once_with(1.5)
+
     def test_wait_for_healthy_executes_postgres_verification_with_secret(self) -> None:
         fake_client = FakeDockerClient()
         transport = FakePostgresTransport([True])
@@ -1679,7 +1711,10 @@ def _product() -> ContainerServerProduct:
     )
 
 
-def _product_with_health_check() -> ContainerServerProduct:
+def _product_with_health_check(
+    *,
+    policy: VerificationPolicy | None = None,
+) -> ContainerServerProduct:
     product = _product()
     return ContainerServerProduct(
         identity=product.identity,
@@ -1695,6 +1730,7 @@ def _product_with_health_check() -> ContainerServerProduct:
                         check_id="ready",
                         provider_socket="http",
                         path="/health/ready",
+                        policy=policy or VerificationPolicy(),
                     ),
                 ),
             ),

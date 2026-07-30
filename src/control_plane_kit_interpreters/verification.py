@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import socket
-import time
 from typing import Protocol
 
 import httpx
@@ -45,6 +44,7 @@ from control_plane_kit_interpreters.probes.security import (
     ProbeSecurityError,
     authorize_probe_endpoint,
 )
+from control_plane_kit_interpreters.timing import verification_attempts
 
 
 @dataclass(frozen=True)
@@ -214,7 +214,7 @@ class HttpVerificationInterpreter:
             VerificationOutcome.FAILED,
             1,
         )
-        for attempt in range(1, check.policy.maximum_attempts + 1):
+        for attempt in verification_attempts(check.policy):
             last = self._attempt(material, target, attempt)
             if last.outcome is VerificationOutcome.PASSED:
                 return last
@@ -328,7 +328,7 @@ class RedisVerificationInterpreter:
             VerificationOutcome.FAILED,
             1,
         )
-        for attempt in range(1, check.policy.maximum_attempts + 1):
+        for attempt in verification_attempts(check.policy):
             try:
                 response = self.transport.ping(
                     target.connect_host,
@@ -455,9 +455,7 @@ class PostgresVerificationInterpreter:
             VerificationOutcome.FAILED,
             1,
         )
-        for attempt in range(1, check.policy.maximum_attempts + 1):
-            if attempt > 1:
-                time.sleep(1)
+        for attempt in verification_attempts(check.policy):
             try:
                 transport = self.transport or PsycopgPostgresSelectOneTransport()
                 outcome = (

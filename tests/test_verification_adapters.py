@@ -158,6 +158,27 @@ class VerificationAdapterTests(unittest.TestCase):
         self.assertIs(result.outcome, VerificationOutcome.REJECTED)
         self.assertEqual(calls, 0)
 
+    def test_http_retries_use_policy_cadence(self) -> None:
+        responses = iter((503, 200))
+
+        interpreter = HttpVerificationInterpreter(
+            ProbeAddressPolicy(
+                runtime_private_authorities=frozenset(("http://api:8080",))
+            ),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(next(responses))
+            ),
+        )
+
+        with patch("control_plane_kit_interpreters.timing.time.sleep") as sleep:
+            result = interpreter.execute(
+                _http_material(attempts=2, interval_seconds=1.25)
+            )
+
+        self.assertIs(result.outcome, VerificationOutcome.PASSED)
+        self.assertEqual(result.attempts, 2)
+        sleep.assert_called_once_with(1.25)
+
     def test_redis_ping_retries_bounded_exchange_and_retains_no_payload(self) -> None:
         transport = ScriptedRedisTransport([OSError(), b"+PONG\r\n"])
         interpreter = RedisVerificationInterpreter(
@@ -167,13 +188,17 @@ class VerificationAdapterTests(unittest.TestCase):
             transport=transport,
         )
 
-        result = interpreter.execute(_redis_material(attempts=2))
+        with patch("control_plane_kit_interpreters.timing.time.sleep") as sleep:
+            result = interpreter.execute(
+                _redis_material(attempts=2, interval_seconds=1.5)
+            )
 
         self.assertIs(result.outcome, VerificationOutcome.PASSED)
         self.assertEqual(result.attempts, 2)
         self.assertEqual(result.evidence, RedisVerificationEvidence(7))
         self.assertEqual(len(transport.calls), 2)
         self.assertEqual(transport.calls[0][0:2], ("cache", 6379))
+        sleep.assert_called_once_with(1.5)
 
     def test_postgres_select_one_is_semantic_readiness_not_tcp_reachability(self) -> None:
         transport = ScriptedPostgresTransport([False, True])
@@ -210,12 +235,14 @@ class VerificationAdapterTests(unittest.TestCase):
             credential_resolver=_postgres_secret_resolver(),
         )
 
-        with patch("control_plane_kit_interpreters.verification.time.sleep") as sleep:
-            result = interpreter.execute(_postgres_material(attempts=3))
+        with patch("control_plane_kit_interpreters.timing.time.sleep") as sleep:
+            result = interpreter.execute(
+                _postgres_material(attempts=3, interval_seconds=1.75)
+            )
 
         self.assertIs(result.outcome, VerificationOutcome.PASSED)
         self.assertEqual(result.attempts, 3)
-        sleep.assert_has_calls([call(1), call(1)])
+        sleep.assert_has_calls([call(1.75), call(1.75)])
 
     def test_postgres_timeout_remains_distinct_from_failed_query(self) -> None:
         transport = ScriptedPostgresTransport([socket.timeout()])
@@ -267,7 +294,12 @@ class VerificationAdapterTests(unittest.TestCase):
         self.assertEqual(transport.calls, [])
 
 
-def _http_material(*, maximum_bytes: int = 64) -> VerificationCheckMaterial:
+def _http_material(
+    *,
+    maximum_bytes: int = 64,
+    attempts: int = 1,
+    interval_seconds: float = 1.0,
+) -> VerificationCheckMaterial:
     return VerificationCheckMaterial(
         "api",
         "graph-1",
@@ -275,7 +307,11 @@ def _http_material(*, maximum_bytes: int = 64) -> VerificationCheckMaterial:
             check_id="semantic-http",
             provider_socket="internal",
             path="/verify",
-            policy=VerificationPolicy(maximum_evidence_bytes=maximum_bytes),
+            policy=VerificationPolicy(
+                interval_seconds=interval_seconds,
+                maximum_attempts=attempts,
+                maximum_evidence_bytes=maximum_bytes,
+            ),
         ),
         RuntimeEndpointObservation(
             "api",
@@ -288,14 +324,21 @@ def _http_material(*, maximum_bytes: int = 64) -> VerificationCheckMaterial:
     )
 
 
-def _redis_material(*, attempts: int = 1) -> VerificationCheckMaterial:
+def _redis_material(
+    *,
+    attempts: int = 1,
+    interval_seconds: float = 1.0,
+) -> VerificationCheckMaterial:
     return VerificationCheckMaterial(
         "cache",
         "graph-1",
         RedisCheck(
             check_id="redis-ping",
             provider_socket="redis",
-            policy=VerificationPolicy(maximum_attempts=attempts),
+            policy=VerificationPolicy(
+                interval_seconds=interval_seconds,
+                maximum_attempts=attempts,
+            ),
         ),
         RuntimeEndpointObservation(
             "cache",
@@ -308,13 +351,21 @@ def _redis_material(*, attempts: int = 1) -> VerificationCheckMaterial:
     )
 
 
-def _postgres_material(*, attempts: int = 1) -> VerificationCheckMaterial:
-    return _postgres_material_with_auth(attempts=attempts)
+def _postgres_material(
+    *,
+    attempts: int = 1,
+    interval_seconds: float = 1.0,
+) -> VerificationCheckMaterial:
+    return _postgres_material_with_auth(
+        attempts=attempts,
+        interval_seconds=interval_seconds,
+    )
 
 
 def _postgres_material_with_auth(
     *,
     attempts: int = 1,
+    interval_seconds: float = 1.0,
     authentication: bool = True,
 ) -> VerificationCheckMaterial:
     return VerificationCheckMaterial(
@@ -323,7 +374,10 @@ def _postgres_material_with_auth(
         PostgresQueryCheck(
             check_id="select-one",
             provider_socket="postgres",
-            policy=VerificationPolicy(maximum_attempts=attempts),
+            policy=VerificationPolicy(
+                interval_seconds=interval_seconds,
+                maximum_attempts=attempts,
+            ),
             authentication=(
                 PostgresPasswordAuthentication(
                     database="cpk",
