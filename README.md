@@ -136,6 +136,22 @@ CNAME, retrieve the generated tunnel token, observe tunnel status, and delete
 only recorded owned resources. Generated tunnel-token delivery into the
 `cloudflared` connector is a separate activity-ordering concern.
 
+## Durable Secret Provider Client
+
+The optional `secret-provider` extra owns the bounded HTTP client for
+`control-plane-kit-secrets`. Process bootstrap is explicit:
+
+```text
+SecretProviderEndpointReference -> configured provider base URL
+credential SecretReference      -> mounted credential file
+```
+
+The provider credential is never resolved through the provider it authenticates
+to. `SecretReference` values are mapped to the provider's single `{secret_id}`
+path segment by base64url-encoding the complete UTF-8 `reference_id`, removing
+padding, and prefixing `cpk1_`. This is deterministic and injective; it does not
+discard path segments or rely on a collision-prone hash.
+
 ## Probe And Verification Adapters
 
 `control_plane_kit_interpreters.probes` owns concrete address authorization,
