@@ -15,11 +15,14 @@ import httpx
 from control_plane_kit_core.secrets import (
     SecretProviderEndpointReference,
     SecretReference,
+    SecretResolutionGrant,
+    SecretResolved,
     SecretUseIntent,
     SecretValue,
 )
 from control_plane_kit_interpreters.secret_provider import (
     ControlPlaneKitSecretsClient,
+    ControlPlaneKitSecretsResolver,
     SecretProviderBootstrapRegistry,
     SecretProviderClientCode,
     SecretProviderClientError,
@@ -96,6 +99,7 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                     "secret://provider-live/cloudflare/generated/tunnel/token"
                 )
                 value = SecretValue("generated-tunnel-token-value")
+                resolver = ControlPlaneKitSecretsResolver(registry)
 
                 written = client.write(
                     workspace_id="workspace-1",
@@ -104,6 +108,24 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                     intent=SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN,
                     caller_subject="cloudflare-interpreter",
                     correlation_id="ingress-create-1",
+                )
+                grant_resolved = resolver.resolve(
+                    SecretResolutionGrant(
+                        authorization_id="suse_" + "a" * 64,
+                        workspace_id="workspace-1",
+                        reference_registration_id="sref_" + "b" * 64,
+                        provider_registration_id="sprov_" + "c" * 64,
+                        endpoint_reference=endpoint,
+                        credential_reference=credential,
+                        reference=reference,
+                        intent=SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN,
+                        actor_subject="docker-interpreter",
+                        correlation_id="grant-resolver-1",
+                        intent_fingerprint="d" * 64,
+                        run_id="run-1",
+                        activity_id="activity-1",
+                        effect_id="effect-1",
+                    )
                 )
                 resolved = client.resolve(
                     workspace_id="workspace-1",
@@ -128,6 +150,12 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                     )
 
                 self.assertEqual(written.reference, reference)
+                self.assertIsInstance(grant_resolved, SecretResolved)
+                assert isinstance(grant_resolved, SecretResolved)
+                self.assertEqual(
+                    grant_resolved.value.reveal(),
+                    "generated-tunnel-token-value",
+                )
                 self.assertEqual(
                     resolved.value.reveal(),
                     "generated-tunnel-token-value",
@@ -153,6 +181,7 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                 for row in rows
             }
             self.assertIn(("stored", "ingress-create-1"), correlations)
+            self.assertIn(("resolved", "grant-resolver-1"), correlations)
             self.assertIn(("resolved", "connector-start-1"), correlations)
             self.assertIn(("revoked", "ingress-compensate-1"), correlations)
             self.assertIn(("revoked", "connector-retry-1"), correlations)
