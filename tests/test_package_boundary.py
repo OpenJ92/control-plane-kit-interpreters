@@ -25,6 +25,7 @@ class PackageBoundaryTests(unittest.TestCase):
     def test_source_does_not_import_server_process_or_operations_packages(self) -> None:
         forbidden = {
             "control_plane_kit_operations",
+            "control_plane_kit_secrets",
             "control_plane_kit_servers",
             "control_plane_kit_servers_cpk_server",
             "fastapi",
