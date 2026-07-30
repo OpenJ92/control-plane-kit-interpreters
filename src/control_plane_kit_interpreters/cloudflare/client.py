@@ -16,16 +16,17 @@ from control_plane_kit_core.public_ingress import (
     PublicIngressContractError,
 )
 from control_plane_kit_core.secrets import (
+    AuthorizedSecretResolver,
     SecretCustodian,
     SecretCustodyGrant,
     SecretCustodyReceipt,
     SecretReference,
     SecretResolutionCode,
     SecretResolutionError,
-    SecretResolver,
+    SecretResolutionGrant,
     SecretUseIntent,
     SecretValue,
-    require_resolved_secret,
+    require_authorized_secret,
 )
 
 
@@ -145,7 +146,7 @@ class CloudflareNamedIngressInterpreter:
     """Interpreter for provider-neutral named ingress requests."""
 
     transport: CloudflareHttpTransport | None = None
-    secret_resolver: SecretResolver | None = None
+    authorized_secret_resolver: AuthorizedSecretResolver | None = None
     secret_custodian: SecretCustodian | None = None
 
     def create(
@@ -155,6 +156,7 @@ class CloudflareNamedIngressInterpreter:
         authority: CloudflareZoneAuthority,
         allocation_name: str,
         origin_service_url: str,
+        secret_resolution_grant: SecretResolutionGrant,
         secret_custody_grant: SecretCustodyGrant,
     ) -> CloudflareIngressAllocation:
         if not isinstance(ingress, NamedPublicIngress):
@@ -165,7 +167,7 @@ class CloudflareNamedIngressInterpreter:
         _validate_origin_service(origin_service_url)
         if not authority.allows_hostname(ingress.hostname):
             raise CloudflareApiError("hostname is outside admitted authority policy")
-        if self.secret_resolver is None:
+        if self.authorized_secret_resolver is None:
             raise SecretResolutionError(
                 SecretResolutionCode.MISSING,
                 "Cloudflare API token resolver is not configured",
@@ -184,9 +186,10 @@ class CloudflareNamedIngressInterpreter:
         ):
             raise CloudflareApiError("tunnel token custody grant is invalid")
 
-        api_token = require_resolved_secret(
-            self.secret_resolver,
-            authority.api_token_ref,
+        api_token = _resolve_api_token(
+            self.authorized_secret_resolver,
+            authority,
+            secret_resolution_grant,
         )
         client = CloudflareApiClient(
             authority,
@@ -258,43 +261,82 @@ class CloudflareNamedIngressInterpreter:
         *,
         authority: CloudflareZoneAuthority,
         resources: CloudflareOwnedIngressResources,
+        secret_resolution_grant: SecretResolutionGrant,
     ) -> Mapping[str, object]:
-        return self._client(authority).get_tunnel(resources.tunnel_id)
+        return self._client(
+            authority,
+            secret_resolution_grant,
+        ).get_tunnel(resources.tunnel_id)
 
     def teardown(
         self,
         *,
         authority: CloudflareZoneAuthority,
         resources: CloudflareOwnedIngressResources,
+        secret_resolution_grant: SecretResolutionGrant,
         secret_custody_grant: SecretCustodyGrant,
     ) -> None:
         if not authority.allows_hostname(resources.hostname):
             raise CloudflareApiError("owned hostname is outside admitted authority policy")
-        client = self._client(authority)
         if self.secret_custodian is None:
             raise SecretResolutionError(
                 SecretResolutionCode.MISSING,
                 "generated secret custodian is not configured",
             )
+        client = self._client(authority, secret_resolution_grant)
         self.secret_custodian.revoke(secret_custody_grant)
         client.delete_dns_record(resources.dns_record_id)
         client.delete_tunnel(resources.tunnel_id)
 
-    def _client(self, authority: CloudflareZoneAuthority) -> "CloudflareApiClient":
-        if self.secret_resolver is None:
+    def _client(
+        self,
+        authority: CloudflareZoneAuthority,
+        secret_resolution_grant: SecretResolutionGrant,
+    ) -> "CloudflareApiClient":
+        if self.authorized_secret_resolver is None:
             raise SecretResolutionError(
                 SecretResolutionCode.MISSING,
                 "Cloudflare API token resolver is not configured",
             )
-        api_token = require_resolved_secret(
-            self.secret_resolver,
-            authority.api_token_ref,
+        api_token = _resolve_api_token(
+            self.authorized_secret_resolver,
+            authority,
+            secret_resolution_grant,
         )
         return CloudflareApiClient(
             authority,
             api_token=api_token,
             transport=self.transport,
         )
+
+
+def _resolve_api_token(
+    resolver: AuthorizedSecretResolver,
+    authority: CloudflareZoneAuthority,
+    grant: SecretResolutionGrant,
+) -> SecretValue:
+    if (
+        not isinstance(grant, SecretResolutionGrant)
+        or not grant.permits(
+            authority.api_token_ref,
+            SecretUseIntent.CLOUDFLARE_API_TOKEN,
+        )
+    ):
+        raise SecretResolutionError(
+            SecretResolutionCode.DENIED,
+            "Cloudflare API token requires exact committed authorization",
+        )
+    try:
+        return require_authorized_secret(resolver, grant)
+    except SecretResolutionError as error:
+        raise SecretResolutionError(
+            error.code,
+            "Cloudflare API token could not be resolved",
+        ) from None
+    except Exception:
+        raise CloudflareApiError(
+            "Cloudflare API token resolution failed",
+        ) from None
 
 
 @dataclass(frozen=True)
