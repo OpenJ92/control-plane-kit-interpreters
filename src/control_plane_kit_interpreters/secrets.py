@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Mapping, Protocol, TypeAlias
 
 from control_plane_kit_core.runtime_effects import ImagePullAuthority
 from control_plane_kit_core.secrets import (
+    AuthorizedSecretResolver,
     SecretDelivery,
     SecretEnvironmentDelivery,
     SecretFileDelivery,
@@ -15,10 +17,17 @@ from control_plane_kit_core.secrets import (
     SecretReferenceEnvironmentDelivery,
     SecretResolutionCode,
     SecretResolutionError,
+    SecretResolutionGrant,
     SecretResolver,
+    SecretUseIntent,
     SecretValue,
+    require_authorized_secret,
     require_resolved_secret,
 )
+
+
+_MAX_OCI_CREDENTIAL_BYTES = 16_384
+_MAX_OCI_CREDENTIAL_FIELD_BYTES = 4_096
 
 
 @dataclass(frozen=True, repr=False)
@@ -175,6 +184,148 @@ def resolve_secret_deliveries(
                         target_path,
                     )
     return ResolvedSecretDeliveries(environment, tuple(files))
+
+
+def secret_resolution_grant_for(
+    grants: tuple[SecretResolutionGrant, ...],
+    reference: SecretReference,
+    intent: SecretUseIntent,
+) -> SecretResolutionGrant:
+    """Select one exact committed grant without revealing reference material."""
+
+    matches = tuple(
+        grant
+        for grant in grants
+        if grant.permits(reference, intent)
+    )
+    if len(matches) != 1:
+        raise SecretResolutionError(
+            SecretResolutionCode.DENIED,
+            "secret resolution requires one exact committed grant",
+        )
+    return matches[0]
+
+
+def resolve_authorized_secret_deliveries(
+    deliveries: tuple[SecretDelivery, ...],
+    *,
+    grants: tuple[SecretResolutionGrant, ...],
+    resolver: AuthorizedSecretResolver,
+) -> ResolvedSecretDeliveries:
+    """Resolve value-bearing deliveries through their exact committed grants."""
+
+    environment: dict[str, str] = {}
+    files: list[SecretFileRuntimeMaterial] = []
+    for delivery in deliveries:
+        match delivery:
+            case SecretEnvironmentDelivery(
+                environment_name=name,
+                reference=reference,
+                intent=intent,
+            ):
+                grant = secret_resolution_grant_for(grants, reference, intent)
+                _put_environment(
+                    environment,
+                    name,
+                    require_authorized_secret(resolver, grant).reveal(),
+                )
+            case SecretReferenceEnvironmentDelivery(
+                environment_name=name,
+                reference=reference,
+            ):
+                _put_environment(environment, name, reference.reference_id)
+            case SecretFileDelivery(
+                target_path=target_path,
+                reference=reference,
+                intent=intent,
+                file_mode=file_mode,
+                path_binding=path_binding,
+            ):
+                grant = secret_resolution_grant_for(grants, reference, intent)
+                files.append(
+                    SecretFileRuntimeMaterial(
+                        reference,
+                        target_path,
+                        require_authorized_secret(resolver, grant),
+                        file_mode,
+                        None
+                        if path_binding is None
+                        else path_binding.environment_name,
+                    )
+                )
+                if path_binding is not None:
+                    _put_environment(
+                        environment,
+                        path_binding.environment_name,
+                        target_path,
+                    )
+    return ResolvedSecretDeliveries(environment, tuple(files))
+
+
+def parse_image_pull_credential(value: SecretValue) -> ResolvedImagePullCredential:
+    """Decode one bounded provider secret into the two supported OCI auth shapes."""
+
+    if not isinstance(value, SecretValue):
+        raise SecretResolutionError(
+            SecretResolutionCode.INVALID_RESOLVER_RESULT,
+            "image pull credential is malformed",
+        )
+    encoded = value.reveal().encode("utf-8")
+    if not encoded or len(encoded) > _MAX_OCI_CREDENTIAL_BYTES:
+        raise SecretResolutionError(
+            SecretResolutionCode.INVALID_RESOLVER_RESULT,
+            "image pull credential is malformed",
+        )
+    try:
+        decoded = json.loads(
+            encoded,
+            object_pairs_hook=_unique_json_object,
+        )
+    except (TypeError, ValueError, UnicodeDecodeError):
+        raise SecretResolutionError(
+            SecretResolutionCode.INVALID_RESOLVER_RESULT,
+            "image pull credential is malformed",
+        ) from None
+    if not isinstance(decoded, dict):
+        raise SecretResolutionError(
+            SecretResolutionCode.INVALID_RESOLVER_RESULT,
+            "image pull credential is malformed",
+        )
+    if set(decoded) == {"identitytoken"}:
+        return ResolvedImagePullCredential(
+            identitytoken=SecretValue(_credential_field(decoded["identitytoken"])),
+        )
+    if set(decoded) == {"username", "password"}:
+        return ResolvedImagePullCredential(
+            username=_credential_field(decoded["username"]),
+            password=SecretValue(_credential_field(decoded["password"])),
+        )
+    raise SecretResolutionError(
+        SecretResolutionCode.INVALID_RESOLVER_RESULT,
+        "image pull credential is malformed",
+    )
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    values: dict[str, object] = {}
+    for key, value in pairs:
+        if key in values:
+            raise ValueError("duplicate key")
+        values[key] = value
+    return values
+
+
+def _credential_field(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > _MAX_OCI_CREDENTIAL_FIELD_BYTES
+    ):
+        raise SecretResolutionError(
+            SecretResolutionCode.INVALID_RESOLVER_RESULT,
+            "image pull credential is malformed",
+        )
+    return value
 
 
 def _put_environment(values: dict[str, str], name: str, value: str) -> None:

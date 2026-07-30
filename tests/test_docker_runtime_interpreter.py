@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import socket
 import unittest
 from unittest.mock import patch
@@ -57,9 +58,11 @@ from control_plane_kit_core.secrets import (
     SecretFileMode,
     SecretFilePathBinding,
     SecretMissing,
+    SecretProviderEndpointReference,
     SecretProviderAuthority,
     SecretProviderId,
     SecretReference,
+    SecretResolutionGrant,
     SecretResolved,
     SecretResolution,
     SecretUseIntent,
@@ -1085,6 +1088,348 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertEqual(result.failure.code, "docker.runtime-authority-kind-unsupported")
         self.assertEqual(fake_client.networks.created, [])
 
+    def test_authorized_delivery_requires_exact_grant_without_legacy_fallback(self) -> None:
+        fake_client = FakeDockerClient()
+        reference = SecretReference("secret://local/api-token")
+        authorized = FakeAuthorizedSecretResolver(
+            fake_client,
+            {(reference, SecretUseIntent.APPLICATION_CONTROL_TOKEN): "authorized-token"},
+        )
+        legacy = FakeSecretResolver(
+            fake_client,
+            SecretResolved(reference, SecretValue("legacy-token")),
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            secret_resolver=legacy,
+            authorized_secret_resolver=authorized,
+        )
+
+        result = interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(_material(_product_with_secret_delivery()),),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.FAILED)
+        self.assertEqual(result.failure.code, "docker.secret-resolution-denied")
+        self.assertEqual(authorized.requests, [])
+        self.assertEqual(legacy.requests, [])
+        self.assertEqual(fake_client.networks.created, [])
+        self.assertEqual(fake_client.images.pulled, [])
+
+    def test_authorized_delivery_rejects_wrong_intent_grant_without_resolution(self) -> None:
+        fake_client = FakeDockerClient()
+        reference = SecretReference("secret://local/api-token")
+        wrong_grant = _grant(reference, SecretUseIntent.POSTGRES_PASSWORD)
+        resolver = FakeAuthorizedSecretResolver(
+            fake_client,
+            {(reference, SecretUseIntent.APPLICATION_CONTROL_TOKEN): "do-not-resolve"},
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            authorized_secret_resolver=resolver,
+        )
+
+        result = interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(_material(_product_with_secret_delivery()),),
+                secret_resolution_grants=(wrong_grant,),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.FAILED)
+        self.assertEqual(result.failure.code, "docker.secret-resolution-denied")
+        self.assertEqual(resolver.requests, [])
+        self.assertEqual(fake_client.networks.created, [])
+        self.assertNotIn("do-not-resolve", repr(result.descriptor()))
+
+    def test_authorized_delivery_resolves_exact_grant_before_docker_mutation(self) -> None:
+        fake_client = FakeDockerClient()
+        reference = SecretReference("secret://local/api-token")
+        grant = _grant(reference, SecretUseIntent.APPLICATION_CONTROL_TOKEN)
+        resolver = FakeAuthorizedSecretResolver(
+            fake_client,
+            {(reference, grant.intent): "authorized-token"},
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            authorized_secret_resolver=resolver,
+        )
+
+        result = interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(_material(_product_with_secret_delivery()),),
+                secret_resolution_grants=(grant,),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(resolver.requests, [grant])
+        self.assertEqual(resolver.networks_created_during_resolution, [0])
+        self.assertEqual(
+            _workload_container_record(fake_client)["environment"]["API_TOKEN"],
+            "authorized-token",
+        )
+
+    def test_authorized_oci_credential_uses_strict_provider_material(self) -> None:
+        fake_client = FakeDockerClient()
+        reference = SecretReference("secret://registry/ghcr/runtime-fixture")
+        grant = _grant(reference, SecretUseIntent.OCI_PULL_CREDENTIAL)
+        resolver = FakeAuthorizedSecretResolver(
+            fake_client,
+            {(reference, grant.intent): json.dumps(
+                {"username": "cpk", "password": "registry-token"}
+            )},
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            authorized_secret_resolver=resolver,
+        )
+
+        result = interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(
+                    _material(
+                        _product(),
+                        pull_authority=ImagePullAuthority(
+                            "ghcr.io",
+                            "openj92/runtime-fixture",
+                            reference,
+                        ),
+                    ),
+                ),
+                secret_resolution_grants=(grant,),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(resolver.requests, [grant])
+        self.assertEqual(
+            fake_client.images.pulled[0]["auth_config"],
+            {"username": "cpk", "password": "registry-token"},
+        )
+        self.assertNotIn("registry-token", repr(result.descriptor()))
+
+    def test_authorized_file_delivery_materializes_only_after_exact_grant(self) -> None:
+        fake_client = FakeDockerClient()
+        reference = SecretReference("secret://local/api-token")
+        grant = _grant(reference, SecretUseIntent.APPLICATION_CONTROL_TOKEN)
+        resolver = FakeAuthorizedSecretResolver(
+            fake_client,
+            {(reference, grant.intent): "file-secret-content"},
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            authorized_secret_resolver=resolver,
+        )
+
+        result = interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(_material(_product_with_file_secret_delivery()),),
+                secret_resolution_grants=(grant,),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(resolver.requests, [grant])
+        container = _workload_container_record(fake_client)
+        self.assertEqual(
+            container["environment"]["API_TOKEN_FILE"],
+            "/run/secrets/api-token",
+        )
+        self.assertNotIn("file-secret-content", repr(result.descriptor()))
+
+    def test_authorized_oci_identity_token_uses_exact_shape(self) -> None:
+        fake_client = FakeDockerClient()
+        reference = SecretReference("secret://registry/ghcr/runtime-fixture")
+        grant = _grant(reference, SecretUseIntent.OCI_PULL_CREDENTIAL)
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            authorized_secret_resolver=FakeAuthorizedSecretResolver(
+                fake_client,
+                {(reference, grant.intent): '{"identitytoken":"registry-token"}'},
+            ),
+        )
+
+        result = interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(
+                    _material(
+                        _product(),
+                        pull_authority=ImagePullAuthority(
+                            "ghcr.io",
+                            "openj92/runtime-fixture",
+                            reference,
+                        ),
+                    ),
+                ),
+                secret_resolution_grants=(grant,),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(
+            fake_client.images.pulled[0]["auth_config"],
+            {"identitytoken": "registry-token"},
+        )
+        self.assertNotIn("registry-token", repr(result.descriptor()))
+
+    def test_malformed_authorized_oci_credential_fails_before_docker_mutation(self) -> None:
+        reference = SecretReference("secret://registry/ghcr/runtime-fixture")
+        grant = _grant(reference, SecretUseIntent.OCI_PULL_CREDENTIAL)
+        malformed_values = (
+            '{"username":"cpk","password":"token","extra":"no"}',
+            '{"identitytoken":"token","username":"cpk"}',
+            '{"auths":{"ghcr.io":{}}}',
+            '{"username":"cpk","username":"other","password":"token"}',
+        )
+        for value in malformed_values:
+            with self.subTest(value=value):
+                fake_client = FakeDockerClient()
+                interpreter = DockerRuntimeInterpreter(
+                    DockerSdkClient(
+                        client=fake_client,
+                        docker_module=FakeDockerModule(fake_client),
+                    ),
+                    authorized_secret_resolver=FakeAuthorizedSecretResolver(
+                        fake_client,
+                        {(reference, grant.intent): value},
+                    ),
+                )
+                result = interpreter.execute(
+                    _request(
+                        StartNode(NodeTarget("api")),
+                        products=(
+                            _material(
+                                _product(),
+                                pull_authority=ImagePullAuthority(
+                                    "ghcr.io",
+                                    "openj92/runtime-fixture",
+                                    reference,
+                                ),
+                            ),
+                        ),
+                        secret_resolution_grants=(grant,),
+                    )
+                )
+                self.assertIs(result.kind, EffectResultKind.FAILED)
+                self.assertEqual(
+                    result.failure.code,
+                    "docker.image-pull-credential-malformed",
+                )
+                self.assertEqual(fake_client.networks.created, [])
+                self.assertEqual(fake_client.images.pulled, [])
+
+    def test_authorized_postgres_password_requires_exact_grant_before_query(self) -> None:
+        fake_client = FakeDockerClient()
+        transport = FakePostgresTransport([True])
+        reference = SecretReference("secret://local/postgres/password")
+        resolver = FakeAuthorizedSecretResolver(
+            fake_client,
+            {(reference, SecretUseIntent.POSTGRES_PASSWORD): "postgres-secret"},
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ),
+            postgres_transport=transport,
+            authorized_secret_resolver=resolver,
+        )
+
+        rejected = interpreter.execute(
+            _request(
+                WaitForHealthy(NodeTarget("api")),
+                products=(_material(_product_with_postgres_health_check()),),
+            )
+        )
+        grant = _grant(reference, SecretUseIntent.POSTGRES_PASSWORD)
+        accepted = interpreter.execute(
+            _request(
+                WaitForHealthy(NodeTarget("api")),
+                products=(_material(_product_with_postgres_health_check()),),
+                secret_resolution_grants=(grant,),
+            )
+        )
+
+        self.assertIs(rejected.kind, EffectResultKind.FAILED)
+        self.assertEqual(transport.calls, [
+            ("api", 5432, "cpk", "cpk", "postgres-secret", 5.0)
+        ])
+        self.assertIs(accepted.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(resolver.requests, [grant])
+
+    def test_authorized_remote_tls_requires_all_three_exact_grants(self) -> None:
+        fake_client = FakeDockerClient()
+        fake_module = FakeDockerModule(fake_client)
+        authority = _remote_tls_runtime_authority()
+        uses = (
+            (authority.authority.ca_certificate, SecretUseIntent.DOCKER_REMOTE_TLS_CA_CERTIFICATE),
+            (authority.authority.client_certificate, SecretUseIntent.DOCKER_REMOTE_TLS_CLIENT_CERTIFICATE),
+            (authority.authority.client_key, SecretUseIntent.DOCKER_REMOTE_TLS_CLIENT_KEY),
+        )
+        grants = tuple(_grant(reference, intent) for reference, intent in uses)
+        resolver = FakeAuthorizedSecretResolver(
+            fake_client,
+            {(reference, intent): f"material-{index}" for index, (reference, intent) in enumerate(uses)},
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=FakeDockerClient(),
+                docker_module=fake_module,
+            ),
+            authorized_secret_resolver=resolver,
+        )
+
+        rejected = interpreter.execute_with_authority(
+            _request(
+                StartRuntime(RuntimeTarget("docker")),
+                products=(),
+                authority_ref=RuntimeAuthorityReference("remote-docker"),
+                secret_resolution_grants=grants[:2],
+            ),
+            authority,
+        )
+        self.assertIs(rejected.kind, EffectResultKind.FAILED)
+        self.assertEqual(fake_client.networks.created, [])
+        accepted = interpreter.execute_with_authority(
+            _request(
+                StartRuntime(RuntimeTarget("docker")),
+                products=(),
+                authority_ref=RuntimeAuthorityReference("remote-docker"),
+                secret_resolution_grants=grants,
+            ),
+            authority,
+        )
+
+        self.assertIs(accepted.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(resolver.requests, [*grants[:2], *grants])
+
 
 
 class FakeImagePullCredentialResolver:
@@ -1115,6 +1460,28 @@ class FakeSecretResolver:
             len(self.fake_client.networks.created)
         )
         return self.result
+
+
+class FakeAuthorizedSecretResolver:
+    def __init__(
+        self,
+        fake_client: FakeDockerClient,
+        values: dict[tuple[SecretReference, SecretUseIntent], str],
+    ) -> None:
+        self.fake_client = fake_client
+        self.values = values
+        self.requests: list[SecretResolutionGrant] = []
+        self.networks_created_during_resolution: list[int] = []
+
+    def resolve(self, grant: SecretResolutionGrant) -> SecretResolution:
+        self.requests.append(grant)
+        self.networks_created_during_resolution.append(
+            len(self.fake_client.networks.created)
+        )
+        value = self.values.get((grant.reference, grant.intent))
+        if value is None:
+            return SecretMissing(grant.reference)
+        return SecretResolved(grant.reference, SecretValue(value))
 
 
 class MappingSecretResolver:
@@ -1221,6 +1588,7 @@ def _request(
     desired_graph_id: str = "graph-desired",
     authority_ref: RuntimeAuthorityReference | None = None,
     authority_deliveries: tuple[RuntimeAuthorityAccessDelivery, ...] = (),
+    secret_resolution_grants: tuple[SecretResolutionGrant, ...] = (),
 ) -> RuntimeEffectRequest:
     return RuntimeEffectRequest(
         effect_id="effect-a",
@@ -1240,6 +1608,29 @@ def _request(
         products=(_material(_product()),) if products is None else products,
         authority_ref=authority_ref,
         authority_deliveries=authority_deliveries,
+        secret_resolution_grants=secret_resolution_grants,
+    )
+
+
+def _grant(
+    reference: SecretReference,
+    intent: SecretUseIntent,
+) -> SecretResolutionGrant:
+    return SecretResolutionGrant(
+        authorization_id="suse_" + "a" * 64,
+        workspace_id="workspace-a",
+        reference_registration_id="sref_" + "b" * 64,
+        provider_registration_id="sprov_" + "c" * 64,
+        endpoint_reference=SecretProviderEndpointReference("provider-main"),
+        credential_reference=SecretReference("secret://bootstrap/provider-token"),
+        reference=reference,
+        intent=intent,
+        actor_subject="docker-interpreter",
+        correlation_id="correlation-1192",
+        intent_fingerprint="d" * 64,
+        run_id="run-a",
+        activity_id="activity-a",
+        effect_id="effect-a",
     )
 
 
