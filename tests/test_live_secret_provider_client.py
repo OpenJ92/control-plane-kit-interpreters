@@ -44,16 +44,14 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                 encode_master_key_for_file(os.urandom(32)),
                 encoding="utf-8",
             )
+            key_file.chmod(0o600)
             token = "live-provider-client-token"
             token_file = base / "provider.token"
             token_file.write_text(f"{token}\n", encoding="ascii")
-            port = _free_port()
-            environment = {
-                **os.environ,
-                "CPK_SECRETS_DATABASE_PATH": str(database),
-                "CPK_SECRETS_MASTER_KEY_FILE": str(key_file),
-                "CPK_SECRETS_PROVIDER_ID": "provider-live",
-                "CPK_SECRETS_DEVELOPMENT_CREDENTIALS_JSON": json.dumps(
+            token_file.chmod(0o600)
+            credentials_file = base / "provider-credentials.json"
+            credentials_file.write_text(
+                json.dumps(
                     [
                         {
                             "subject": "interpreter-client",
@@ -77,6 +75,16 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                     ],
                     sort_keys=True,
                 ),
+                encoding="utf-8",
+            )
+            credentials_file.chmod(0o600)
+            port = _free_port()
+            environment = {
+                **os.environ,
+                "CPK_SECRETS_DATABASE_PATH": str(database),
+                "CPK_SECRETS_MASTER_KEY_FILE": str(key_file),
+                "CPK_SECRETS_PROVIDER_ID": "provider-live",
+                "CPK_SECRETS_CREDENTIALS_FILE": str(credentials_file),
             }
             process = _start_provider(port=port, environment=environment)
             stdout = ""
