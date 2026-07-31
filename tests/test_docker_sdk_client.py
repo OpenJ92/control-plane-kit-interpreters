@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from io import BytesIO
 import hashlib
+import os
+from pathlib import Path
 import subprocess
 import sys
 import tarfile
@@ -185,6 +187,10 @@ class FakeDockerClient:
         self.images = FakeManager()
         self.containers = FakeManager()
         self.containers.create = self.containers.create_container
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
 
 
 class DockerSdkClientTests(unittest.TestCase):
@@ -198,6 +204,7 @@ class DockerSdkClientTests(unittest.TestCase):
             },
             {
                 "configuration_artifact_digest",
+                "close",
                 "create_network",
                 "create_volume",
                 "from_authority",
@@ -317,6 +324,42 @@ assert "docker" not in sys.modules
         self.assertNotIn("ca-certificate-secret", repr(config))
         self.assertNotIn("client-certificate-secret", repr(client))
         self.assertNotIn("client-key-secret", repr(fake_module.docker_clients))
+
+    def test_tls_client_close_removes_credentials_and_closes_sdk_once(self) -> None:
+        fake_client = FakeDockerClient()
+        fake_module = FakeDockerModule(fake_client)
+        client = DockerSdkClient.from_authority(
+            DockerTlsClientConfig(
+                endpoint="tcp://mac-mini.local:2376",
+                ca_certificate=SecretValue("ca-certificate-secret"),
+                client_certificate=SecretValue("client-certificate-secret"),
+                client_key=SecretValue("client-key-secret"),
+            ),
+            docker_module=fake_module,
+        )
+        tls_call = fake_module.tls.calls[0]
+        paths = (
+            Path(str(tls_call["ca_cert"])),
+            Path(str(tls_call["client_cert"][0])),
+            Path(str(tls_call["client_cert"][1])),
+        )
+        directory = paths[0].parent
+
+        self.assertTrue(directory.is_dir())
+        for path in paths:
+            self.assertTrue(path.is_file())
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+        client.close()
+        client.close()
+
+        self.assertEqual(fake_client.close_calls, 1)
+        self.assertIsNone(client.client)
+        self.assertIsNone(client.tls_config)
+        self.assertFalse(directory.exists())
+        for path in paths:
+            self.assertFalse(path.exists())
+            self.assertNotIn(str(path), repr(client))
 
     def test_missing_resources_are_absent_only_for_sdk_not_found_errors(self) -> None:
         sdk = DockerSdkClient(

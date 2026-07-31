@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 import socket
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import httpx
 
@@ -1004,6 +1004,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
 
     def test_remote_tls_runtime_authority_resolves_secret_refs_before_docker_mutation(self) -> None:
         fake_client = FakeDockerClient()
+        ambient_client = FakeDockerClient()
         fake_module = FakeDockerModule(fake_client)
         resolver = MappingSecretResolver(
             fake_client,
@@ -1015,7 +1016,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         )
         interpreter = DockerRuntimeInterpreter(
             DockerSdkClient(
-                client=FakeDockerClient(),
+                client=ambient_client,
                 docker_module=fake_module,
             ),
             secret_resolver=resolver,
@@ -1045,8 +1046,148 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
             fake_module.docker_clients[0]["base_url"],
             "tcp://mac-mini.local:2376",
         )
+        self.assertEqual(fake_client.close_calls, 1)
+        self.assertEqual(ambient_client.close_calls, 0)
         self.assertNotIn("client-key-secret", repr(result.descriptor()))
         self.assertNotIn("client-key-secret", repr(interpreter))
+
+    def test_remote_tls_runtime_authority_closes_client_after_uncertain_effect(self) -> None:
+        fake_client = FakeDockerClient()
+        ambient_client = FakeDockerClient()
+        fake_module = FakeDockerModule(fake_client)
+        resolver = MappingSecretResolver(
+            fake_client,
+            {
+                "secret://local/docker/ca": "ca-certificate-secret",
+                "secret://local/docker/cert": "client-certificate-secret",
+                "secret://local/docker/key": "client-key-secret",
+            },
+        )
+        fake_client.networks.create = Mock(
+            side_effect=RuntimeError("remote effect failed")
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=ambient_client,
+                docker_module=fake_module,
+            ),
+            secret_resolver=resolver,
+        )
+
+        result = interpreter.execute_with_authority(
+            _request(
+                StartRuntime(RuntimeTarget("docker")),
+                products=(),
+                authority_ref=RuntimeAuthorityReference("remote-docker"),
+            ),
+            _remote_tls_runtime_authority(),
+        )
+
+        self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+        self.assertEqual(fake_client.close_calls, 1)
+        self.assertEqual(ambient_client.close_calls, 0)
+
+    def test_remote_tls_runtime_authority_closes_client_when_execution_raises(self) -> None:
+        fake_client = FakeDockerClient()
+        ambient_client = FakeDockerClient()
+        fake_module = FakeDockerModule(fake_client)
+        resolver = MappingSecretResolver(
+            fake_client,
+            {
+                "secret://local/docker/ca": "ca-certificate-secret",
+                "secret://local/docker/cert": "client-certificate-secret",
+                "secret://local/docker/key": "client-key-secret",
+            },
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=ambient_client,
+                docker_module=fake_module,
+            ),
+            secret_resolver=resolver,
+        )
+
+        with patch.object(
+            DockerRuntimeInterpreter,
+            "execute",
+            side_effect=RuntimeError("unexpected execution failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unexpected execution failure"):
+                interpreter.execute_with_authority(
+                    _request(
+                        StartRuntime(RuntimeTarget("docker")),
+                        products=(),
+                        authority_ref=RuntimeAuthorityReference("remote-docker"),
+                    ),
+                    _remote_tls_runtime_authority(),
+                )
+
+        self.assertEqual(fake_client.close_calls, 1)
+        self.assertEqual(ambient_client.close_calls, 0)
+
+    def test_remote_tls_client_close_failure_is_bounded_and_uncertain(self) -> None:
+        class FailingCloseDockerClient(FakeDockerClient):
+            def close(self) -> None:
+                super().close()
+                raise RuntimeError("/tmp/cpk-docker-tls-secret/key.pem")
+
+        fake_client = FailingCloseDockerClient()
+        ambient_client = FakeDockerClient()
+        fake_module = FakeDockerModule(fake_client)
+        resolver = MappingSecretResolver(
+            fake_client,
+            {
+                "secret://local/docker/ca": "ca-certificate-secret",
+                "secret://local/docker/cert": "client-certificate-secret",
+                "secret://local/docker/key": "client-key-secret",
+            },
+        )
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=ambient_client,
+                docker_module=fake_module,
+            ),
+            secret_resolver=resolver,
+        )
+
+        result = interpreter.execute_with_authority(
+            _request(
+                StartRuntime(RuntimeTarget("docker")),
+                products=(),
+                authority_ref=RuntimeAuthorityReference("remote-docker"),
+            ),
+            _remote_tls_runtime_authority(),
+        )
+
+        self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+        self.assertEqual(
+            result.failure.code,
+            "docker.runtime-authority-client-close-uncertain",
+        )
+        self.assertNotIn("/tmp/cpk-docker-tls-secret", repr(result.descriptor()))
+        self.assertEqual(fake_client.close_calls, 1)
+        self.assertEqual(ambient_client.close_calls, 0)
+
+    def test_local_runtime_authority_does_not_close_ambient_client(self) -> None:
+        ambient_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=ambient_client,
+                docker_module=FakeDockerModule(ambient_client),
+            )
+        )
+
+        result = interpreter.execute_with_authority(
+            _request(
+                StartRuntime(RuntimeTarget("docker")),
+                products=(),
+                authority_ref=RuntimeAuthorityReference("local-docker"),
+            ),
+            _local_runtime_authority(),
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(ambient_client.close_calls, 0)
 
     def test_remote_tls_runtime_authority_missing_secret_fails_before_docker_mutation(self) -> None:
         fake_client = FakeDockerClient()

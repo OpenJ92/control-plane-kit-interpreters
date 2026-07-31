@@ -50,7 +50,6 @@ from control_plane_kit_core.verification import (
 )
 
 from control_plane_kit_interpreters.docker.sdk import (
-    DockerLocalAmbientClientConfig,
     DockerRegistryAuthConfig,
     DockerSdkBindMount,
     DockerSdkClient,
@@ -94,6 +93,12 @@ _SEGMENT = re.compile(r"[^a-zA-Z0-9_.-]+")
 class _AuthorityDeliveryMaterial:
     mounts: tuple[DockerSdkBindMount, ...] = ()
     supplementary_groups: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _RuntimeAuthorityClientBinding:
+    client: DockerSdkClient
+    close_after_execution: bool
 
 
 @dataclass(frozen=True)
@@ -165,7 +170,7 @@ class DockerRuntimeInterpreter:
         if request.runtime_kind is not RuntimeKind.DOCKER:
             return _unsupported(request, "docker.unsupported-runtime-kind")
         try:
-            client = _client_for_runtime_authority(
+            client_binding = _client_for_runtime_authority(
                 self.client,
                 authority,
                 request,
@@ -184,7 +189,33 @@ class DockerRuntimeInterpreter:
                     _bounded_error_message(error),
                 ),
             )
-        return replace(self, client=client).execute(request)
+        if not client_binding.close_after_execution:
+            return replace(self, client=client_binding.client).execute(request)
+
+        result: RuntimeEffectResult | None = None
+        execution_error: Exception | None = None
+        close_error: Exception | None = None
+        try:
+            result = replace(self, client=client_binding.client).execute(request)
+        except Exception as error:
+            execution_error = error
+        finally:
+            try:
+                client_binding.client.close()
+            except Exception as error:
+                close_error = error
+        if execution_error is not None:
+            raise execution_error
+        if close_error is not None:
+            return RuntimeEffectResult.uncertain(
+                request.effect_id,
+                RuntimeEffectFailure(
+                    "docker.runtime-authority-client-close-uncertain",
+                    "Docker runtime authority client cleanup failed",
+                ),
+            )
+        assert result is not None
+        return result
 
     def _reconcile_runtime(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         runtime_id = _runtime_target(request.operation)
@@ -872,16 +903,16 @@ def _client_for_runtime_authority(
     request: RuntimeEffectRequest,
     authorized_resolver: AuthorizedSecretResolver | None,
     legacy_resolver: SecretResolver | None,
-) -> DockerSdkClient:
+) -> _RuntimeAuthorityClientBinding:
     if _authority_value(getattr(authority, "runtime_kind", None)) != RuntimeKind.DOCKER.value:
         raise _DockerInterpreterUnsupportedAuthorityError(
             "docker.runtime-authority-runtime-unsupported"
         )
     authority_kind = _authority_value(getattr(authority, "authority_kind", None))
     if authority_kind == "local-docker-socket":
-        return DockerSdkClient.from_authority(
-            DockerLocalAmbientClientConfig(),
-            docker_module=ambient_client.docker_module,
+        return _RuntimeAuthorityClientBinding(
+            ambient_client,
+            close_after_execution=False,
         )
     if authority_kind != "remote-docker-tls":
         raise _DockerInterpreterUnsupportedAuthorityError(
@@ -920,14 +951,17 @@ def _client_for_runtime_authority(
         getattr(material, "client_key", None),
         SecretUseIntent.DOCKER_REMOTE_TLS_CLIENT_KEY,
     )
-    return DockerSdkClient.from_authority(
-        DockerTlsClientConfig(
-            endpoint=endpoint,
-            ca_certificate=ca_certificate,
-            client_certificate=client_certificate,
-            client_key=client_key,
+    return _RuntimeAuthorityClientBinding(
+        DockerSdkClient.from_authority(
+            DockerTlsClientConfig(
+                endpoint=endpoint,
+                ca_certificate=ca_certificate,
+                client_certificate=client_certificate,
+                client_key=client_key,
+            ),
+            docker_module=ambient_client.docker_module,
         ),
-        docker_module=ambient_client.docker_module,
+        close_after_execution=True,
     )
 
 

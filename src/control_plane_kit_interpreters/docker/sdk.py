@@ -204,6 +204,7 @@ class DockerSdkClient:
     tls_config: DockerTlsClientConfig | None = field(default=None, repr=False)
     connect_on_init: bool = field(default=True, repr=False)
     _tls_directory: tempfile.TemporaryDirectory[str] | None = field(default=None, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
     configuration_helper_image: str = (
         "python:3.14-slim@sha256:"
         "cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6"
@@ -242,6 +243,8 @@ class DockerSdkClient:
         raise TypeError("Docker SDK client authority is unsupported")
 
     def _connect(self) -> Any:
+        if self._closed:
+            raise RuntimeError("Docker SDK client is closed")
         docker_module = self.docker_module
         if docker_module is None:
             docker_module = import_module("docker")
@@ -251,6 +254,8 @@ class DockerSdkClient:
         return self._remote_tls_client(docker_module, self.tls_config)
 
     def _client(self) -> Any:
+        if self._closed:
+            raise RuntimeError("Docker SDK client is closed")
         if self.client is None:
             self.client = self._connect()
         return self.client
@@ -262,27 +267,64 @@ class DockerSdkClient:
     ) -> Any:
         directory = tempfile.TemporaryDirectory(prefix="cpk-docker-tls-")
         self._tls_directory = directory
-        root = Path(directory.name)
-        ca_path = _write_secret_file(root / "ca.pem", tls_config.ca_certificate)
-        cert_path = _write_secret_file(root / "cert.pem", tls_config.client_certificate)
-        key_path = _write_secret_file(root / "key.pem", tls_config.client_key)
-        tls_factory = getattr(getattr(docker_module, "tls", None), "TLSConfig", None)
-        if tls_factory is None:
-            raise RuntimeError("Docker SDK TLSConfig is unavailable")
-        tls = tls_factory(
-            ca_cert=str(ca_path),
-            client_cert=(str(cert_path), str(key_path)),
-            verify=True,
-        )
-        return docker_module.DockerClient(
-            base_url=tls_config.endpoint,
-            tls=tls,
-        )
+        try:
+            root = Path(directory.name)
+            ca_path = _write_secret_file(root / "ca.pem", tls_config.ca_certificate)
+            cert_path = _write_secret_file(root / "cert.pem", tls_config.client_certificate)
+            key_path = _write_secret_file(root / "key.pem", tls_config.client_key)
+            tls_factory = getattr(getattr(docker_module, "tls", None), "TLSConfig", None)
+            if tls_factory is None:
+                raise RuntimeError("Docker SDK TLSConfig is unavailable")
+            tls = tls_factory(
+                ca_cert=str(ca_path),
+                client_cert=(str(cert_path), str(key_path)),
+                verify=True,
+            )
+            return docker_module.DockerClient(
+                base_url=tls_config.endpoint,
+                tls=tls,
+            )
+        except Exception:
+            self._tls_directory = None
+            try:
+                directory.cleanup()
+            except Exception:
+                pass
+            raise
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        client = self.client
+        directory = self._tls_directory
+        self.client = None
+        self.tls_config = None
+        self._tls_directory = None
+
+        client_error: Exception | None = None
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as error:
+                client_error = error
+        try:
+            if directory is not None:
+                directory.cleanup()
+        except Exception:
+            if client_error is None:
+                raise
+        if client_error is not None:
+            raise client_error
 
     def __del__(self) -> None:
-        directory = self._tls_directory
-        if directory is not None:
-            directory.cleanup()
+        if getattr(self, "_tls_directory", None) is None:
+            return
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def inspect_network(self, name: str) -> DockerSdkResourceInspection | None:
         try:
