@@ -249,7 +249,8 @@ class ControlPlaneKitSecretsClient:
             _secret_path(workspace_id, secret_id),
             {
                 "value_base64": base64.b64encode(material).decode("ascii"),
-                "labels": {"intent": intent.value},
+                "intent": intent.value,
+                "labels": {},
                 "caller_subject": caller_subject,
                 "correlation_id": correlation_id,
             },

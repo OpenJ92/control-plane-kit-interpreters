@@ -280,6 +280,11 @@ class SecretProviderClientTests(unittest.TestCase):
             f"/v1/workspaces/workspace-1/secrets/{secret_id}",
         )
         self.assertEqual(
+            requests[0]["body"]["intent"],
+            "cloudflare.tunnel-token",
+        )
+        self.assertNotIn("intent", requests[0]["body"]["labels"])
+        self.assertEqual(
             requests[1]["body"]["correlation_id"],
             "connector-start-1",
         )
