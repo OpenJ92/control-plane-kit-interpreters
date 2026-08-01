@@ -9,6 +9,9 @@ import sys
 import tarfile
 import unittest
 
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from urllib3.exceptions import ReadTimeoutError
+
 from control_plane_kit_core.configuration import (
     ConfigurationArtifact,
     ConfigurationFileMode,
@@ -106,6 +109,7 @@ class FakeResource:
         self.execs: list[list[str]] = []
         self.connections: list[dict[str, object]] = []
         self.wait_result: object = {"StatusCode": 0}
+        self.wait_error: Exception | None = None
         self.log_output: bytes = b"200 3\n"
 
     def start(self) -> None:
@@ -131,6 +135,8 @@ class FakeResource:
         return (0, b"")
 
     def wait(self, *, timeout: int | None = None) -> object:
+        if self.wait_error is not None:
+            raise self.wait_error
         return self.wait_result
 
     def logs(self, *, stdout: bool, stderr: bool, tail: int) -> bytes:
@@ -265,6 +271,67 @@ assert "docker" not in sys.modules
         self.assertEqual(helper["cap_drop"], ["ALL"])
         self.assertEqual(helper["security_opt"], ["no-new-privileges"])
         self.assertIn("http://hello:8000/health/ready", helper["command"])
+        self.assertTrue(fake_client.containers.created_containers[0].force_removed)
+
+    def test_http_probe_maps_bounded_docker_wait_timeout_to_probe_timeout(self) -> None:
+        fake_client = FakeDockerClient()
+        client = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
+        )
+        original_create = fake_client.containers.create
+
+        def create_timeout_helper(*args: object, **kwargs: object) -> FakeResource:
+            helper = original_create(*args, **kwargs)
+            helper.wait_error = RequestsConnectionError(
+                ReadTimeoutError(
+                    None,
+                    None,
+                    "owned probe helper exceeded wait bound",
+                )
+            )
+            return helper
+
+        fake_client.containers.create = create_timeout_helper
+
+        result = client.run_http_probe(
+            network="cpk-net-workspace-docker",
+            url="http://gateway:8000/health/ready",
+            timeout_seconds=5.0,
+            maximum_response_bytes=128,
+        )
+
+        self.assertTrue(result.timed_out)
+        self.assertIsNone(result.status_code)
+        self.assertEqual(result.response_size, 0)
+        self.assertTrue(fake_client.containers.created_containers[0].force_removed)
+
+    def test_http_probe_does_not_hide_non_timeout_docker_connection_failure(self) -> None:
+        fake_client = FakeDockerClient()
+        client = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
+        )
+        original_create = fake_client.containers.create
+
+        def create_failed_helper(*args: object, **kwargs: object) -> FakeResource:
+            helper = original_create(*args, **kwargs)
+            helper.wait_error = RequestsConnectionError("Docker daemon disconnected")
+            return helper
+
+        fake_client.containers.create = create_failed_helper
+
+        with self.assertRaisesRegex(
+            RequestsConnectionError,
+            "Docker daemon disconnected",
+        ):
+            client.run_http_probe(
+                network="cpk-net-workspace-docker",
+                url="http://gateway:8000/health/ready",
+                timeout_seconds=5.0,
+                maximum_response_bytes=128,
+            )
+
         self.assertTrue(fake_client.containers.created_containers[0].force_removed)
 
     def test_client_creation_lazily_uses_docker_from_env(self) -> None:

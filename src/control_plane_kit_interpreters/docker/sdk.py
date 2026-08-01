@@ -12,6 +12,9 @@ import tempfile
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
+from requests.exceptions import Timeout as RequestsTimeout
+from urllib3.exceptions import ReadTimeoutError
+
 from control_plane_kit_core.configuration import ConfigurationArtifact
 from control_plane_kit_core.probe_intents import (
     EndpointContext,
@@ -572,9 +575,16 @@ class DockerSdkClient:
         )
         try:
             helper.start()
-            wait_result = helper.wait(timeout=timeout + 2)
-            exit_code = _wait_status_code(wait_result)
-            output = _container_logs(helper, maximum_bytes=128).strip()
+            try:
+                wait_result = helper.wait(timeout=timeout + 2)
+            except Exception as error:
+                if not _is_bounded_wait_timeout(error):
+                    raise
+                exit_code = 124
+                output = ""
+            else:
+                exit_code = _wait_status_code(wait_result)
+                output = _container_logs(helper, maximum_bytes=128).strip()
         finally:
             helper.remove(force=True)
         status_code = None
@@ -899,6 +909,22 @@ def _wait_status_code(result: Any) -> int:
     if isinstance(result, int):
         return result
     raise RuntimeError("Docker wait result was malformed")
+
+
+def _is_bounded_wait_timeout(error: Exception) -> bool:
+    pending: list[BaseException] = [error]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        if isinstance(current, (RequestsTimeout, ReadTimeoutError)):
+            return True
+        for related in (current.__cause__, current.__context__, *current.args):
+            if isinstance(related, BaseException):
+                pending.append(related)
+    return False
 
 
 def _container_logs(container: Any, *, maximum_bytes: int) -> str:
