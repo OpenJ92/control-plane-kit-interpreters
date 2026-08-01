@@ -10,7 +10,10 @@ from typing import Mapping
 
 import httpx
 import jwt
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from control_plane_kit_core.delegation_keys import DelegationPublicKey
 from control_plane_kit_core.gateway_delegation import (
     DelegatedGatewayProbeGrant,
     GatewayProbeRequest,
@@ -79,6 +82,7 @@ class GatewayProbeClientResult:
 @dataclass(frozen=True, repr=False)
 class Ed25519GatewayProbeSigner:
     private_key_reference: SecretReference
+    signing_public_key: DelegationPublicKey
     authorized_secret_resolver: AuthorizedSecretResolver = field(
         repr=False,
         compare=False,
@@ -91,6 +95,10 @@ class Ed25519GatewayProbeSigner:
         secret_resolution_grant: SecretResolutionGrant,
     ) -> str:
         _require_exact_grant(grant, request)
+        if grant.key_id != self.signing_public_key.key_id:
+            raise GatewayProbeClientError(
+                "gateway signing key identity is inconsistent"
+            )
         _require_signing_key_grant(
             grant,
             secret_resolution_grant,
@@ -101,6 +109,30 @@ class Ed25519GatewayProbeSigner:
                 self.authorized_secret_resolver,
                 secret_resolution_grant,
             )
+            loaded_key = serialization.load_pem_private_key(
+                private_key.reveal().encode("ascii"),
+                password=None,
+            )
+            if not isinstance(loaded_key, Ed25519PrivateKey):
+                raise GatewayProbeClientError(
+                    "gateway signing key algorithm is inconsistent"
+                )
+            derived_public = DelegationPublicKey(
+                key_id=grant.key_id,
+                algorithm=self.signing_public_key.algorithm,
+                public_key_pem=loaded_key.public_key().public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                ).decode("ascii"),
+            )
+            if (
+                derived_public.algorithm is not self.signing_public_key.algorithm
+                or derived_public.fingerprint_sha256
+                != self.signing_public_key.fingerprint_sha256
+            ):
+                raise GatewayProbeClientError(
+                    "gateway signing key material is inconsistent"
+                )
             return jwt.encode(
                 {
                     "iss": grant.issuer,
@@ -110,7 +142,7 @@ class Ed25519GatewayProbeSigner:
                     "jti": grant.jti,
                     "gateway_probe": grant.descriptor(),
                 },
-                private_key.reveal(),
+                loaded_key,
                 algorithm="EdDSA",
                 headers={
                     "kid": grant.key_id,
