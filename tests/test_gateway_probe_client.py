@@ -14,6 +14,10 @@ from control_plane_kit_core.gateway_delegation import (
     GatewayProbeCommandKind,
     GatewayProbeRequest,
 )
+from control_plane_kit_core.delegation_keys import (
+    DelegationKeyAlgorithm,
+    DelegationPublicKey,
+)
 from control_plane_kit_core.probe_intents import (
     EndpointContext,
     LiteralEndpointMaterial,
@@ -58,7 +62,16 @@ class GatewayProbeClientTests(unittest.TestCase):
         self.resolver = RecordingAuthorizedSecretResolver(
             SecretResolved(self.reference, SecretValue(self.private_pem))
         )
-        self.signer = Ed25519GatewayProbeSigner(self.reference, self.resolver)
+        self.public_key = DelegationPublicKey(
+            key_id="gateway-key-a",
+            algorithm=DelegationKeyAlgorithm.ED25519,
+            public_key_pem=self.public_pem,
+        )
+        self.signer = Ed25519GatewayProbeSigner(
+            self.reference,
+            self.public_key,
+            self.resolver,
+        )
         self.request = GatewayProbeRequest(
             GatewayProbeCommandKind.HTTP_STATUS,
             GatewayTargetId("hello.internal"),
@@ -260,6 +273,7 @@ class GatewayProbeClientTests(unittest.TestCase):
 
         missing = Ed25519GatewayProbeSigner(
             SecretReference("secret://test/gateway/missing"),
+            self.public_key,
             self.resolver,
         )
         with self.assertRaises(GatewayProbeClientError) as raised:
@@ -324,7 +338,11 @@ class GatewayProbeClientTests(unittest.TestCase):
             return httpx.Response(200, json={})
 
         resolver = RecordingAuthorizedSecretResolver(SecretDenied(self.reference))
-        signer = Ed25519GatewayProbeSigner(self.reference, resolver)
+        signer = Ed25519GatewayProbeSigner(
+            self.reference,
+            self.public_key,
+            resolver,
+        )
         client = SignedGatewayProbeClient(
             signer,
             self.policy,
@@ -340,6 +358,42 @@ class GatewayProbeClientTests(unittest.TestCase):
             )
 
         self.assertEqual(resolver.grants, [self.resolution_grant])
+        self.assertEqual(calls, 0)
+
+    def test_resolved_private_key_must_match_selected_public_identity(self) -> None:
+        other_private = Ed25519PrivateKey.generate().private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode("ascii")
+        resolver = RecordingAuthorizedSecretResolver(
+            SecretResolved(self.reference, SecretValue(other_private))
+        )
+        signer = Ed25519GatewayProbeSigner(
+            self.reference,
+            self.public_key,
+            resolver,
+        )
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(200, json={})
+
+        with self.assertRaises(GatewayProbeClientError) as raised:
+            SignedGatewayProbeClient(
+                signer,
+                self.policy,
+                transport=httpx.MockTransport(handler),
+            ).dispatch(
+                self.grant,
+                self.request,
+                self.endpoint,
+                self.resolution_grant,
+            )
+        self.assertEqual(str(raised.exception), "gateway signing key material is inconsistent")
+        self.assertNotIn(other_private, str(raised.exception))
         self.assertEqual(calls, 0)
         self.assertNotIn(self.private_pem, str(raised.exception))
 
