@@ -16,6 +16,8 @@ from control_plane_kit_core.secrets import (
     SecretReference,
     SecretUseIntent,
     SecretValue,
+    SecretVersionRevocationGrant,
+    SecretVersionRevocationReceipt,
 )
 from control_plane_kit_interpreters.secret_provider import (
     ControlPlaneKitSecretsClient,
@@ -32,6 +34,120 @@ from control_plane_kit_interpreters.secret_provider import (
 
 
 class SecretProviderClientTests(unittest.TestCase):
+    def test_exact_version_revocation_uses_exact_path_and_returns_receipt(
+        self,
+    ) -> None:
+        reference = SecretReference("secret://provider-a/keys/gateway-a")
+        secret_id = canonical_provider_secret_id(reference)
+        requests: list[dict[str, object]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(
+                {
+                    "path": request.url.path,
+                    "body": json.loads(request.content),
+                }
+            )
+            return _response(
+                {
+                    "outcome": "revoked",
+                    "metadata": {
+                        **_metadata(
+                            workspace_id="workspace-1",
+                            secret_id=secret_id,
+                            status="revoked",
+                            revoked_at="2026-08-02T00:00:00Z",
+                        ),
+                        "version_id": "version-a",
+                    },
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            endpoint = SecretProviderEndpointReference("provider-main")
+            credential = SecretReference("secret://bootstrap/provider-token")
+            credential_file = Path(directory) / "provider.token"
+            credential_file.write_text("provider-token", encoding="utf-8")
+            custodian = ControlPlaneKitSecretsCustodian(
+                SecretProviderBootstrapRegistry(
+                    endpoints={endpoint: "https://secrets.internal.example"},
+                    credential_files={credential: credential_file},
+                ),
+                transport=httpx.MockTransport(handler),
+            )
+            grant = SecretVersionRevocationGrant(
+                revocation_id="srevoke_" + "a" * 64,
+                workspace_id="workspace-1",
+                provider_registration_id="sprov_" + "b" * 64,
+                endpoint_reference=endpoint,
+                credential_reference=credential,
+                reference=reference,
+                version_id="version-a",
+                version_number=1,
+                actor_subject="rotation-program",
+                correlation_id="retire-key-a",
+                revocation_fingerprint="c" * 64,
+            )
+
+            receipt = custodian.revoke_version(grant)
+
+        self.assertIsInstance(receipt, SecretVersionRevocationReceipt)
+        self.assertTrue(receipt.matches(grant))
+        self.assertEqual(
+            requests,
+            [
+                {
+                    "path": (
+                        "/v1/workspaces/workspace-1/secrets/"
+                        f"{secret_id}/versions/version-a/revoke"
+                    ),
+                    "body": {
+                        "caller_subject": "rotation-program",
+                        "correlation_id": "retire-key-a",
+                        "version_number": 1,
+                    },
+                }
+            ],
+        )
+
+    def test_exact_version_revocation_malformed_success_is_uncertain(self) -> None:
+        reference = SecretReference("secret://provider-a/keys/gateway-a")
+        secret_id = canonical_provider_secret_id(reference)
+        with _client(
+            lambda _request: _response(
+                {
+                    "outcome": "revoked",
+                    "metadata": {
+                        **_metadata(
+                            workspace_id="workspace-1",
+                            secret_id=secret_id,
+                            status="revoked",
+                            revoked_at="2026-08-02T00:00:00Z",
+                        ),
+                        "version_id": "substituted-version",
+                    },
+                }
+            )
+        ) as client:
+            with self.assertRaises(SecretProviderClientError) as raised:
+                client.revoke_version(
+                    workspace_id="workspace-1",
+                    reference=reference,
+                    version_id="version-a",
+                    version_number=1,
+                    caller_subject="rotation-program",
+                    correlation_id="retire-key-a",
+                )
+
+        self.assertIs(
+            raised.exception.code,
+            SecretProviderClientCode.MALFORMED_RESPONSE,
+        )
+        self.assertIs(
+            raised.exception.certainty,
+            SecretProviderOutcomeCertainty.UNCERTAIN,
+        )
+
     def test_delegation_generation_returns_typed_public_and_reference_metadata(
         self,
     ) -> None:
