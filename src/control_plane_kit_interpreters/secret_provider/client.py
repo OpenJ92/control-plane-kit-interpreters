@@ -17,6 +17,11 @@ from urllib.parse import quote
 
 import httpx
 
+from control_plane_kit_core.delegation_keys import (
+    DelegationKeyAlgorithm,
+    DelegationKeyPurpose,
+    DelegationPublicKey,
+)
 from control_plane_kit_core.secrets import (
     SecretReference,
     SecretUseIntent,
@@ -56,6 +61,7 @@ class SecretProviderClientCode(StrEnum):
     MISSING = "missing"
     REVOKED = "revoked"
     ALREADY_EXISTS = "already-exists"
+    CONFLICT = "conflict"
     REDIRECTED = "redirected"
     TIMED_OUT = "timed-out"
     TRANSPORT_FAILED = "transport-failed"
@@ -154,6 +160,40 @@ class SecretProviderRevoked:
         ):
             raise SecretProviderClientError(
                 SecretProviderClientCode.MALFORMED_RESPONSE
+            )
+
+
+@dataclass(frozen=True)
+class SecretProviderGeneratedDelegationKey:
+    reference: SecretReference
+    metadata: SecretProviderVersionMetadata
+    purpose: DelegationKeyPurpose
+    issuer: str
+    correlation_id: str
+    public_key: DelegationPublicKey
+    replayed: bool
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.reference, SecretReference)
+            or not isinstance(self.metadata, SecretProviderVersionMetadata)
+            or self.metadata.reference != self.reference
+            or not isinstance(self.purpose, DelegationKeyPurpose)
+            or not isinstance(self.issuer, str)
+            or not _IDENTIFIER.fullmatch(self.issuer)
+            or not isinstance(self.correlation_id, str)
+            or not _IDENTIFIER.fullmatch(self.correlation_id)
+            or not isinstance(self.public_key, DelegationPublicKey)
+            or type(self.replayed) is not bool
+            or self.metadata.labels.get("intent")
+            != SecretUseIntent.GATEWAY_PROBE_SIGNING_KEY.value
+            or self.metadata.labels.get("purpose") != self.purpose.value
+            or self.metadata.labels.get("issuer") != self.issuer
+            or self.metadata.labels.get("key_id") != self.public_key.key_id
+        ):
+            raise SecretProviderClientError(
+                SecretProviderClientCode.MALFORMED_RESPONSE,
+                certainty=SecretProviderOutcomeCertainty.UNCERTAIN,
             )
 
 
@@ -270,6 +310,99 @@ class ControlPlaneKitSecretsClient:
             reference=reference,
             expected_status="active",
             certainty=SecretProviderOutcomeCertainty.UNCERTAIN,
+        )
+
+    def generate_delegation_key(
+        self,
+        *,
+        workspace_id: str,
+        reference: SecretReference,
+        purpose: DelegationKeyPurpose,
+        issuer: str,
+        caller_subject: str,
+        correlation_id: str,
+    ) -> SecretProviderGeneratedDelegationKey:
+        _request_identity(workspace_id, caller_subject, correlation_id)
+        _require_reference(reference)
+        if (
+            not isinstance(purpose, DelegationKeyPurpose)
+            or not isinstance(issuer, str)
+            or not _IDENTIFIER.fullmatch(issuer)
+        ):
+            raise SecretProviderClientError(
+                SecretProviderClientCode.MALFORMED_REQUEST
+            )
+        secret_id = canonical_provider_secret_id(reference)
+        response = self._request_json(
+            "POST",
+            _delegation_key_path(workspace_id, secret_id),
+            {
+                "secret_reference": reference.reference_id,
+                "purpose": purpose.value,
+                "issuer": issuer,
+                "caller_subject": caller_subject,
+                "correlation_id": correlation_id,
+            },
+            mutation=True,
+        )
+        expected_keys = {
+            "outcome",
+            "secret_reference",
+            "metadata",
+            "purpose",
+            "issuer",
+            "correlation_id",
+            "key_id",
+            "algorithm",
+            "public_key_pem",
+            "fingerprint_sha256",
+            "replayed",
+        }
+        if (
+            set(response) != expected_keys
+            or response.get("outcome") != "generated"
+            or response.get("secret_reference") != reference.reference_id
+            or response.get("purpose") != purpose.value
+            or response.get("issuer") != issuer
+            or response.get("correlation_id") != correlation_id
+            or type(response.get("replayed")) is not bool
+        ):
+            raise SecretProviderClientError(
+                SecretProviderClientCode.MALFORMED_RESPONSE,
+                certainty=SecretProviderOutcomeCertainty.UNCERTAIN,
+            )
+        metadata = _metadata(
+            response["metadata"],
+            workspace_id=workspace_id,
+            secret_id=secret_id,
+            reference=reference,
+            expected_status="active",
+            certainty=SecretProviderOutcomeCertainty.UNCERTAIN,
+        )
+        try:
+            public_key = DelegationPublicKey(
+                key_id=response["key_id"],
+                algorithm=DelegationKeyAlgorithm(response["algorithm"]),
+                public_key_pem=response["public_key_pem"],
+            )
+        except (TypeError, ValueError):
+            raise SecretProviderClientError(
+                SecretProviderClientCode.MALFORMED_RESPONSE,
+                certainty=SecretProviderOutcomeCertainty.UNCERTAIN,
+            ) from None
+        if response.get("fingerprint_sha256") != public_key.fingerprint_sha256:
+            raise SecretProviderClientError(
+                SecretProviderClientCode.MALFORMED_RESPONSE,
+                certainty=SecretProviderOutcomeCertainty.UNCERTAIN,
+            )
+        return SecretProviderGeneratedDelegationKey(
+            reference=reference,
+            metadata=metadata,
+            purpose=purpose,
+            issuer=issuer,
+            correlation_id=correlation_id,
+            public_key=public_key,
+            replayed=response["replayed"],
         )
 
     def resolve(
@@ -535,6 +668,13 @@ def _secret_path(workspace_id: str, secret_id: str) -> str:
     )
 
 
+def _delegation_key_path(workspace_id: str, secret_id: str) -> str:
+    return (
+        f"/v1/workspaces/{quote(workspace_id, safe='')}/"
+        f"delegation-keys/{quote(secret_id, safe='')}/generate"
+    )
+
+
 def _request_identity(
     workspace_id: str,
     caller_subject: str,
@@ -637,6 +777,8 @@ def _raise_provider_error(
         mapped = SecretProviderClientCode.REVOKED
     elif status_code == 409 and outcome == "already-exists":
         mapped = SecretProviderClientCode.ALREADY_EXISTS
+    elif status_code == 409 and outcome == "conflict":
+        mapped = SecretProviderClientCode.CONFLICT
     elif status_code == 400 and outcome == "malformed":
         mapped = SecretProviderClientCode.MALFORMED_REQUEST
     elif status_code == 503 and code == "integrity-failure":

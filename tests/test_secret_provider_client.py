@@ -7,6 +7,9 @@ import unittest
 
 import httpx
 
+from control_plane_kit_core.delegation_keys import (
+    DelegationKeyPurpose,
+)
 from control_plane_kit_core.secrets import (
     SecretCustodyGrant,
     SecretProviderEndpointReference,
@@ -22,12 +25,126 @@ from control_plane_kit_interpreters.secret_provider import (
     SecretProviderClientCode,
     SecretProviderClientError,
     SecretProviderClientPolicy,
+    SecretProviderGeneratedDelegationKey,
     SecretProviderOutcomeCertainty,
     canonical_provider_secret_id,
 )
 
 
 class SecretProviderClientTests(unittest.TestCase):
+    def test_delegation_generation_returns_typed_public_and_reference_metadata(
+        self,
+    ) -> None:
+        requests: list[dict[str, object]] = []
+        reference = SecretReference("secret://provider-a/keys/gateway-b")
+        secret_id = canonical_provider_secret_id(reference)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(
+                {
+                    "path": request.url.path,
+                    "body": json.loads(request.content),
+                }
+            )
+            return _response(
+                _generated_delegation_key_response(
+                    reference=reference,
+                    secret_id=secret_id,
+                )
+            )
+
+        with _client(handler) as client:
+            generated = client.generate_delegation_key(
+                workspace_id="workspace-1",
+                reference=reference,
+                purpose=DelegationKeyPurpose.GATEWAY_PROBE,
+                issuer="cpk-server",
+                caller_subject="cpk-server",
+                correlation_id="rotation-key-b",
+            )
+
+        self.assertIsInstance(generated, SecretProviderGeneratedDelegationKey)
+        self.assertEqual(generated.reference, reference)
+        self.assertEqual(generated.metadata.reference, reference)
+        self.assertEqual(generated.public_key.key_id, "gateway-test-key")
+        self.assertEqual(generated.purpose, DelegationKeyPurpose.GATEWAY_PROBE)
+        self.assertEqual(generated.issuer, "cpk-server")
+        self.assertEqual(generated.correlation_id, "rotation-key-b")
+        self.assertFalse(generated.replayed)
+        self.assertEqual(
+            requests,
+            [
+                {
+                    "path": (
+                        "/v1/workspaces/workspace-1/delegation-keys/"
+                        f"{secret_id}/generate"
+                    ),
+                    "body": {
+                        "caller_subject": "cpk-server",
+                        "correlation_id": "rotation-key-b",
+                        "issuer": "cpk-server",
+                        "purpose": "gateway-probe",
+                        "secret_reference": reference.reference_id,
+                    },
+                }
+            ],
+        )
+        self.assertNotIn("PRIVATE", repr(generated))
+
+    def test_delegation_generation_rejects_substituted_public_identity(self) -> None:
+        reference = SecretReference("secret://provider-a/keys/gateway-b")
+        secret_id = canonical_provider_secret_id(reference)
+        payload = _generated_delegation_key_response(
+            reference=reference,
+            secret_id=secret_id,
+        )
+        payload["fingerprint_sha256"] = "0" * 64
+
+        with _client(lambda _request: _response(payload)) as client:
+            with self.assertRaises(SecretProviderClientError) as raised:
+                client.generate_delegation_key(
+                    workspace_id="workspace-1",
+                    reference=reference,
+                    purpose=DelegationKeyPurpose.GATEWAY_PROBE,
+                    issuer="cpk-server",
+                    caller_subject="cpk-server",
+                    correlation_id="rotation-key-b",
+                )
+
+        self.assertIs(
+            raised.exception.code,
+            SecretProviderClientCode.MALFORMED_RESPONSE,
+        )
+        self.assertIs(
+            raised.exception.certainty,
+            SecretProviderOutcomeCertainty.UNCERTAIN,
+        )
+
+    def test_generation_correlation_conflict_is_definite(self) -> None:
+        with _client(
+            lambda _request: _response(
+                _error("conflict", "generation-correlation-conflict"),
+                409,
+            )
+        ) as client:
+            with self.assertRaises(SecretProviderClientError) as raised:
+                client.generate_delegation_key(
+                    workspace_id="workspace-1",
+                    reference=SecretReference(
+                        "secret://provider-a/keys/gateway-b"
+                    ),
+                    purpose=DelegationKeyPurpose.GATEWAY_PROBE,
+                    issuer="cpk-server",
+                    caller_subject="cpk-server",
+                    correlation_id="rotation-key-b",
+                )
+
+        self.assertIs(raised.exception.code, SecretProviderClientCode.CONFLICT)
+        self.assertIs(
+            raised.exception.certainty,
+            SecretProviderOutcomeCertainty.DEFINITE,
+        )
+
     def test_custodian_writes_and_revokes_exact_granted_reference(self) -> None:
         reference = SecretReference("secret://provider-a/generated/tunnel-001")
         secret_id = canonical_provider_secret_id(reference)
@@ -580,6 +697,45 @@ def _metadata(
         "labels": {"intent": "cloudflare.tunnel-token"},
         "created_at": "2026-07-30T00:00:00Z",
         "revoked_at": revoked_at,
+    }
+
+
+def _generated_delegation_key_response(
+    *,
+    reference: SecretReference,
+    secret_id: str,
+) -> dict[str, object]:
+    public_key_pem = (
+        "-----BEGIN PUBLIC KEY-----\n"
+        "MCowBQYDK2VwAyEA7P+6pMvjtSXnpOCuaS+0dvj1Hx+fiZLTdfi0CPbNKgY=\n"
+        "-----END PUBLIC KEY-----\n"
+    )
+    from hashlib import sha256
+
+    return {
+        "outcome": "generated",
+        "secret_reference": reference.reference_id,
+        "metadata": {
+            **_metadata(
+                workspace_id="workspace-1",
+                secret_id=secret_id,
+                status="active",
+            ),
+            "labels": {
+                "intent": "gateway.probe-signing-key",
+                "purpose": "gateway-probe",
+                "issuer": "cpk-server",
+                "key_id": "gateway-test-key",
+            },
+        },
+        "purpose": "gateway-probe",
+        "issuer": "cpk-server",
+        "correlation_id": "rotation-key-b",
+        "key_id": "gateway-test-key",
+        "algorithm": "ed25519",
+        "public_key_pem": public_key_pem,
+        "fingerprint_sha256": sha256(public_key_pem.encode("ascii")).hexdigest(),
+        "replayed": False,
     }
 
 

@@ -152,6 +152,14 @@ path segment by base64url-encoding the complete UTF-8 `reference_id`, removing
 padding, and prefixing `cpk1_`. This is deterministic and injective; it does not
 discard path segments or rely on a collision-prone hash.
 
+The same client exposes a closed delegation-key generation operation. It sends
+only workspace, `SecretReference`, purpose, issuer, caller, and correlation
+metadata to the provider. It validates the returned core `DelegationPublicKey`,
+fingerprint, provider version, and exact reference identity; it never generates
+or receives the private key in the generation response. Transport ambiguity is
+reported as uncertain so callers can safely retry the provider's
+correlation-idempotent operation.
+
 ## Probe And Verification Adapters
 
 `control_plane_kit_interpreters.probes` owns concrete address authorization,
