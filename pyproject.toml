@@ -36,7 +36,7 @@ gateway = [
   "PyJWT[crypto]>=2.10,<3",
 ]
 test = [
-  "control-plane-kit-secrets[test] @ https://github.com/OpenJ92/control-plane-kit-secrets/archive/7c53591f4771422e94ed4da82e71c126aa76af61.zip",
+  "control-plane-kit-secrets[test] @ https://github.com/OpenJ92/control-plane-kit-secrets/archive/efd1b194b5a6e31bfc6b4297f9cf7d58dc6f37e8.zip",
   "docker>=7.1",
   "httpx>=0.28",
   "PyJWT[crypto]>=2.10,<3",

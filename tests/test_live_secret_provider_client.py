@@ -11,6 +11,9 @@ import time
 import unittest
 
 import httpx
+from cryptography.hazmat.primitives import serialization
+
+from control_plane_kit_core.delegation_keys import DelegationKeyPurpose
 
 from control_plane_kit_core.secrets import (
     SecretProviderEndpointReference,
@@ -62,9 +65,17 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                                     "workspace_id": "workspace-1",
                                 },
                                 {
+                                    "action": "secret.generate-delegation-key",
+                                    "workspace_id": "workspace-1",
+                                    "intents": ["gateway.probe-signing-key"],
+                                },
+                                {
                                     "action": "secret.resolve",
                                     "workspace_id": "workspace-1",
-                                    "intents": ["cloudflare.tunnel-token"],
+                                    "intents": [
+                                        "cloudflare.tunnel-token",
+                                        "gateway.probe-signing-key",
+                                    ],
                                 },
                                 {
                                     "action": "secret.revoke",
@@ -108,6 +119,26 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                 )
                 value = SecretValue("generated-tunnel-token-value")
                 resolver = ControlPlaneKitSecretsResolver(registry)
+                delegation_reference = SecretReference(
+                    "secret://provider-live/keys/gateway-b"
+                )
+
+                generated = client.generate_delegation_key(
+                    workspace_id="workspace-1",
+                    reference=delegation_reference,
+                    purpose=DelegationKeyPurpose.GATEWAY_PROBE,
+                    issuer="cpk-server",
+                    caller_subject="cpk-server",
+                    correlation_id="rotation-key-b",
+                )
+                generated_private = client.resolve(
+                    workspace_id="workspace-1",
+                    reference=delegation_reference,
+                    intent=SecretUseIntent.GATEWAY_PROBE_SIGNING_KEY,
+                    caller_subject="gateway-probe-signer",
+                    correlation_id="sign-generated-key-b",
+                    version_id=generated.metadata.version_id,
+                )
 
                 written = client.write(
                     workspace_id="workspace-1",
@@ -158,6 +189,18 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                     )
 
                 self.assertEqual(written.reference, reference)
+                private_key = serialization.load_pem_private_key(
+                    generated_private.value.reveal().encode("ascii"),
+                    password=None,
+                )
+                public_key = serialization.load_pem_public_key(
+                    generated.public_key.public_key_pem.encode("ascii")
+                )
+                message = b"live-provider-delegation"
+                public_key.verify(
+                    private_key.sign(message),
+                    message,
+                )
                 self.assertIsInstance(grant_resolved, SecretResolved)
                 assert isinstance(grant_resolved, SecretResolved)
                 self.assertEqual(
@@ -189,6 +232,8 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                 for row in rows
             }
             self.assertIn(("stored", "ingress-create-1"), correlations)
+            self.assertIn(("generated", "rotation-key-b"), correlations)
+            self.assertIn(("resolved", "sign-generated-key-b"), correlations)
             self.assertIn(("resolved", "grant-resolver-1"), correlations)
             self.assertIn(("resolved", "connector-start-1"), correlations)
             self.assertIn(("revoked", "ingress-compensate-1"), correlations)
