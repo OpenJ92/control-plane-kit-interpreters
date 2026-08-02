@@ -9,7 +9,11 @@ from control_plane_kit_core.secrets import (
     SecretCustodyGrant,
     SecretCustodyReceipt,
     SecretCustodyStatus,
+    SecretProviderEndpointReference,
+    SecretReference,
     SecretValue,
+    SecretVersionRevocationGrant,
+    SecretVersionRevocationReceipt,
 )
 
 from .bootstrap import SecretProviderBootstrapRegistry
@@ -83,13 +87,52 @@ class ControlPlaneKitSecretsCustodian:
         if revoked.reference != grant.reference:
             raise RuntimeError("secret custody revocation returned mismatched reference")
 
+    def revoke_version(
+        self,
+        grant: SecretVersionRevocationGrant,
+    ) -> SecretVersionRevocationReceipt:
+        if not isinstance(grant, SecretVersionRevocationGrant):
+            raise TypeError(
+                "exact secret revocation requires SecretVersionRevocationGrant"
+            )
+        metadata = self._client_for(
+            endpoint_reference=grant.endpoint_reference,
+            credential_reference=grant.credential_reference,
+        ).revoke_version(
+            workspace_id=grant.workspace_id,
+            reference=grant.reference,
+            version_id=grant.version_id,
+            version_number=grant.version_number,
+            caller_subject=grant.actor_subject,
+            correlation_id=grant.correlation_id,
+        )
+        return SecretVersionRevocationReceipt(
+            revocation_id=grant.revocation_id,
+            provider_registration_id=grant.provider_registration_id,
+            reference=metadata.reference,
+            version_id=metadata.version_id,
+            version_number=metadata.version_number,
+            status=SecretCustodyStatus(metadata.status),
+        )
+
     def _client(
         self,
         grant: SecretCustodyGrant,
     ) -> ControlPlaneKitSecretsClient:
-        configuration = self.bootstrap_registry.configuration_for(
+        return self._client_for(
             endpoint_reference=grant.endpoint_reference,
             credential_reference=grant.credential_reference,
+        )
+
+    def _client_for(
+        self,
+        *,
+        endpoint_reference: SecretProviderEndpointReference,
+        credential_reference: SecretReference,
+    ) -> ControlPlaneKitSecretsClient:
+        configuration = self.bootstrap_registry.configuration_for(
+            endpoint_reference=endpoint_reference,
+            credential_reference=credential_reference,
         )
         return ControlPlaneKitSecretsClient(
             configuration,

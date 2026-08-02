@@ -519,6 +519,68 @@ class ControlPlaneKitSecretsClient:
             tuple(item.version_id for item in metadata),
         )
 
+    def revoke_version(
+        self,
+        *,
+        workspace_id: str,
+        reference: SecretReference,
+        version_id: str,
+        version_number: int,
+        caller_subject: str,
+        correlation_id: str,
+    ) -> SecretProviderVersionMetadata:
+        """Revoke one exact provider version without affecting its siblings."""
+
+        _request_identity(workspace_id, caller_subject, correlation_id)
+        _require_reference(reference)
+        if (
+            not isinstance(version_id, str)
+            or not _IDENTIFIER.fullmatch(version_id)
+            or type(version_number) is not int
+            or version_number < 1
+        ):
+            raise SecretProviderClientError(
+                SecretProviderClientCode.MALFORMED_REQUEST
+            )
+        secret_id = canonical_provider_secret_id(reference)
+        response = self._request_json(
+            "POST",
+            (
+                f"{_secret_path(workspace_id, secret_id)}/versions/"
+                f"{quote(version_id, safe='')}/revoke"
+            ),
+            {
+                "version_number": version_number,
+                "caller_subject": caller_subject,
+                "correlation_id": correlation_id,
+            },
+            mutation=True,
+        )
+        if set(response) != {"outcome", "metadata"} or response.get(
+            "outcome"
+        ) != "revoked":
+            raise SecretProviderClientError(
+                SecretProviderClientCode.MALFORMED_RESPONSE,
+                certainty=SecretProviderOutcomeCertainty.UNCERTAIN,
+            )
+        metadata = _metadata(
+            response["metadata"],
+            workspace_id=workspace_id,
+            secret_id=secret_id,
+            reference=reference,
+            expected_status="revoked",
+            certainty=SecretProviderOutcomeCertainty.UNCERTAIN,
+        )
+        if (
+            metadata.version_id != version_id
+            or metadata.version_number != version_number
+        ):
+            raise SecretProviderClientError(
+                SecretProviderClientCode.MALFORMED_RESPONSE,
+                certainty=SecretProviderOutcomeCertainty.UNCERTAIN,
+            )
+        return metadata
+
     def _request_json(
         self,
         method: str,

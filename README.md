@@ -160,6 +160,13 @@ or receives the private key in the generation response. Transport ambiguity is
 reported as uncertain so callers can safely retry the provider's
 correlation-idempotent operation.
 
+Exact version retirement uses the same bounded client boundary but remains
+distinct from whole-reference revocation. The client validates the exact
+version id and number returned by the provider; malformed mutation success is
+reported as uncertain. `ControlPlaneKitSecretsCustodian.revoke_version()`
+translates that metadata into the core `SecretVersionRevocationReceipt` without
+receiving secret bytes.
+
 ## Probe And Verification Adapters
 
 `control_plane_kit_interpreters.probes` owns concrete address authorization,
