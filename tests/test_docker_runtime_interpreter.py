@@ -24,13 +24,16 @@ from control_plane_kit_core.planning import (
     NodeTarget,
     ReconcileNode,
     ReconcileRuntime,
+    RemoveNodeResource,
     RuntimeTarget,
     StartNode,
     StartRuntime,
     RemoveRuntimeResource,
     StopNode,
+    StopRuntime,
     WaitForHealthy,
 )
+from control_plane_kit_core.lifecycle import ResourceLifecycle
 from control_plane_kit_core.products import (
     ContainerServerProduct,
     OciImageReference,
@@ -39,6 +42,7 @@ from control_plane_kit_core.products import (
     ProductReference,
     ProductRuntimeContract,
     ProviderRuntimePort,
+    RetainedDataMount,
 )
 from control_plane_kit_core.runtime_authority import (
     RuntimeAuthorityAccessDelivery,
@@ -193,6 +197,261 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
             ],
             [("api", "http", "http://api:8080")],
         )
+
+    def test_start_node_materializes_and_replays_exact_configuration_artifact(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+        request = _request(StartNode(NodeTarget("api")))
+
+        first = interpreter.execute(request)
+        fake_client.containers.resources[str(first.evidence["container"])].attrs[
+            "State"
+        ]["Running"] = True
+        replay = interpreter.execute(request)
+
+        self.assertIs(first.kind, EffectResultKind.SUCCEEDED)
+        self.assertIs(replay.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(replay.evidence["action"], "reused")
+        configuration_volumes = [
+            volume
+            for volume in fake_client.volumes.created
+            if volume["labels"]["org.openj92.cpk.volume.kind"] == "configuration"
+        ]
+        self.assertEqual(len(configuration_volumes), 1)
+        volume = configuration_volumes[0]
+        self.assertEqual(
+            volume["labels"]["org.openj92.cpk.artifact.digest"],
+            _artifact().content_digest,
+        )
+        container = _workload_container_record(fake_client)
+        self.assertIn(
+            {
+                "Type": "volume",
+                "Source": volume["name"],
+                "Target": "/etc/service/config.json",
+                "ReadOnly": True,
+                "VolumeOptions": {"Subpath": "content"},
+            },
+            container["mounts"],
+        )
+        self.assertEqual(len(_workload_container_records(fake_client)), 1)
+
+    def test_start_node_completes_owned_configuration_volume_with_absent_content(self) -> None:
+        fake_client = FakeDockerClient()
+        sdk = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
+        )
+        interpreter = DockerRuntimeInterpreter(sdk)
+        request = _request(StartNode(NodeTarget("api")))
+        first = interpreter.execute(request)
+        volume = next(
+            value
+            for value in fake_client.volumes.created
+            if value["labels"]["org.openj92.cpk.volume.kind"] == "configuration"
+        )
+        fake_client.containers.resources.pop(str(first.evidence["container"]))
+        fake_client.containers.volume_archives[str(volume["name"])].clear()
+
+        replay = interpreter.execute(request)
+
+        self.assertIs(replay.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(
+            sdk.configuration_artifact_digest(str(volume["name"])),
+            _artifact().content_digest,
+        )
+        self.assertEqual(len(_configuration_volumes(fake_client)), 1)
+
+    def test_start_node_rejects_wrong_configuration_digest_before_image_or_container(self) -> None:
+        fake_client = FakeDockerClient()
+        sdk = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
+        )
+        interpreter = DockerRuntimeInterpreter(sdk)
+        request = _request(StartNode(NodeTarget("api")))
+        first = interpreter.execute(request)
+        volume = next(
+            value
+            for value in fake_client.volumes.created
+            if value["labels"]["org.openj92.cpk.volume.kind"] == "configuration"
+        )
+        fake_client.containers.resources.pop(str(first.evidence["container"]))
+        fake_client.containers.volume_archives[str(volume["name"])].clear()
+        sdk.materialize_configuration_artifact(
+            str(volume["name"]),
+            ConfigurationArtifact(
+                "service-config",
+                "/etc/service/config.json",
+                ConfigurationMediaType.JSON,
+                '{"workers":3}\n',
+                ConfigurationFileMode.READ_ONLY,
+            ),
+        )
+        fake_client.images.pulled.clear()
+
+        result = interpreter.execute(request)
+
+        self.assertIs(result.kind, EffectResultKind.FAILED)
+        self.assertEqual(result.failure.code, "docker.configuration-digest-conflict")
+        self.assertEqual(fake_client.images.pulled, [])
+        self.assertEqual(len(_workload_container_records(fake_client)), 1)
+
+    def test_retained_volume_is_mounted_and_survives_stop_and_compute_removal(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+        material = _material(_product_with_retained_data())
+
+        started = interpreter.execute(
+            _request(StartNode(NodeTarget("api")), products=(material,))
+        )
+        retained = next(
+            volume
+            for volume in fake_client.volumes.created
+            if volume["labels"]["org.openj92.cpk.volume.kind"] == "retained-data"
+        )
+        container = _workload_container_record(fake_client)
+        self.assertEqual(
+            container["volumes"],
+            {retained["name"]: {"bind": "/var/lib/service", "mode": "rw"}},
+        )
+        resource = fake_client.volumes.resources[str(retained["name"])]
+        fake_client.containers.resources[str(started.evidence["container"])].attrs[
+            "State"
+        ]["Running"] = True
+
+        stopped = interpreter.execute(
+            _request(StopNode(NodeTarget("api")), products=(material,))
+        )
+        removed = interpreter.execute(
+            _request(RemoveNodeResource(NodeTarget("api")), products=(material,))
+        )
+
+        self.assertIs(stopped.kind, EffectResultKind.SUCCEEDED)
+        self.assertIs(removed.kind, EffectResultKind.SUCCEEDED)
+        self.assertFalse(resource.removed)
+        self.assertIn(str(retained["name"]), fake_client.volumes.resources)
+
+    def test_unowned_retained_volume_fails_before_image_or_container_mutation(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+        material = _material(_product_with_retained_data())
+        request = _request(StartNode(NodeTarget("api")), products=(material,))
+        first = interpreter.execute(request)
+        retained = next(
+            volume
+            for volume in fake_client.volumes.created
+            if volume["labels"]["org.openj92.cpk.volume.kind"] == "retained-data"
+        )
+        fake_client.containers.resources.pop(str(first.evidence["container"]))
+        fake_client.volumes.resources[str(retained["name"])].attrs["Config"][
+            "Labels"
+        ] = {}
+        fake_client.images.pulled.clear()
+
+        result = interpreter.execute(request)
+
+        self.assertIs(result.kind, EffectResultKind.FAILED)
+        self.assertEqual(result.failure.code, "docker.retained-volume-ownership-conflict")
+        self.assertEqual(fake_client.images.pulled, [])
+        self.assertEqual(len(_workload_container_records(fake_client)), 1)
+
+    def test_runtime_stop_is_a_non_deleting_logical_barrier(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+        started = interpreter.execute(
+            _request(StartRuntime(RuntimeTarget("docker")), products=())
+        )
+        network = fake_client.networks.resources[str(started.evidence["network"])]
+
+        result = interpreter.execute(
+            _request(StopRuntime(RuntimeTarget("docker")), products=())
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(result.evidence["action"], "logical-stop")
+        self.assertFalse(network.removed)
+
+    def test_docker_timeout_is_uncertain_without_exception_text(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+
+        def fail_inspection(name: str) -> FakeResource:
+            raise TimeoutError("daemon output carried sensitive material")
+
+        fake_client.networks.get = fail_inspection
+        result = interpreter.execute(
+            _request(StartRuntime(RuntimeTarget("docker")), products=())
+        )
+
+        self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+        self.assertEqual(result.failure.code, "docker.effect-uncertain")
+        self.assertEqual(result.failure.message, "TimeoutError")
+        self.assertEqual(fake_client.networks.created, [])
+
+    def test_reconcile_failure_after_removal_is_uncertain_and_redacted(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+        first = interpreter.execute(_request(StartNode(NodeTarget("api"))))
+        existing = fake_client.containers.resources[str(first.evidence["container"])]
+
+        def fail_pull(image: str, **kwargs: object) -> None:
+            raise RuntimeError("registry response carried sensitive material")
+
+        fake_client.images.pull = fail_pull
+        result = interpreter.execute(
+            _request(
+                ReconcileNode(NodeTarget("api")),
+                products=(
+                    _material(
+                        _product(),
+                        socket_environment=(
+                            SocketDerivedEnvironmentBinding(
+                                "UPSTREAM_URL",
+                                "http://replacement:8080",
+                                "replacement.internal->api.upstream",
+                            ),
+                        ),
+                    ),
+                ),
+                desired_graph_id="graph-updated",
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+        self.assertEqual(result.failure.code, "docker.effect-uncertain")
+        self.assertEqual(result.failure.message, "RuntimeError")
+        self.assertTrue(existing.force_removed)
 
     def test_start_node_passes_socket_derived_environment_to_container(self) -> None:
         fake_client = FakeDockerClient()
@@ -1975,6 +2234,24 @@ def _product_with_file_secret_delivery() -> ContainerServerProduct:
     )
 
 
+def _product_with_retained_data() -> ContainerServerProduct:
+    product = _product()
+    return ContainerServerProduct(
+        identity=product.identity,
+        image=product.image,
+        runtime_contract=ProductRuntimeContract(
+            sockets=product.runtime_contract.sockets,
+            provider_ports=product.runtime_contract.provider_ports,
+            public_environment=product.runtime_contract.public_environment,
+            configuration_artifacts=product.runtime_contract.configuration_artifacts,
+            retained_data_mounts=(
+                RetainedDataMount("service-data", "/var/lib/service"),
+            ),
+            lifecycle=ResourceLifecycle.owned_with_retained_data("service-data"),
+        ),
+    )
+
+
 def _artifact() -> ConfigurationArtifact:
     return ConfigurationArtifact(
         "service-config",
@@ -1997,6 +2274,14 @@ def _workload_container_records(fake_client: FakeDockerClient) -> list[dict[str,
         record
         for record in fake_client.containers.created
         if record.get("image") == image
+    ]
+
+
+def _configuration_volumes(fake_client: FakeDockerClient) -> list[dict[str, object]]:
+    return [
+        volume
+        for volume in fake_client.volumes.created
+        if volume["labels"]["org.openj92.cpk.volume.kind"] == "configuration"
     ]
 
 
