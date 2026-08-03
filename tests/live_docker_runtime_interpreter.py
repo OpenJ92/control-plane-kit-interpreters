@@ -62,15 +62,12 @@ def main() -> None:
         if not node_result.observations:
             raise AssertionError("runtime interpreter did not return endpoint observations")
     finally:
-        for action, name in (
-            (sdk.remove_container, container_name),
-            (sdk.remove_network, network_name),
+        for inspect, action, name in (
+            (sdk.inspect_container, sdk.remove_container, container_name),
+            (sdk.inspect_network, sdk.remove_network, network_name),
         ):
-            if name:
-                try:
-                    action(name)
-                except Exception:
-                    pass
+            if name and inspect(name) is not None:
+                action(name)
 
     print(
         json.dumps(

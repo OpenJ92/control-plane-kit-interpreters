@@ -13,7 +13,7 @@ authors = [
   { name = "OpenJ92" }
 ]
 dependencies = [
-  "control-plane-kit-core @ https://github.com/OpenJ92/control-plane-kit/archive/73fbfad83ee61390b410a44ff056d40c9037f6d3.zip#subdirectory=control-plane-kit-core",
+  "control-plane-kit-core @ https://github.com/OpenJ92/control-plane-kit/archive/f45384e72a79f59c93a715fd08f409f86a91218a.zip#subdirectory=control-plane-kit-core",
 ]
 
 [project.optional-dependencies]
@@ -36,7 +36,7 @@ gateway = [
   "PyJWT[crypto]>=2.10,<3",
 ]
 test = [
-  "control-plane-kit-secrets[test] @ https://github.com/OpenJ92/control-plane-kit-secrets/archive/313fd26cb15a362ef5196547a3f6b27122877609.zip",
+  "control-plane-kit-secrets[test] @ https://github.com/OpenJ92/control-plane-kit-secrets/archive/96e86dc3248d578780d64d5d7fc5d6359631d1d6.zip",
   "docker>=7.1",
   "httpx>=0.28",
   "PyJWT[crypto]>=2.10,<3",
