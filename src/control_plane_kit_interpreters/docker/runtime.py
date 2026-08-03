@@ -724,6 +724,7 @@ class DockerRuntimeInterpreter:
             if inspection is None:
                 self.client.create_volume(name=volume_name, labels=volume_labels)
                 self.client.materialize_configuration_artifact(volume_name, artifact)
+                digest = self.client.configuration_artifact_digest(volume_name)
             else:
                 _require_node_owner(
                     inspection.labels,
@@ -731,11 +732,14 @@ class DockerRuntimeInterpreter:
                     "configuration volume",
                 )
                 digest = self.client.configuration_artifact_digest(volume_name)
-                if digest != artifact.content_digest:
-                    raise _DockerInterpreterPreconditionError(
-                        "docker.configuration-digest-conflict",
-                        "owned configuration volume has unexpected digest",
-                    )
+                if digest is None:
+                    self.client.materialize_configuration_artifact(volume_name, artifact)
+                    digest = self.client.configuration_artifact_digest(volume_name)
+            if digest != artifact.content_digest:
+                raise _DockerInterpreterPreconditionError(
+                    "docker.configuration-digest-conflict",
+                    "owned configuration volume has unexpected digest",
+                )
             configuration_mounts.append(
                 DockerSdkConfigurationMount(artifact, volume_name)
             )
@@ -1326,7 +1330,7 @@ def _require_label_owner(
         label = f"{_LABEL_PREFIX}.{key}"
         if observed.get(label) != expected.get(label):
             raise _DockerInterpreterPreconditionError(
-                f"docker.{resource}-ownership-conflict",
+                f"docker.{_segment(resource)}-ownership-conflict",
                 f"Docker {resource} is not owned by this runtime effect",
             )
 
@@ -1389,8 +1393,4 @@ def _digest(*parts: str) -> str:
 
 
 def _bounded_error_message(error: Exception) -> str:
-    text = type(error).__name__
-    message = str(error)
-    if message:
-        text = f"{text}: {message}"
-    return text[:512]
+    return type(error).__name__[:512]
