@@ -104,14 +104,12 @@ def _cleanup(
     container_name: str,
     network_name: str,
 ) -> None:
-    for action, name in (
-        (sdk.remove_container, container_name),
-        (sdk.remove_network, network_name),
+    for inspect, action, name in (
+        (sdk.inspect_container, sdk.remove_container, container_name),
+        (sdk.inspect_network, sdk.remove_network, network_name),
     ):
-        try:
+        if inspect(name) is not None:
             action(name)
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":

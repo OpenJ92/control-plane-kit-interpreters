@@ -195,4 +195,20 @@ Run validation with:
 ./test.sh
 ```
 
+The default gate is clean-checkout proof. It installs the immutable core and
+secrets coordinates recorded in `pyproject.toml`, prints those coordinates,
+runs the package-integrity contract, compiles current source/tests, executes all
+unittests, and verifies a lightweight installed import.
+
+Coordinated source development may explicitly replace only the core dependency:
+
+```bash
+CPK_INTERPRETERS_DEPENDENCY_MODE=local-core \
+CPK_CORE_REPO=/absolute/path/to/control-plane-kit \
+./test.sh
+```
+
+Local-core mode is labeled in output and is not the default package or CI
+proof. Merely having a sibling checkout no longer changes what is tested.
+
 Use `unittest` only.
