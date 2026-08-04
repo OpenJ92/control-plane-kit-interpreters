@@ -564,7 +564,6 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                         ),
                     ),
                 ),
-                desired_graph_id="graph-updated",
             )
         )
 
@@ -579,6 +578,197 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                 "UPSTREAM_URL": "http://replacement:8080",
             },
         )
+
+    def test_reconcile_node_recreates_owned_container_when_public_environment_changes(
+        self,
+    ) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+        first = interpreter.execute(_request(StartNode(NodeTarget("api"))))
+        existing = fake_client.containers.resources[str(first.evidence["container"])]
+
+        result = interpreter.execute(
+            _request(
+                ReconcileNode(NodeTarget("api")),
+                products=(
+                    _material(
+                        _product(),
+                        public_environment=(
+                            PublicStaticEnvironmentBinding("PORT", "9090"),
+                        ),
+                    ),
+                ),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(result.evidence["action"], "recreated")
+        self.assertTrue(existing.force_removed)
+        self.assertEqual(
+            _workload_container_records(fake_client)[-1]["environment"],
+            {"PORT": "9090"},
+        )
+
+    def test_reconcile_node_reuses_canonically_equivalent_environment_material(
+        self,
+    ) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+        public_environment = (
+            PublicStaticEnvironmentBinding("MODE", "ready"),
+            PublicStaticEnvironmentBinding("PORT", "8080"),
+        )
+        socket_environment = (
+            SocketDerivedEnvironmentBinding(
+                "CACHE_URL",
+                "http://cache:8080",
+                "cache.internal->api.cache",
+            ),
+            SocketDerivedEnvironmentBinding(
+                "UPSTREAM_URL",
+                "http://upstream:8080",
+                "upstream.internal->api.upstream",
+            ),
+        )
+        interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(
+                    _material(
+                        _product(),
+                        public_environment=public_environment,
+                        socket_environment=socket_environment,
+                    ),
+                ),
+            )
+        )
+
+        result = interpreter.execute(
+            _request(
+                ReconcileNode(NodeTarget("api")),
+                products=(
+                    _material(
+                        _product(),
+                        public_environment=tuple(reversed(public_environment)),
+                        socket_environment=tuple(reversed(socket_environment)),
+                    ),
+                ),
+            )
+        )
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(result.evidence["action"], "started")
+        self.assertEqual(len(_workload_container_records(fake_client)), 1)
+
+    def test_reconcile_node_tracks_delegation_verifier_projection_material(
+        self,
+    ) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+        name = "CPK_GATEWAY_DELEGATION_VERIFIERS"
+        verifier_a = '[{"key_id":"A","public_key":"public-A"}]'
+        verifier_a_b = (
+            '[{"key_id":"A","public_key":"public-A"},'
+            '{"key_id":"B","public_key":"public-B"}]'
+        )
+        verifier_b = '[{"key_id":"B","public_key":"public-B"}]'
+        interpreter.execute(
+            _request(
+                StartNode(NodeTarget("api")),
+                products=(
+                    _material(
+                        _product(),
+                        public_environment=(
+                            PublicStaticEnvironmentBinding(name, verifier_a),
+                        ),
+                    ),
+                ),
+            )
+        )
+
+        overlap = interpreter.execute(
+            _request(
+                ReconcileNode(NodeTarget("api")),
+                products=(
+                    _material(
+                        _product(),
+                        public_environment=(
+                            PublicStaticEnvironmentBinding(name, verifier_a_b),
+                        ),
+                    ),
+                ),
+            )
+        )
+        active = interpreter.execute(
+            _request(
+                ReconcileNode(NodeTarget("api")),
+                products=(
+                    _material(
+                        _product(),
+                        public_environment=(
+                            PublicStaticEnvironmentBinding(name, verifier_b),
+                        ),
+                    ),
+                ),
+            )
+        )
+
+        self.assertEqual(overlap.evidence["action"], "recreated")
+        self.assertEqual(active.evidence["action"], "recreated")
+        records = _workload_container_records(fake_client)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(records[0]["environment"], {name: verifier_a})
+        self.assertEqual(records[1]["environment"], {name: verifier_a_b})
+        self.assertEqual(records[2]["environment"], {name: verifier_b})
+        for record in records:
+            self.assertNotIn("public-A", repr(record["labels"]))
+            self.assertNotIn("public-B", repr(record["labels"]))
+
+    def test_reconcile_node_recreates_when_authority_delivery_changes(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+        interpreter.execute(_request(StartNode(NodeTarget("api"))))
+        delivery = RuntimeAuthorityAccessDelivery(
+            RuntimeAuthorityReference("local-docker"),
+            RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT,
+        )
+
+        with patch(
+            "control_plane_kit_interpreters.docker.runtime.os.stat",
+            return_value=type("SocketStat", (), {"st_gid": 987})(),
+        ):
+            result = interpreter.execute(
+                _request(
+                    ReconcileNode(NodeTarget("api")),
+                    authority_ref=RuntimeAuthorityReference("local-docker"),
+                    authority_deliveries=(delivery,),
+                )
+            )
+
+        self.assertEqual(result.evidence["action"], "recreated")
+        record = _workload_container_records(fake_client)[-1]
+        self.assertEqual(record["group_add"], ["987"])
+        self.assertEqual(len(_bind_mounts(record)), 1)
 
     def test_existing_owned_container_is_started_without_recreation(self) -> None:
         fake_client = FakeDockerClient()
