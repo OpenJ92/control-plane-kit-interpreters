@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from importlib import import_module
 import re
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from control_plane_kit_core.public_ingress import (
     NamedPublicIngress,
@@ -208,40 +208,47 @@ class CloudflareNamedIngressInterpreter:
                 hostname=ingress.hostname,
                 origin_service_url=origin_service_url,
             )
-            dns_record_id = client.upsert_dns_cname(
+            dns_record_id = client.create_dns_cname(
                 hostname=ingress.hostname,
                 tunnel_id=tunnel_id,
             )
             tunnel_token = client.get_tunnel_token(tunnel_id)
             custody_write_attempted = True
-            custody_receipt = self.secret_custodian.store(
-                secret_custody_grant,
-                tunnel_token,
-            )
+            try:
+                custody_receipt = self.secret_custodian.store(
+                    secret_custody_grant,
+                    tunnel_token,
+                )
+            except Exception:
+                raise CloudflareApiError(
+                    "Cloudflare generated secret custody failed"
+                ) from None
             if not custody_receipt.matches(secret_custody_grant):
                 raise CloudflareApiError(
                     "secret custodian returned mismatched receipt"
                 )
         except Exception as error:
-            compensation_failed = False
+            cleanup: list[tuple[str, Callable[[], None]]] = []
             if custody_write_attempted:
-                try:
-                    self.secret_custodian.revoke(secret_custody_grant)
-                except Exception:
-                    compensation_failed = True
+                cleanup.append(
+                    (
+                        "custody",
+                        lambda: self.secret_custodian.revoke(secret_custody_grant),
+                    )
+                )
             if dns_record_id is not None:
-                try:
-                    client.delete_dns_record(dns_record_id)
-                except Exception:
-                    compensation_failed = True
+                cleanup.append(
+                    ("dns", lambda: client.delete_dns_record(dns_record_id))
+                )
             if tunnel_id is not None:
-                try:
-                    client.delete_tunnel(tunnel_id)
-                except Exception:
-                    compensation_failed = True
-            if compensation_failed:
+                cleanup.append(
+                    ("tunnel", lambda: client.delete_tunnel(tunnel_id))
+                )
+            failed_stages = _attempt_exact_cleanup(cleanup)
+            if failed_stages:
                 raise CloudflareApiError(
-                    "Cloudflare allocation failed and exact compensation is uncertain"
+                    "Cloudflare exact cleanup is uncertain: "
+                    + ",".join(failed_stages)
                 ) from error
             raise
         assert tunnel_id is not None
@@ -284,9 +291,27 @@ class CloudflareNamedIngressInterpreter:
                 "generated secret custodian is not configured",
             )
         client = self._client(authority, secret_resolution_grant)
-        self.secret_custodian.revoke(secret_custody_grant)
-        client.delete_dns_record(resources.dns_record_id)
-        client.delete_tunnel(resources.tunnel_id)
+        failed_stages = _attempt_exact_cleanup(
+            (
+                (
+                    "custody",
+                    lambda: self.secret_custodian.revoke(secret_custody_grant),
+                ),
+                (
+                    "dns",
+                    lambda: client.delete_dns_record(resources.dns_record_id),
+                ),
+                (
+                    "tunnel",
+                    lambda: client.delete_tunnel(resources.tunnel_id),
+                ),
+            )
+        )
+        if failed_stages:
+            raise CloudflareApiError(
+                "Cloudflare exact cleanup is uncertain: "
+                + ",".join(failed_stages)
+            )
 
     def _client(
         self,
@@ -308,6 +333,21 @@ class CloudflareNamedIngressInterpreter:
             api_token=api_token,
             transport=self.transport,
         )
+
+
+def _attempt_exact_cleanup(
+    stages: tuple[tuple[str, Callable[[], None]], ...]
+    | list[tuple[str, Callable[[], None]]],
+) -> tuple[str, ...]:
+    """Attempt every exact cleanup stage and return bounded failed stage names."""
+
+    failed: list[str] = []
+    for stage, cleanup in stages:
+        try:
+            cleanup()
+        except Exception:
+            failed.append(stage)
+    return tuple(failed)
 
 
 def _resolve_api_token(
@@ -387,7 +427,7 @@ class CloudflareApiClient:
             },
         )
 
-    def upsert_dns_cname(self, *, hostname: str, tunnel_id: str) -> str:
+    def create_dns_cname(self, *, hostname: str, tunnel_id: str) -> str:
         _validate_hostname(hostname)
         _validate_identifier(tunnel_id, "tunnel_id")
         content = f"{tunnel_id}.cfargotunnel.com"
@@ -396,17 +436,12 @@ class CloudflareApiClient:
             f"/zones/{self.authority.zone_id}/dns_records",
             params={"type": "CNAME", "name": hostname},
         ).get("result")
-        if isinstance(records, list) and records:
-            record = records[0]
-            if not isinstance(record, Mapping):
-                raise CloudflareApiError("Cloudflare DNS record response malformed")
-            record_id = _mapping_text(record, "id")
-            self._request(
-                "PATCH",
-                f"/zones/{self.authority.zone_id}/dns_records/{record_id}",
-                json=_dns_record_body(hostname, content),
+        if not isinstance(records, list):
+            raise CloudflareApiError("Cloudflare DNS lookup response malformed")
+        if records:
+            raise CloudflareApiError(
+                "Cloudflare DNS hostname is already allocated"
             )
-            return record_id
         created = self._request(
             "POST",
             f"/zones/{self.authority.zone_id}/dns_records",
@@ -457,16 +492,21 @@ class CloudflareApiClient:
         json: Mapping[str, object] | None = None,
         params: Mapping[str, str] | None = None,
     ) -> Mapping[str, object]:
-        response = (self.transport or HttpxCloudflareTransport()).request(
-            method,
-            f"{_BASE_URL}{path}",
-            headers={
-                "Authorization": f"Bearer {self.api_token.reveal()}",
-                "Content-Type": "application/json",
-            },
-            json=json,
-            params=params,
-        )
+        try:
+            response = (self.transport or HttpxCloudflareTransport()).request(
+                method,
+                f"{_BASE_URL}{path}",
+                headers={
+                    "Authorization": f"Bearer {self.api_token.reveal()}",
+                    "Content-Type": "application/json",
+                },
+                json=json,
+                params=params,
+            )
+        except Exception:
+            raise CloudflareApiError(
+                "Cloudflare API transport failed"
+            ) from None
         if response.status_code < 200 or response.status_code >= 300:
             raise CloudflareApiError(
                 f"Cloudflare API request failed with status {response.status_code}"
