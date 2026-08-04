@@ -119,27 +119,107 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
             self.assertEqual(request.headers["Authorization"], f"Bearer {API_TOKEN}")
             self.assertNotIn(TUNNEL_TOKEN, repr(request))
 
-    def test_existing_dns_record_is_patched_instead_of_recreated(self) -> None:
+    def test_existing_dns_record_is_rejected_without_mutation(self) -> None:
         transport = FakeCloudflareTransport(existing_dns_record_id="dns-existing")
-        client = CloudflareApiClient(
-            _authority(),
-            api_token=SecretValue(API_TOKEN),
+        interpreter = CloudflareNamedIngressInterpreter(
             transport=transport,
+            authorized_secret_resolver=_authorized_resolver(),
+            secret_custodian=RecordingSecretCustodian(),
         )
 
-        record_id = client.upsert_dns_cname(
-            hostname="cpk-gateway-001.openj92.dev",
-            tunnel_id="tunnel-001",
-        )
+        with self.assertRaisesRegex(
+            CloudflareApiError,
+            "DNS hostname is already allocated",
+        ):
+            interpreter.create(
+                _ingress(),
+                authority=_authority(),
+                allocation_name="cpk-gateway-001-c0303ba7369e",
+                origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
+                secret_custody_grant=_custody_grant(),
+            )
 
-        self.assertEqual(record_id, "dns-existing")
         self.assertEqual(
             [(request.method, request.path) for request in transport.requests],
             [
+                ("POST", "/accounts/account-001/cfd_tunnel"),
+                ("PUT", "/accounts/account-001/cfd_tunnel/tunnel-001/configurations"),
                 ("GET", "/zones/zone-001/dns_records"),
-                ("PATCH", "/zones/zone-001/dns_records/dns-existing"),
+                ("DELETE", "/accounts/account-001/cfd_tunnel/tunnel-001"),
             ],
         )
+
+    def test_create_fault_matrix_compensates_only_known_owned_stages(self) -> None:
+        cases = (
+            ("tunnel-allocation", []),
+            ("tunnel-configuration", ["tunnel-delete"]),
+            ("dns-lookup", ["tunnel-delete"]),
+            ("dns-create", ["tunnel-delete"]),
+            ("tunnel-token", ["dns-delete", "tunnel-delete"]),
+        )
+        for fault_stage, expected_cleanup in cases:
+            with self.subTest(fault_stage=fault_stage):
+                transport = FakeCloudflareTransport(fault_stages={fault_stage})
+                interpreter = CloudflareNamedIngressInterpreter(
+                    transport=transport,
+                    authorized_secret_resolver=_authorized_resolver(),
+                    secret_custodian=RecordingSecretCustodian(),
+                )
+
+                with self.assertRaises(CloudflareApiError):
+                    interpreter.create(
+                        _ingress(),
+                        authority=_authority(),
+                        allocation_name="cpk-gateway-001-c0303ba7369e",
+                        origin_service_url="http://gateway:8000",
+                        secret_resolution_grant=_resolution_grant(),
+                        secret_custody_grant=_custody_grant(),
+                    )
+
+                self.assertEqual(
+                    [
+                        request.stage
+                        for request in transport.requests
+                        if request.stage.endswith("delete")
+                    ],
+                    expected_cleanup,
+                )
+
+    def test_create_compensation_attempts_every_known_stage_and_bounds_uncertainty(self) -> None:
+        transport = FakeCloudflareTransport(
+            fault_stages={"dns-delete", "tunnel-delete"},
+        )
+        custodian = RecordingSecretCustodian(
+            fail_store=True,
+            fail_revoke=True,
+        )
+        interpreter = CloudflareNamedIngressInterpreter(
+            transport=transport,
+            authorized_secret_resolver=_authorized_resolver(),
+            secret_custodian=custodian,
+        )
+
+        with self.assertRaises(CloudflareApiError) as raised:
+            interpreter.create(
+                _ingress(),
+                authority=_authority(),
+                allocation_name="cpk-gateway-001-c0303ba7369e",
+                origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
+                secret_custody_grant=_custody_grant(),
+            )
+
+        self.assertEqual(
+            str(raised.exception),
+            "Cloudflare exact cleanup is uncertain: custody,dns,tunnel",
+        )
+        self.assertEqual(
+            [request.stage for request in transport.requests[-2:]],
+            ["dns-delete", "tunnel-delete"],
+        )
+        self.assertNotIn(API_TOKEN, repr(raised.exception))
+        self.assertNotIn(TUNNEL_TOKEN, repr(raised.exception))
 
     def test_missing_authorized_secret_resolver_fails_before_api_mutation(self) -> None:
         transport = FakeCloudflareTransport()
@@ -191,7 +271,10 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
             secret_custodian=custodian,
         )
 
-        with self.assertRaisesRegex(RuntimeError, "provider custody failed"):
+        with self.assertRaisesRegex(
+            CloudflareApiError,
+            "generated secret custody failed",
+        ) as raised:
             interpreter.create(
                 _ingress(),
                 authority=_authority(),
@@ -210,6 +293,35 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
         )
         self.assertEqual(custodian.revoked_references, [_custody_grant().reference])
         self.assertNotIn(TUNNEL_TOKEN, repr(custodian))
+        self.assertNotIn(TUNNEL_TOKEN, repr(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+
+    def test_transport_exception_is_bounded_redacted_and_unchained(self) -> None:
+        transport = FakeCloudflareTransport(
+            raise_stages={"tunnel-allocation"},
+        )
+        interpreter = CloudflareNamedIngressInterpreter(
+            transport=transport,
+            authorized_secret_resolver=_authorized_resolver(),
+            secret_custodian=RecordingSecretCustodian(),
+        )
+
+        with self.assertRaises(CloudflareApiError) as raised:
+            interpreter.create(
+                _ingress(),
+                authority=_authority(),
+                allocation_name="cpk-gateway-001-c0303ba7369e",
+                origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
+                secret_custody_grant=_custody_grant(),
+            )
+
+        self.assertEqual(
+            str(raised.exception),
+            "Cloudflare API transport failed",
+        )
+        self.assertNotIn(API_TOKEN, repr(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
 
     def test_hostname_policy_fails_closed_before_api_mutation(self) -> None:
         transport = FakeCloudflareTransport()
@@ -289,6 +401,68 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
             ],
         )
         self.assertEqual(resolver.grants, [_resolution_grant()])
+
+    def test_teardown_attempts_every_exact_stage_after_each_possible_failure(self) -> None:
+        cases = (
+            (True, set(), "custody"),
+            (False, {"dns-delete"}, "dns"),
+            (False, {"tunnel-delete"}, "tunnel"),
+        )
+        for fail_revoke, fault_stages, expected_stage in cases:
+            with self.subTest(expected_stage=expected_stage):
+                transport = FakeCloudflareTransport(fault_stages=fault_stages)
+                custodian = RecordingSecretCustodian(fail_revoke=fail_revoke)
+                interpreter = CloudflareNamedIngressInterpreter(
+                    transport=transport,
+                    authorized_secret_resolver=_authorized_resolver(),
+                    secret_custodian=custodian,
+                )
+
+                with self.assertRaises(CloudflareApiError) as raised:
+                    interpreter.teardown(
+                        authority=_authority(),
+                        resources=_owned_resources(),
+                        secret_resolution_grant=_resolution_grant(),
+                        secret_custody_grant=_custody_grant(),
+                    )
+
+                self.assertEqual(
+                    str(raised.exception),
+                    f"Cloudflare exact cleanup is uncertain: {expected_stage}",
+                )
+                self.assertEqual(
+                    [request.stage for request in transport.requests],
+                    ["dns-delete", "tunnel-delete"],
+                )
+
+    def test_teardown_reports_all_failed_stages_without_secret_material(self) -> None:
+        transport = FakeCloudflareTransport(
+            fault_stages={"dns-delete", "tunnel-delete"},
+        )
+        interpreter = CloudflareNamedIngressInterpreter(
+            transport=transport,
+            authorized_secret_resolver=_authorized_resolver(),
+            secret_custodian=RecordingSecretCustodian(fail_revoke=True),
+        )
+
+        with self.assertRaises(CloudflareApiError) as raised:
+            interpreter.teardown(
+                authority=_authority(),
+                resources=_owned_resources(),
+                secret_resolution_grant=_resolution_grant(),
+                secret_custody_grant=_custody_grant(),
+            )
+
+        self.assertEqual(
+            str(raised.exception),
+            "Cloudflare exact cleanup is uncertain: custody,dns,tunnel",
+        )
+        self.assertEqual(
+            [request.stage for request in transport.requests],
+            ["dns-delete", "tunnel-delete"],
+        )
+        self.assertNotIn(API_TOKEN, repr(raised.exception))
+        self.assertNotIn(TUNNEL_TOKEN, repr(raised.exception))
 
     def test_api_errors_are_bounded_and_redacted(self) -> None:
         transport = FakeCloudflareTransport(status_code=403)
@@ -398,6 +572,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
 class RecordedRequest:
     method: str
     path: str
+    stage: str
     headers: Mapping[str, str]
     json: Mapping[str, object] | None
     params: Mapping[str, str] | None
@@ -406,6 +581,7 @@ class RecordedRequest:
 @dataclass(repr=False)
 class RecordingSecretCustodian:
     fail_store: bool = False
+    fail_revoke: bool = False
 
     def __post_init__(self) -> None:
         self.stored_references: list[SecretReference] = []
@@ -420,7 +596,7 @@ class RecordingSecretCustodian:
         self.stored_references.append(grant.reference)
         self.received_expected_value = value.reveal() == TUNNEL_TOKEN
         if self.fail_store:
-            raise RuntimeError("provider custody failed")
+            raise RuntimeError(TUNNEL_TOKEN)
         return SecretCustodyReceipt(
             custody_id=grant.custody_id,
             provider_registration_id=grant.provider_registration_id,
@@ -431,6 +607,8 @@ class RecordingSecretCustodian:
 
     def revoke(self, grant: SecretCustodyGrant) -> None:
         self.revoked_references.append(grant.reference)
+        if self.fail_revoke:
+            raise RuntimeError(TUNNEL_TOKEN)
 
     def __repr__(self) -> str:
         return "RecordingSecretCustodian(<redacted>)"
@@ -459,10 +637,14 @@ class FakeCloudflareTransport:
         *,
         existing_dns_record_id: str | None = None,
         status_code: int = 200,
+        fault_stages: set[str] | None = None,
+        raise_stages: set[str] | None = None,
     ) -> None:
         self.requests: list[RecordedRequest] = []
         self.existing_dns_record_id = existing_dns_record_id
         self.status_code = status_code
+        self.fault_stages = set() if fault_stages is None else set(fault_stages)
+        self.raise_stages = set() if raise_stages is None else set(raise_stages)
 
     def request(
         self,
@@ -474,9 +656,16 @@ class FakeCloudflareTransport:
         params: Mapping[str, str] | None = None,
     ) -> CloudflareHttpResponse:
         path = url.removeprefix("https://api.cloudflare.com/client/v4")
-        self.requests.append(RecordedRequest(method, path, dict(headers), json, params))
+        stage = _cloudflare_request_stage(method, path)
+        self.requests.append(
+            RecordedRequest(method, path, stage, dict(headers), json, params)
+        )
+        if stage in self.raise_stages:
+            raise RuntimeError(API_TOKEN)
         if self.status_code != 200:
             return CloudflareHttpResponse(self.status_code, {"success": False})
+        if stage in self.fault_stages:
+            return CloudflareHttpResponse(503, {"success": False})
         if method == "POST" and path == "/accounts/account-001/cfd_tunnel":
             return CloudflareHttpResponse(
                 200,
@@ -510,6 +699,35 @@ def _authority() -> CloudflareZoneAuthority:
         api_token_ref=SecretReference("secret://local/cf/api-token"),
         allowed_hostname_pattern="cpk-gateway-*.openj92.dev",
     )
+
+
+def _owned_resources() -> CloudflareOwnedIngressResources:
+    return CloudflareOwnedIngressResources(
+        tunnel_id="tunnel-001",
+        dns_record_id="dns-001",
+        tunnel_name="cpk-gateway-001",
+        hostname="cpk-gateway-001.openj92.dev",
+    )
+
+
+def _cloudflare_request_stage(method: str, path: str) -> str:
+    if method == "POST" and path == "/accounts/account-001/cfd_tunnel":
+        return "tunnel-allocation"
+    if method == "PUT" and path.endswith("/configurations"):
+        return "tunnel-configuration"
+    if method == "GET" and path == "/zones/zone-001/dns_records":
+        return "dns-lookup"
+    if method == "POST" and path == "/zones/zone-001/dns_records":
+        return "dns-create"
+    if method == "PATCH" and "/dns_records/" in path:
+        return "dns-update"
+    if method == "GET" and path.endswith("/token"):
+        return "tunnel-token"
+    if method == "DELETE" and "/dns_records/" in path:
+        return "dns-delete"
+    if method == "DELETE" and "/cfd_tunnel/" in path:
+        return "tunnel-delete"
+    return "tunnel-observe"
 
 
 def _ingress() -> NamedPublicIngress:
