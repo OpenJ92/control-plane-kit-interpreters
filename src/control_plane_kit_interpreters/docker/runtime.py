@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import hashlib
+import json
 import os
 import re
 from typing import Mapping
@@ -1351,8 +1352,20 @@ def _node_fingerprint(
         material.reference.descriptor_sha256.value,
         product.image.execution_reference,
         repr(product.runtime_contract.descriptor()),
+        _canonical_descriptors(material.public_environment),
+        _canonical_descriptors(material.socket_environment),
+        _canonical_descriptors(request.authority_deliveries),
         repr(tuple(artifact.content_digest for artifact in contract.configuration_artifacts)),
         repr(tuple(mount.resource_id for mount in contract.retained_data_mounts)),
+    )
+
+
+def _canonical_descriptors(values: tuple[object, ...]) -> str:
+    return json.dumps(
+        [value.descriptor() for value in values],
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
     )
 
 
