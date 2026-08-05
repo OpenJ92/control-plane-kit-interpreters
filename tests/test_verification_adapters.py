@@ -102,6 +102,19 @@ class RecordingSecretResolver:
         return SecretResolved(reference, SecretValue("postgres-secret"))
 
 
+@dataclass
+class ScriptedPublicAddressResolver:
+    responses: list[tuple[str, ...] | Exception]
+    calls: list[str] = field(default_factory=list)
+
+    def resolve(self, hostname: str) -> tuple[str, ...]:
+        self.calls.append(hostname)
+        result = self.responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
 class VerificationAdapterTests(unittest.TestCase):
     def test_http_check_is_redirect_free_bounded_and_status_driven(self) -> None:
         requests: list[httpx.Request] = []
@@ -178,6 +191,117 @@ class VerificationAdapterTests(unittest.TestCase):
         self.assertIs(result.outcome, VerificationOutcome.PASSED)
         self.assertEqual(result.attempts, 2)
         sleep.assert_called_once_with(1.25)
+
+    def test_public_http_retries_unresolved_dns_and_resolves_each_attempt(self) -> None:
+        resolver = ScriptedPublicAddressResolver(
+            [(), ("1.1.1.1",)]
+        )
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, content=b"ready")
+
+        interpreter = HttpVerificationInterpreter(
+            ProbeAddressPolicy(
+                public_hosts=frozenset(("cpk-gateway-001.openj92.dev",))
+            ),
+            public_resolver=resolver,
+            transport=httpx.MockTransport(handler),
+        )
+
+        with patch("control_plane_kit_interpreters.timing.time.sleep") as sleep:
+            result = interpreter.execute(
+                _public_http_material(attempts=2, interval_seconds=0.75)
+            )
+
+        self.assertIs(result.outcome, VerificationOutcome.PASSED)
+        self.assertEqual(result.attempts, 2)
+        self.assertEqual(
+            resolver.calls,
+            [
+                "cpk-gateway-001.openj92.dev",
+                "cpk-gateway-001.openj92.dev",
+            ],
+        )
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0].url.host, "1.1.1.1")
+        sleep.assert_called_once_with(0.75)
+
+    def test_public_http_transient_status_re_resolves_before_retry(self) -> None:
+        resolver = ScriptedPublicAddressResolver(
+            [("1.1.1.1",), ("8.8.8.8",)]
+        )
+        responses = iter((503, 200))
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(next(responses))
+
+        interpreter = HttpVerificationInterpreter(
+            ProbeAddressPolicy(
+                public_hosts=frozenset(("cpk-gateway-001.openj92.dev",))
+            ),
+            public_resolver=resolver,
+            transport=httpx.MockTransport(handler),
+        )
+
+        result = interpreter.execute(_public_http_material(attempts=2))
+
+        self.assertIs(result.outcome, VerificationOutcome.PASSED)
+        self.assertEqual(result.attempts, 2)
+        self.assertEqual(len(resolver.calls), 2)
+        self.assertEqual(
+            [request.url.host for request in requests],
+            ["1.1.1.1", "8.8.8.8"],
+        )
+
+    def test_public_http_unresolved_dns_stops_at_policy_limit_without_http(self) -> None:
+        resolver = ScriptedPublicAddressResolver([(), (), ()])
+        requests: list[httpx.Request] = []
+        interpreter = HttpVerificationInterpreter(
+            ProbeAddressPolicy(
+                public_hosts=frozenset(("cpk-gateway-001.openj92.dev",))
+            ),
+            public_resolver=resolver,
+            transport=httpx.MockTransport(
+                lambda request: requests.append(request) or httpx.Response(200)
+            ),
+        )
+
+        with patch("control_plane_kit_interpreters.timing.time.sleep") as sleep:
+            result = interpreter.execute(
+                _public_http_material(attempts=3, interval_seconds=0.5)
+            )
+
+        self.assertIs(result.outcome, VerificationOutcome.REJECTED)
+        self.assertEqual(result.attempts, 3)
+        self.assertEqual(len(resolver.calls), 3)
+        self.assertEqual(requests, [])
+        sleep.assert_has_calls([call(0.5), call(0.5)])
+
+    def test_public_http_non_global_address_rejects_without_retry_or_http(self) -> None:
+        resolver = ScriptedPublicAddressResolver([("127.0.0.1",)])
+        requests: list[httpx.Request] = []
+        interpreter = HttpVerificationInterpreter(
+            ProbeAddressPolicy(
+                public_hosts=frozenset(("cpk-gateway-001.openj92.dev",))
+            ),
+            public_resolver=resolver,
+            transport=httpx.MockTransport(
+                lambda request: requests.append(request) or httpx.Response(200)
+            ),
+        )
+
+        with patch("control_plane_kit_interpreters.timing.time.sleep") as sleep:
+            result = interpreter.execute(_public_http_material(attempts=3))
+
+        self.assertIs(result.outcome, VerificationOutcome.REJECTED)
+        self.assertEqual(result.attempts, 1)
+        self.assertEqual(resolver.calls, ["cpk-gateway-001.openj92.dev"])
+        self.assertEqual(requests, [])
+        sleep.assert_not_called()
 
     def test_redis_ping_retries_bounded_exchange_and_retains_no_payload(self) -> None:
         transport = ScriptedRedisTransport([OSError(), b"+PONG\r\n"])
@@ -320,6 +444,36 @@ def _http_material(
             Protocol.HTTP,
             EndpointContext.RUNTIME_PRIVATE,
             LiteralEndpointMaterial("http://api:8080"),
+        ),
+    )
+
+
+def _public_http_material(
+    *,
+    attempts: int = 1,
+    interval_seconds: float = 1.0,
+) -> VerificationCheckMaterial:
+    return VerificationCheckMaterial(
+        "gateway",
+        "graph-public",
+        HttpCheck(
+            check_id="gateway-public-ready",
+            provider_socket="control",
+            path="/health/ready",
+            policy=VerificationPolicy(
+                interval_seconds=interval_seconds,
+                maximum_attempts=attempts,
+            ),
+        ),
+        RuntimeEndpointObservation(
+            "gateway",
+            "control",
+            "graph-public",
+            Protocol.HTTP,
+            EndpointContext.PUBLIC,
+            LiteralEndpointMaterial(
+                "https://cpk-gateway-001.openj92.dev:443"
+            ),
         ),
     )
 
