@@ -8,7 +8,10 @@ from typing import Protocol
 
 import httpx
 
-from control_plane_kit_core.probe_intents import RuntimeEndpointObservation
+from control_plane_kit_core.probe_intents import (
+    EndpointContext,
+    RuntimeEndpointObservation,
+)
 from control_plane_kit_core.secrets import (
     AuthorizedSecretResolver,
     SecretResolutionCode,
@@ -41,6 +44,7 @@ from control_plane_kit_interpreters.probes.security import (
     ProbeAddressPolicy,
     ProbeEndpointSecretResolver,
     ProbePublicAddressResolver,
+    ProbeSecurityCode,
     ProbeSecurityError,
     authorize_probe_endpoint,
 )
@@ -193,20 +197,17 @@ class HttpVerificationInterpreter:
                 VerificationCapability.HTTP,
             )
         check = material.check
-        try:
-            target = authorize_probe_endpoint(
-                material.endpoint,
-                self.policy,
-                secret_resolver=self.secret_resolver,
-                public_resolver=self.public_resolver,
-            )
-        except ProbeSecurityError:
-            return _observation(
-                material,
-                VerificationCapability.HTTP,
-                VerificationOutcome.REJECTED,
-                1,
-            )
+        target: AuthorizedProbeTarget | None = None
+        if material.endpoint.context is not EndpointContext.PUBLIC:
+            try:
+                target = self._authorize_endpoint(material)
+            except ProbeSecurityError:
+                return _observation(
+                    material,
+                    VerificationCapability.HTTP,
+                    VerificationOutcome.REJECTED,
+                    1,
+                )
 
         last = _observation(
             material,
@@ -215,10 +216,35 @@ class HttpVerificationInterpreter:
             1,
         )
         for attempt in verification_attempts(check.policy):
+            if material.endpoint.context is EndpointContext.PUBLIC:
+                try:
+                    target = self._authorize_endpoint(material)
+                except ProbeSecurityError as error:
+                    last = _observation(
+                        material,
+                        VerificationCapability.HTTP,
+                        VerificationOutcome.REJECTED,
+                        attempt,
+                    )
+                    if error.code is ProbeSecurityCode.UNRESOLVED_ENDPOINT:
+                        continue
+                    return last
+            assert target is not None
             last = self._attempt(material, target, attempt)
             if last.outcome is VerificationOutcome.PASSED:
                 return last
         return last
+
+    def _authorize_endpoint(
+        self,
+        material: VerificationCheckMaterial,
+    ) -> AuthorizedProbeTarget:
+        return authorize_probe_endpoint(
+            material.endpoint,
+            self.policy,
+            secret_resolver=self.secret_resolver,
+            public_resolver=self.public_resolver,
+        )
 
     def _attempt(
         self,
