@@ -398,6 +398,10 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
             [(request.method, request.path) for request in transport.requests],
             [
                 ("DELETE", "/zones/zone-001/dns_records/dns-001"),
+                (
+                    "DELETE",
+                    "/accounts/account-001/cfd_tunnel/tunnel-001/connections",
+                ),
                 ("DELETE", "/accounts/account-001/cfd_tunnel/tunnel-001"),
             ],
         )
@@ -407,6 +411,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
         cases = (
             (True, set(), "custody"),
             (False, {"dns-delete"}, "dns"),
+            (False, {"tunnel-connections-delete"}, "connections"),
             (False, {"tunnel-delete"}, "tunnel"),
         )
         for fail_revoke, fault_stages, expected_stage in cases:
@@ -433,12 +438,20 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     [request.stage for request in transport.requests],
-                    ["dns-delete", "tunnel-delete"],
+                    [
+                        "dns-delete",
+                        "tunnel-connections-delete",
+                        "tunnel-delete",
+                    ],
                 )
 
     def test_teardown_reports_all_failed_stages_without_secret_material(self) -> None:
         transport = FakeCloudflareTransport(
-            fault_stages={"dns-delete", "tunnel-delete"},
+            fault_stages={
+                "dns-delete",
+                "tunnel-connections-delete",
+                "tunnel-delete",
+            },
         )
         interpreter = CloudflareNamedIngressInterpreter(
             transport=transport,
@@ -456,11 +469,15 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
 
         self.assertEqual(
             str(raised.exception),
-            "Cloudflare exact cleanup is uncertain: custody,dns,tunnel",
+            "Cloudflare exact cleanup is uncertain: custody,dns,connections,tunnel",
         )
         self.assertEqual(
             [request.stage for request in transport.requests],
-            ["dns-delete", "tunnel-delete"],
+            [
+                "dns-delete",
+                "tunnel-connections-delete",
+                "tunnel-delete",
+            ],
         )
         self.assertNotIn(API_TOKEN, repr(raised.exception))
         self.assertNotIn(TUNNEL_TOKEN, repr(raised.exception))
@@ -726,6 +743,8 @@ def _cloudflare_request_stage(method: str, path: str) -> str:
         return "tunnel-token"
     if method == "DELETE" and "/dns_records/" in path:
         return "dns-delete"
+    if method == "DELETE" and path.endswith("/connections"):
+        return "tunnel-connections-delete"
     if method == "DELETE" and "/cfd_tunnel/" in path:
         return "tunnel-delete"
     return "tunnel-observe"
