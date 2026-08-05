@@ -24,6 +24,7 @@ from control_plane_kit_core.types import Protocol
 from control_plane_kit_interpreters.probes import (
     HttpApplicationHealthProbeAdapter,
     ProbeAddressPolicy,
+    ProbeSecurityCode,
     ProbeSecurityError,
     TcpTransportProbeAdapter,
     TransportProbeRouter,
@@ -128,6 +129,48 @@ class ProbeAdapterTests(unittest.TestCase):
         self.assertEqual(authorized.connect_host, "8.8.8.8")
         self.assertEqual(authorized.sni_hostname, "api.example.test")
         self.assertNotIn("api.example.test", repr(authorized))
+
+    def test_public_dns_failure_categories_are_closed_and_redacted(self) -> None:
+        public = _endpoint(
+            Protocol.HTTP,
+            EndpointContext.PUBLIC,
+            "https://api.example.test:443",
+        )
+        policy = ProbeAddressPolicy(public_hosts=frozenset({"api.example.test"}))
+
+        class FailedResolver:
+            def resolve(self, hostname: str) -> tuple[str, ...]:
+                raise OSError("api.example.test leaked from resolver")
+
+        for resolver in (
+            FailedResolver(),
+            PublicResolver(()),
+            PublicResolver(("not-an-address",)),
+        ):
+            with self.subTest(resolver=type(resolver).__name__):
+                with self.assertRaises(ProbeSecurityError) as raised:
+                    authorize_probe_endpoint(
+                        public,
+                        policy,
+                        public_resolver=resolver,
+                    )
+                self.assertIs(
+                    raised.exception.code,
+                    ProbeSecurityCode.UNRESOLVED_ENDPOINT,
+                )
+                self.assertNotIn("api.example.test", str(raised.exception))
+
+        with self.assertRaises(ProbeSecurityError) as raised:
+            authorize_probe_endpoint(
+                public,
+                policy,
+                public_resolver=PublicResolver(("127.0.0.1",)),
+            )
+        self.assertIs(
+            raised.exception.code,
+            ProbeSecurityCode.UNTRUSTED_ADDRESS,
+        )
+        self.assertNotIn("127.0.0.1", str(raised.exception))
 
     def test_secret_endpoint_value_is_resolved_only_at_authorization(self) -> None:
         endpoint = RuntimeEndpointObservation(

@@ -220,10 +220,15 @@ def _pinned_public_address(
 ) -> str:
     try:
         values = resolver.resolve(hostname)
-        addresses = tuple(ip_address(value) for value in values)
     except Exception as error:
-        raise _untrusted() from error
-    if not addresses or any(not value.is_global for value in addresses):
+        raise _unresolved() from error
+    if not values:
+        raise _unresolved()
+    try:
+        addresses = tuple(ip_address(value) for value in values)
+    except ValueError as error:
+        raise _unresolved() from error
+    if any(not value.is_global for value in addresses):
         raise _untrusted()
     selected = sorted(addresses, key=lambda value: (value.version, int(value)))[0]
     return str(selected)
@@ -249,4 +254,11 @@ def _untrusted() -> ProbeSecurityError:
     return ProbeSecurityError(
         ProbeSecurityCode.UNTRUSTED_ADDRESS,
         "probe endpoint is not trusted by address policy",
+    )
+
+
+def _unresolved() -> ProbeSecurityError:
+    return ProbeSecurityError(
+        ProbeSecurityCode.UNRESOLVED_ENDPOINT,
+        "probe endpoint could not be resolved to a valid address",
     )
