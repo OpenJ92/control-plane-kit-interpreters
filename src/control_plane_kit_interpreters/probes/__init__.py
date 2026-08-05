@@ -17,6 +17,12 @@ from control_plane_kit_interpreters.probes.gateway import (
     GatewayProbeClientResult,
     SignedGatewayProbeClient,
 )
+from control_plane_kit_interpreters.probes.public_dns import (
+    DnsOverHttpsPublicAddressResolver,
+    PublicDnsResolutionCode,
+    PublicDnsResolutionError,
+    PublicDnsResolverPolicy,
+)
 from control_plane_kit_interpreters.probes.security import (
     AuthorizedProbeTarget,
     ProbeAddressPolicy,
@@ -30,6 +36,7 @@ __all__ = [
     "AuthorizedProbeTarget",
     "DefaultDatagramExchangeClient",
     "DefaultSocketConnector",
+    "DnsOverHttpsPublicAddressResolver",
     "Ed25519GatewayProbeSigner",
     "GatewayProbeClientCode",
     "GatewayProbeClientError",
@@ -38,6 +45,9 @@ __all__ = [
     "ProbeAddressPolicy",
     "ProbeSecurityCode",
     "ProbeSecurityError",
+    "PublicDnsResolutionCode",
+    "PublicDnsResolutionError",
+    "PublicDnsResolverPolicy",
     "StaticRuntimeEndpointProvider",
     "SignedGatewayProbeClient",
     "TcpTransportProbeAdapter",
