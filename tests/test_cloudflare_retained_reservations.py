@@ -63,9 +63,22 @@ class CloudflareRetainedReservationTests(unittest.TestCase):
                 ("PATCH", f"/zones/zone-001/dns_records/{DNS_RECORD_ID}"),
                 ("GET", f"/zones/zone-001/dns_records/{DNS_RECORD_ID}"),
                 ("GET", f"/accounts/account-001/cfd_tunnel/{NEW_TUNNEL_ID}/token"),
+                ("GET", f"/zones/zone-001/dns_records/{DNS_RECORD_ID}"),
             ],
         )
         self.assertFalse(any(request.path == "/zones/zone-001/dns_records" for request in transport.requests))
+        dns_update = next(
+            request for request in transport.requests if request.stage == "dns-update"
+        )
+        self.assertEqual(
+            dns_update.json,
+            {
+                "type": "CNAME",
+                "proxied": True,
+                "name": HOSTNAME,
+                "content": _target(NEW_TUNNEL_ID),
+            },
+        )
         self.assertEqual(custodian.stored_references, [_custody_grant().reference])
         self.assertNotIn(TUNNEL_TOKEN, repr(allocation))
 
@@ -130,6 +143,69 @@ class CloudflareRetainedReservationTests(unittest.TestCase):
             )
 
         self.assertFalse(any(request.method == "PATCH" for request in transport.requests))
+        self.assertFalse(transport.tunnel_present)
+
+    def test_rebind_fault_matrix_compensates_only_the_new_tunnel_before_rebind(self) -> None:
+        cases = (
+            ("tunnel-allocation", []),
+            ("tunnel-configuration", ["tunnel-delete"]),
+            ("dns-observe", ["tunnel-delete"]),
+            ("dns-update", ["tunnel-delete"]),
+        )
+        for fault_stage, expected_cleanup in cases:
+            with self.subTest(fault_stage=fault_stage):
+                transport = StatefulCloudflareTransport(
+                    fault_stages={fault_stage},
+                )
+
+                with self.assertRaises(cloudflare.CloudflareApiError):
+                    _interpreter(transport).rebind(
+                        _ingress(),
+                        authority=_authority(),
+                        reservation=_reservation(),
+                        allocation_name="cpk-gateway-001-epoch-2",
+                        origin_service_url="http://gateway:8000",
+                        secret_resolution_grant=_resolution_grant(),
+                        secret_custody_grant=_custody_grant(),
+                    )
+
+                self.assertEqual(
+                    [
+                        request.stage
+                        for request in transport.requests
+                        if request.stage.endswith("delete")
+                    ],
+                    expected_cleanup,
+                )
+                self.assertFalse(
+                    any(
+                        request.stage == "dns-update"
+                        for request in transport.requests
+                        if fault_stage != "dns-update"
+                    )
+                )
+
+    def test_rebind_custody_failure_revokes_attempted_version_and_restores(self) -> None:
+        transport = StatefulCloudflareTransport()
+        custodian = RecordingSecretCustodian(fail_store=True)
+
+        with self.assertRaisesRegex(
+            cloudflare.CloudflareApiError,
+            "generated secret custody failed",
+        ):
+            _interpreter(transport, custodian).rebind(
+                _ingress(),
+                authority=_authority(),
+                reservation=_reservation(),
+                allocation_name="cpk-gateway-001-epoch-2",
+                origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
+                secret_custody_grant=_custody_grant(),
+            )
+
+        self.assertEqual(custodian.stored_references, [_custody_grant().reference])
+        self.assertEqual(custodian.revoked_references, [_custody_grant().reference])
+        self.assertEqual(transport.dns_content, _target(OLD_TUNNEL_ID))
         self.assertFalse(transport.tunnel_present)
 
     def test_rebind_token_failure_restores_exact_old_target_and_removes_new_tunnel(self) -> None:
@@ -203,6 +279,30 @@ class CloudflareRetainedReservationTests(unittest.TestCase):
         )
         self.assertFalse(transport.tunnel_present)
 
+    def test_rebind_reobserves_after_custody_and_refuses_late_foreign_target(self) -> None:
+        transport = StatefulCloudflareTransport(
+            replacement_after_token=_target("tunnel-foreign"),
+        )
+        custodian = RecordingSecretCustodian()
+
+        with self.assertRaisesRegex(
+            cloudflare.CloudflareApiError,
+            "rebind cleanup is uncertain: dns",
+        ):
+            _interpreter(transport, custodian).rebind(
+                _ingress(),
+                authority=_authority(),
+                reservation=_reservation(),
+                allocation_name="cpk-gateway-001-epoch-2",
+                origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
+                secret_custody_grant=_custody_grant(),
+            )
+
+        self.assertEqual(custodian.revoked_references, [_custody_grant().reference])
+        self.assertEqual(transport.dns_content, _target("tunnel-foreign"))
+        self.assertFalse(transport.tunnel_present)
+
     def test_deactivation_preserves_exact_dns_and_verifies_tunnel_absence(self) -> None:
         transport = StatefulCloudflareTransport()
         custodian = RecordingSecretCustodian()
@@ -255,6 +355,27 @@ class CloudflareRetainedReservationTests(unittest.TestCase):
         self.assertEqual(transport.requests, [])
         self.assertEqual(custodian.revoked_references, [])
 
+    def test_deactivation_rejects_wrong_custody_grant_before_io(self) -> None:
+        transport = StatefulCloudflareTransport()
+        custodian = RecordingSecretCustodian()
+
+        with self.assertRaisesRegex(
+            cloudflare.CloudflareApiError,
+            "custody grant is invalid",
+        ):
+            _interpreter(transport, custodian).deactivate_preserving_reservation(
+                authority=_authority(),
+                reservation=_reservation(),
+                resources=_owned_resources(),
+                secret_resolution_grant=_resolution_grant(),
+                secret_custody_grant=_custody_grant(
+                    intent=SecretUseIntent.OCI_PULL_CREDENTIAL,
+                ),
+            )
+
+        self.assertEqual(transport.requests, [])
+        self.assertEqual(custodian.revoked_references, [])
+
     def test_deactivation_attempts_all_exact_stages_and_bounds_uncertainty(self) -> None:
         transport = StatefulCloudflareTransport(
             fault_stages={"tunnel-connections-delete", "tunnel-delete"},
@@ -287,6 +408,25 @@ class CloudflareRetainedReservationTests(unittest.TestCase):
         self.assertEqual(transport.dns_content, _target(OLD_TUNNEL_ID))
         self.assertNotIn(API_TOKEN, repr(raised.exception))
         self.assertNotIn(TUNNEL_TOKEN, repr(raised.exception))
+
+    def test_deactivation_reports_lost_reservation_without_deleting_dns(self) -> None:
+        transport = StatefulCloudflareTransport(
+            remove_dns_after_tunnel_delete=True,
+        )
+
+        with self.assertRaisesRegex(
+            cloudflare.CloudflareApiError,
+            "reservation-observation",
+        ):
+            _interpreter(transport).deactivate_preserving_reservation(
+                authority=_authority(),
+                reservation=_reservation(),
+                resources=_owned_resources(),
+                secret_resolution_grant=_resolution_grant(),
+                secret_custody_grant=_custody_grant(),
+            )
+
+        self.assertFalse(any(request.stage == "dns-delete" for request in transport.requests))
 
     def test_release_deletes_exact_record_and_verifies_absence(self) -> None:
         transport = StatefulCloudflareTransport()
@@ -400,6 +540,8 @@ class StatefulCloudflareTransport:
         raise_stages: set[str] | None = None,
         raise_after_apply_stages: set[str] | None = None,
         replacement_after_update: str | None = None,
+        replacement_after_token: str | None = None,
+        remove_dns_after_tunnel_delete: bool = False,
     ) -> None:
         self.requests: list[RecordedRequest] = []
         self.dns_present = dns_present
@@ -408,11 +550,13 @@ class StatefulCloudflareTransport:
         self.dns_name = dns_name
         self.dns_proxied = dns_proxied
         self.dns_content = dns_content
-        self.tunnel_present = False
+        self.tunnel_present = True
         self.fault_stages = set(fault_stages or ())
         self.raise_stages = set(raise_stages or ())
         self.raise_after_apply_stages = set(raise_after_apply_stages or ())
         self.replacement_after_update = replacement_after_update
+        self.replacement_after_token = replacement_after_token
+        self.remove_dns_after_tunnel_delete = remove_dns_after_tunnel_delete
 
     def request(
         self,
@@ -434,6 +578,7 @@ class StatefulCloudflareTransport:
 
         response = self._apply(method, path, stage, json)
         if stage in self.raise_after_apply_stages:
+            self.raise_after_apply_stages.remove(stage)
             raise RuntimeError(API_TOKEN)
         return response
 
@@ -477,9 +622,13 @@ class StatefulCloudflareTransport:
             self.dns_present = False
             return _success({"id": DNS_RECORD_ID})
         if stage == "tunnel-token":
+            if self.replacement_after_token is not None:
+                self.dns_content = self.replacement_after_token
             return _success(TUNNEL_TOKEN)
         if stage == "tunnel-delete":
             self.tunnel_present = False
+            if self.remove_dns_after_tunnel_delete:
+                self.dns_present = False
             return _success({"id": NEW_TUNNEL_ID})
         if stage == "tunnel-observe":
             if not self.tunnel_present:
@@ -602,7 +751,10 @@ def _resolution_grant() -> SecretResolutionGrant:
     )
 
 
-def _custody_grant() -> SecretCustodyGrant:
+def _custody_grant(
+    *,
+    intent: SecretUseIntent = SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN,
+) -> SecretCustodyGrant:
     return SecretCustodyGrant(
         custody_id="scust_" + "a" * 64,
         workspace_id="workspace-a",
@@ -612,7 +764,7 @@ def _custody_grant() -> SecretCustodyGrant:
         reference=SecretReference(
             "secret://generated/ingress/cloudflared-tunnel-token/token-002"
         ),
-        intent=SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN,
+        intent=intent,
         actor_subject="worker-a",
         correlation_id="secret-custody-" + "c" * 64,
         custody_fingerprint="d" * 64,

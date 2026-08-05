@@ -131,10 +131,14 @@ durable ingress authority admission and resource evidence.
 
 The Cloudflare interpreter resolves the admitted API token reference only at the
 IO boundary, then constructs Cloudflare API calls to create a remotely managed
-tunnel, configure hostname ingress to a runtime-local gateway URL, upsert a DNS
-CNAME, retrieve the generated tunnel token, observe tunnel status, and delete
-only recorded owned resources. Generated tunnel-token delivery into the
-`cloudflared` connector is a separate activity-ordering concern.
+tunnel, configure hostname ingress to a runtime-local gateway URL, create or
+exactly rebind a DNS CNAME, retrieve the generated tunnel token, and observe
+exact postconditions. A retained lifecycle can remove the recorded tunnel and
+generated credential while preserving the exact DNS reservation. Final DNS
+release is a separate exact effect. Rebind and release use only the stored DNS
+record ID and expected hostname/tunnel target; they never discover or adopt a
+record by name. Generated tunnel-token delivery into the `cloudflared`
+connector is a separate activity-ordering concern.
 
 ## Durable Secret Provider Client
 
