@@ -13,7 +13,7 @@ authors = [
   { name = "OpenJ92" }
 ]
 dependencies = [
-  "control-plane-kit-core @ https://github.com/OpenJ92/control-plane-kit/archive/e2d73adf775b39f4816af1d540cc2f3e36a1d8d5.zip#subdirectory=control-plane-kit-core",
+  "control-plane-kit-core @ https://github.com/OpenJ92/control-plane-kit/archive/c9050ea996bd75c3762bf853dbe9fb96c73940f5.zip#subdirectory=control-plane-kit-core",
 ]
 
 [project.optional-dependencies]
