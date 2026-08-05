@@ -302,6 +302,10 @@ class CloudflareNamedIngressInterpreter:
                     lambda: client.delete_dns_record(resources.dns_record_id),
                 ),
                 (
+                    "connections",
+                    lambda: client.delete_tunnel_connections(resources.tunnel_id),
+                ),
+                (
                     "tunnel",
                     lambda: client.delete_tunnel(resources.tunnel_id),
                 ),
@@ -475,6 +479,14 @@ class CloudflareApiClient:
         self._request(
             "DELETE",
             f"/zones/{self.authority.zone_id}/dns_records/{record_id}",
+        )
+
+    def delete_tunnel_connections(self, tunnel_id: str) -> None:
+        _validate_identifier(tunnel_id, "tunnel_id")
+        self._request(
+            "DELETE",
+            f"/accounts/{self.authority.account_id}/cfd_tunnel/"
+            f"{tunnel_id}/connections",
         )
 
     def delete_tunnel(self, tunnel_id: str) -> None:
