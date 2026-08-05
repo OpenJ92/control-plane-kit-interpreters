@@ -7,6 +7,7 @@ neutral, and operations owns durable authority admission and resource evidence.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from importlib import import_module
 import re
 from typing import Any, Callable, Mapping, Protocol
@@ -38,6 +39,14 @@ _HOST_PATTERN_LABEL = re.compile(r"^[a-z0-9*](?:[a-z0-9-*]{0,61}[a-z0-9*])?$")
 
 class CloudflareApiError(RuntimeError):
     """Raised when Cloudflare API interpretation fails with bounded evidence."""
+
+
+class CloudflareApiNotFound(CloudflareApiError):
+    """Raised when an exact Cloudflare resource is absent."""
+
+
+class CloudflareApiTransportError(CloudflareApiError):
+    """Raised when a request outcome is ambiguous at the transport boundary."""
 
 
 class CloudflareHttpTransport(Protocol):
@@ -141,6 +150,82 @@ class CloudflareOwnedIngressResources:
         _validate_hostname(self.hostname)
 
 
+class CloudflareResourcePresence(StrEnum):
+    """Closed exact-resource observation states."""
+
+    PRESENT = "present"
+    ABSENT = "absent"
+
+
+@dataclass(frozen=True)
+class CloudflareOwnedHostnameReservation:
+    """Exact provider coordinates for one operations-owned hostname reservation."""
+
+    dns_record_id: str
+    hostname: str
+    expected_tunnel_id: str
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.dns_record_id, "dns_record_id")
+        _validate_hostname(self.hostname)
+        _validate_identifier(self.expected_tunnel_id, "expected_tunnel_id")
+
+
+@dataclass(frozen=True)
+class CloudflareHostnameReservationObservation:
+    """Secret-free observation of one exact DNS reservation."""
+
+    dns_record_id: str
+    hostname: str
+    presence: CloudflareResourcePresence
+    tunnel_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.dns_record_id, "dns_record_id")
+        _validate_hostname(self.hostname)
+        if not isinstance(self.presence, CloudflareResourcePresence):
+            raise CloudflareApiError("reservation presence must be closed")
+        if self.presence is CloudflareResourcePresence.PRESENT:
+            if self.tunnel_id is None:
+                raise CloudflareApiError(
+                    "present reservation observation requires tunnel_id"
+                )
+            _validate_identifier(self.tunnel_id, "tunnel_id")
+        elif self.tunnel_id is not None:
+            raise CloudflareApiError(
+                "absent reservation observation cannot include tunnel_id"
+            )
+
+
+@dataclass(frozen=True)
+class CloudflareTunnelObservation:
+    """Secret-free presence observation for one exact tunnel."""
+
+    tunnel_id: str
+    presence: CloudflareResourcePresence
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.tunnel_id, "tunnel_id")
+        if not isinstance(self.presence, CloudflareResourcePresence):
+            raise CloudflareApiError("tunnel presence must be closed")
+
+
+@dataclass(frozen=True)
+class CloudflareRetainedIngressDeactivation:
+    """Verified postconditions after removing a tunnel but retaining DNS."""
+
+    reservation: CloudflareHostnameReservationObservation
+    tunnel: CloudflareTunnelObservation
+
+    def __post_init__(self) -> None:
+        if self.reservation.presence is not CloudflareResourcePresence.PRESENT:
+            raise CloudflareApiError(
+                "retained deactivation requires a present reservation"
+            )
+        if self.tunnel.presence is not CloudflareResourcePresence.ABSENT:
+            raise CloudflareApiError("retained deactivation requires tunnel absence")
+
+
 @dataclass(frozen=True)
 class CloudflareNamedIngressInterpreter:
     """Interpreter for provider-neutral named ingress requests."""
@@ -177,14 +262,7 @@ class CloudflareNamedIngressInterpreter:
                 SecretResolutionCode.MISSING,
                 "generated secret custodian is not configured",
             )
-        if (
-            not isinstance(secret_custody_grant, SecretCustodyGrant)
-            or not secret_custody_grant.permits(
-                secret_custody_grant.reference,
-                SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN,
-            )
-        ):
-            raise CloudflareApiError("tunnel token custody grant is invalid")
+        _require_tunnel_token_custody_grant(secret_custody_grant)
 
         api_token = _resolve_api_token(
             self.authorized_secret_resolver,
@@ -263,6 +341,246 @@ class CloudflareNamedIngressInterpreter:
             endpoint_url=f"https://{ingress.hostname}",
         )
 
+    def rebind(
+        self,
+        ingress: NamedPublicIngress,
+        *,
+        authority: CloudflareZoneAuthority,
+        reservation: CloudflareOwnedHostnameReservation,
+        allocation_name: str,
+        origin_service_url: str,
+        secret_resolution_grant: SecretResolutionGrant,
+        secret_custody_grant: SecretCustodyGrant,
+    ) -> CloudflareIngressAllocation:
+        """Bind a new tunnel epoch to one exact retained DNS reservation."""
+
+        if not isinstance(ingress, NamedPublicIngress):
+            raise CloudflareApiError("rebind requires NamedPublicIngress")
+        _require_reservation_authority(authority, reservation)
+        if ingress.hostname != reservation.hostname:
+            raise CloudflareApiError("ingress and reservation hostname mismatch")
+        _validate_identifier(allocation_name, "allocation_name")
+        _validate_origin_service(origin_service_url)
+        if self.secret_custodian is None:
+            raise SecretResolutionError(
+                SecretResolutionCode.MISSING,
+                "generated secret custodian is not configured",
+            )
+        _require_tunnel_token_custody_grant(secret_custody_grant)
+
+        client = self._client(authority, secret_resolution_grant)
+        tunnel_id: str | None = None
+        custody_receipt: SecretCustodyReceipt | None = None
+        custody_write_attempted = False
+        dns_update_attempted = False
+        try:
+            tunnel_id = client.create_tunnel(allocation_name)
+            client.configure_tunnel(
+                tunnel_id,
+                hostname=reservation.hostname,
+                origin_service_url=origin_service_url,
+            )
+            _require_expected_reservation(
+                _observe_hostname_reservation(client, reservation),
+                reservation,
+            )
+            dns_update_attempted = True
+            client.update_dns_cname(
+                reservation.dns_record_id,
+                hostname=reservation.hostname,
+                tunnel_id=tunnel_id,
+            )
+            _require_observed_tunnel(
+                _observe_hostname_reservation(client, reservation),
+                tunnel_id,
+            )
+            tunnel_token = client.get_tunnel_token(tunnel_id)
+            custody_write_attempted = True
+            try:
+                custody_receipt = self.secret_custodian.store(
+                    secret_custody_grant,
+                    tunnel_token,
+                )
+            except Exception:
+                raise CloudflareApiError(
+                    "Cloudflare generated secret custody failed"
+                ) from None
+            if not custody_receipt.matches(secret_custody_grant):
+                raise CloudflareApiError(
+                    "secret custodian returned mismatched receipt"
+                )
+            _require_observed_tunnel(
+                _observe_hostname_reservation(client, reservation),
+                tunnel_id,
+            )
+        except Exception as error:
+            cleanup: list[tuple[str, Callable[[], None]]] = []
+            if custody_write_attempted:
+                cleanup.append(
+                    (
+                        "custody",
+                        lambda: self.secret_custodian.revoke(secret_custody_grant),
+                    )
+                )
+            if dns_update_attempted and tunnel_id is not None:
+                cleanup.append(
+                    (
+                        "dns",
+                        lambda: _restore_rebind_reservation(
+                            client,
+                            reservation,
+                            new_tunnel_id=tunnel_id,
+                        ),
+                    )
+                )
+            if tunnel_id is not None:
+                cleanup.append(
+                    ("tunnel", lambda: client.delete_tunnel(tunnel_id))
+                )
+            failed_stages = _attempt_exact_cleanup(cleanup)
+            if failed_stages:
+                raise CloudflareApiError(
+                    "Cloudflare exact rebind cleanup is uncertain: "
+                    + ",".join(failed_stages)
+                ) from None
+            if dns_update_attempted and isinstance(
+                error,
+                CloudflareApiTransportError,
+            ):
+                raise CloudflareApiError(
+                    "Cloudflare exact rebind is uncertain"
+                ) from None
+            raise
+
+        assert tunnel_id is not None
+        assert custody_receipt is not None
+        return CloudflareIngressAllocation(
+            tunnel_id=tunnel_id,
+            tunnel_name=allocation_name,
+            secret_custody_receipt=custody_receipt,
+            dns_record_id=reservation.dns_record_id,
+            hostname=reservation.hostname,
+            endpoint_url=f"https://{reservation.hostname}",
+        )
+
+    def observe_reservation(
+        self,
+        *,
+        authority: CloudflareZoneAuthority,
+        reservation: CloudflareOwnedHostnameReservation,
+        secret_resolution_grant: SecretResolutionGrant,
+    ) -> CloudflareHostnameReservationObservation:
+        """Observe one exact reservation without name-based discovery."""
+
+        _require_reservation_authority(authority, reservation)
+        observation = _observe_hostname_reservation(
+            self._client(authority, secret_resolution_grant),
+            reservation,
+        )
+        if observation.presence is CloudflareResourcePresence.PRESENT:
+            _require_expected_reservation(observation, reservation)
+        return observation
+
+    def deactivate_preserving_reservation(
+        self,
+        *,
+        authority: CloudflareZoneAuthority,
+        reservation: CloudflareOwnedHostnameReservation,
+        resources: CloudflareOwnedIngressResources,
+        secret_resolution_grant: SecretResolutionGrant,
+        secret_custody_grant: SecretCustodyGrant,
+    ) -> CloudflareRetainedIngressDeactivation:
+        """Remove one tunnel epoch while preserving its exact DNS reservation."""
+
+        _require_reservation_authority(authority, reservation)
+        _require_reservation_resource_agreement(reservation, resources)
+        if self.secret_custodian is None:
+            raise SecretResolutionError(
+                SecretResolutionCode.MISSING,
+                "generated secret custodian is not configured",
+            )
+        _require_tunnel_token_custody_grant(secret_custody_grant)
+        client = self._client(authority, secret_resolution_grant)
+        _require_expected_reservation(
+            _observe_hostname_reservation(client, reservation),
+            reservation,
+        )
+
+        failed: list[str] = []
+        reservation_observation: CloudflareHostnameReservationObservation | None = None
+        tunnel_observation: CloudflareTunnelObservation | None = None
+        stages: tuple[tuple[str, Callable[[], None]], ...] = (
+            (
+                "custody",
+                lambda: self.secret_custodian.revoke(secret_custody_grant),
+            ),
+            (
+                "connections",
+                lambda: client.delete_tunnel_connections(resources.tunnel_id),
+            ),
+            ("tunnel", lambda: client.delete_tunnel(resources.tunnel_id)),
+        )
+        failed.extend(_attempt_exact_cleanup(stages))
+        try:
+            reservation_observation = _require_expected_reservation(
+                _observe_hostname_reservation(client, reservation),
+                reservation,
+            )
+        except Exception:
+            failed.append("reservation-observation")
+        try:
+            tunnel_observation = _observe_tunnel(client, resources.tunnel_id)
+            if tunnel_observation.presence is not CloudflareResourcePresence.ABSENT:
+                raise CloudflareApiError("exact tunnel remains present")
+        except Exception:
+            failed.append("tunnel-observation")
+        if failed:
+            raise CloudflareApiError(
+                "Cloudflare retained deactivation is uncertain: "
+                + ",".join(failed)
+            ) from None
+        assert reservation_observation is not None
+        assert tunnel_observation is not None
+        return CloudflareRetainedIngressDeactivation(
+            reservation=reservation_observation,
+            tunnel=tunnel_observation,
+        )
+
+    def release_reservation(
+        self,
+        *,
+        authority: CloudflareZoneAuthority,
+        reservation: CloudflareOwnedHostnameReservation,
+        secret_resolution_grant: SecretResolutionGrant,
+    ) -> CloudflareHostnameReservationObservation:
+        """Delete one exact reservation and verify its absence."""
+
+        _require_reservation_authority(authority, reservation)
+        client = self._client(authority, secret_resolution_grant)
+        _require_expected_reservation(
+            _observe_hostname_reservation(client, reservation),
+            reservation,
+        )
+        failed: list[str] = []
+        try:
+            client.delete_dns_record(reservation.dns_record_id)
+        except Exception:
+            failed.append("dns")
+        observation: CloudflareHostnameReservationObservation | None = None
+        try:
+            observation = _observe_hostname_reservation(client, reservation)
+            if observation.presence is not CloudflareResourcePresence.ABSENT:
+                failed.append("absence")
+        except Exception:
+            failed.append("absence")
+        if failed:
+            raise CloudflareApiError(
+                "Cloudflare reservation release is uncertain: "
+                + ",".join(failed)
+            ) from None
+        assert observation is not None
+        return observation
+
     def observe(
         self,
         *,
@@ -290,6 +608,7 @@ class CloudflareNamedIngressInterpreter:
                 SecretResolutionCode.MISSING,
                 "generated secret custodian is not configured",
             )
+        _require_tunnel_token_custody_grant(secret_custody_grant)
         client = self._client(authority, secret_resolution_grant)
         failed_stages = _attempt_exact_cleanup(
             (
@@ -453,6 +772,32 @@ class CloudflareApiClient:
         )
         return _result_text(created, "id")
 
+    def get_dns_record(self, record_id: str) -> Mapping[str, object]:
+        _validate_identifier(record_id, "dns_record_id")
+        result = self._request(
+            "GET",
+            f"/zones/{self.authority.zone_id}/dns_records/{record_id}",
+        ).get("result")
+        if not isinstance(result, Mapping):
+            raise CloudflareApiError("Cloudflare DNS record response malformed")
+        return result
+
+    def update_dns_cname(
+        self,
+        record_id: str,
+        *,
+        hostname: str,
+        tunnel_id: str,
+    ) -> None:
+        _validate_identifier(record_id, "dns_record_id")
+        _validate_hostname(hostname)
+        _validate_identifier(tunnel_id, "tunnel_id")
+        self._request(
+            "PATCH",
+            f"/zones/{self.authority.zone_id}/dns_records/{record_id}",
+            json=_dns_record_body(hostname, _tunnel_target(tunnel_id)),
+        )
+
     def get_tunnel_token(self, tunnel_id: str) -> SecretValue:
         _validate_identifier(tunnel_id, "tunnel_id")
         result = self._request(
@@ -516,9 +861,11 @@ class CloudflareApiClient:
                 params=params,
             )
         except Exception:
-            raise CloudflareApiError(
+            raise CloudflareApiTransportError(
                 "Cloudflare API transport failed"
             ) from None
+        if response.status_code == 404:
+            raise CloudflareApiNotFound("Cloudflare API resource was not found")
         if response.status_code < 200 or response.status_code >= 300:
             raise CloudflareApiError(
                 f"Cloudflare API request failed with status {response.status_code}"
@@ -564,6 +911,157 @@ def _dns_record_body(hostname: str, content: str) -> dict[str, object]:
         "name": hostname,
         "content": content,
     }
+
+
+def _require_reservation_authority(
+    authority: CloudflareZoneAuthority,
+    reservation: CloudflareOwnedHostnameReservation,
+) -> None:
+    if not isinstance(authority, CloudflareZoneAuthority):
+        raise CloudflareApiError("reservation requires CloudflareZoneAuthority")
+    if not isinstance(reservation, CloudflareOwnedHostnameReservation):
+        raise CloudflareApiError(
+            "reservation requires CloudflareOwnedHostnameReservation"
+        )
+    if not authority.allows_hostname(reservation.hostname):
+        raise CloudflareApiError("owned hostname is outside admitted authority policy")
+
+
+def _require_tunnel_token_custody_grant(
+    grant: SecretCustodyGrant,
+) -> None:
+    if (
+        not isinstance(grant, SecretCustodyGrant)
+        or not grant.permits(
+            grant.reference,
+            SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN,
+        )
+    ):
+        raise CloudflareApiError("tunnel token custody grant is invalid")
+
+
+def _require_reservation_resource_agreement(
+    reservation: CloudflareOwnedHostnameReservation,
+    resources: CloudflareOwnedIngressResources,
+) -> None:
+    if not isinstance(resources, CloudflareOwnedIngressResources):
+        raise CloudflareApiError(
+            "deactivation requires CloudflareOwnedIngressResources"
+        )
+    if (
+        resources.dns_record_id != reservation.dns_record_id
+        or resources.hostname != reservation.hostname
+        or resources.tunnel_id != reservation.expected_tunnel_id
+    ):
+        raise CloudflareApiError(
+            "reservation and tunnel realization coordinates disagree"
+        )
+
+
+def _observe_hostname_reservation(
+    client: CloudflareApiClient,
+    reservation: CloudflareOwnedHostnameReservation,
+) -> CloudflareHostnameReservationObservation:
+    try:
+        record = client.get_dns_record(reservation.dns_record_id)
+    except CloudflareApiNotFound:
+        return CloudflareHostnameReservationObservation(
+            dns_record_id=reservation.dns_record_id,
+            hostname=reservation.hostname,
+            presence=CloudflareResourcePresence.ABSENT,
+        )
+    record_id = _mapping_text(record, "id")
+    record_type = _mapping_text(record, "type")
+    hostname = _mapping_text(record, "name")
+    content = _mapping_text(record, "content")
+    if record_id != reservation.dns_record_id:
+        raise CloudflareApiError("Cloudflare DNS record id mismatch")
+    if record_type != "CNAME":
+        raise CloudflareApiError("Cloudflare DNS reservation type mismatch")
+    if hostname.lower() != reservation.hostname.lower():
+        raise CloudflareApiError("Cloudflare DNS reservation hostname mismatch")
+    if record.get("proxied") is not True:
+        raise CloudflareApiError("Cloudflare DNS reservation proxy mismatch")
+    suffix = ".cfargotunnel.com"
+    if not content.endswith(suffix):
+        raise CloudflareApiError("Cloudflare DNS reservation target mismatch")
+    tunnel_id = content.removesuffix(suffix)
+    _validate_identifier(tunnel_id, "DNS reservation tunnel_id")
+    return CloudflareHostnameReservationObservation(
+        dns_record_id=record_id,
+        hostname=hostname,
+        presence=CloudflareResourcePresence.PRESENT,
+        tunnel_id=tunnel_id,
+    )
+
+
+def _require_expected_reservation(
+    observation: CloudflareHostnameReservationObservation,
+    reservation: CloudflareOwnedHostnameReservation,
+) -> CloudflareHostnameReservationObservation:
+    if observation.presence is CloudflareResourcePresence.ABSENT:
+        raise CloudflareApiError("Cloudflare DNS reservation is missing")
+    return _require_observed_tunnel(observation, reservation.expected_tunnel_id)
+
+
+def _require_observed_tunnel(
+    observation: CloudflareHostnameReservationObservation,
+    tunnel_id: str,
+) -> CloudflareHostnameReservationObservation:
+    if (
+        observation.presence is not CloudflareResourcePresence.PRESENT
+        or observation.tunnel_id != tunnel_id
+    ):
+        raise CloudflareApiError("Cloudflare DNS reservation target mismatch")
+    return observation
+
+
+def _restore_rebind_reservation(
+    client: CloudflareApiClient,
+    reservation: CloudflareOwnedHostnameReservation,
+    *,
+    new_tunnel_id: str,
+) -> None:
+    observation = _observe_hostname_reservation(client, reservation)
+    if observation.presence is CloudflareResourcePresence.ABSENT:
+        raise CloudflareApiError("Cloudflare DNS reservation is missing")
+    if observation.tunnel_id == reservation.expected_tunnel_id:
+        return
+    if observation.tunnel_id != new_tunnel_id:
+        raise CloudflareApiError("Cloudflare DNS reservation target mismatch")
+    client.update_dns_cname(
+        reservation.dns_record_id,
+        hostname=reservation.hostname,
+        tunnel_id=reservation.expected_tunnel_id,
+    )
+    _require_expected_reservation(
+        _observe_hostname_reservation(client, reservation),
+        reservation,
+    )
+
+
+def _observe_tunnel(
+    client: CloudflareApiClient,
+    tunnel_id: str,
+) -> CloudflareTunnelObservation:
+    try:
+        result = client.get_tunnel(tunnel_id)
+    except CloudflareApiNotFound:
+        return CloudflareTunnelObservation(
+            tunnel_id=tunnel_id,
+            presence=CloudflareResourcePresence.ABSENT,
+        )
+    if _mapping_text(result, "id") != tunnel_id:
+        raise CloudflareApiError("Cloudflare tunnel id mismatch")
+    return CloudflareTunnelObservation(
+        tunnel_id=tunnel_id,
+        presence=CloudflareResourcePresence.PRESENT,
+    )
+
+
+def _tunnel_target(tunnel_id: str) -> str:
+    _validate_identifier(tunnel_id, "tunnel_id")
+    return f"{tunnel_id}.cfargotunnel.com"
 
 
 def _result_text(body: Mapping[str, object], key: str) -> str:
