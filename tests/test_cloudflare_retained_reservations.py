@@ -333,6 +333,20 @@ class CloudflareRetainedReservationTests(unittest.TestCase):
             ],
         )
 
+    def test_deactivation_accepts_exact_tunnel_tombstone_as_absent(self) -> None:
+        transport = StatefulCloudflareTransport(tombstone_after_delete=True)
+
+        result = _interpreter(transport).deactivate_preserving_reservation(
+            authority=_authority(),
+            reservation=_reservation(),
+            resources=_owned_resources(),
+            secret_resolution_grant=_resolution_grant(),
+            secret_custody_grant=_custody_grant(),
+        )
+
+        self.assertEqual(result.tunnel.tunnel_id, OLD_TUNNEL_ID)
+        self.assertEqual(result.tunnel.presence.value, "absent")
+
     def test_deactivation_requires_exact_reservation_realization_agreement(self) -> None:
         transport = StatefulCloudflareTransport()
         custodian = RecordingSecretCustodian()
@@ -542,6 +556,7 @@ class StatefulCloudflareTransport:
         replacement_after_update: str | None = None,
         replacement_after_token: str | None = None,
         remove_dns_after_tunnel_delete: bool = False,
+        tombstone_after_delete: bool = False,
     ) -> None:
         self.requests: list[RecordedRequest] = []
         self.dns_present = dns_present
@@ -557,6 +572,7 @@ class StatefulCloudflareTransport:
         self.replacement_after_update = replacement_after_update
         self.replacement_after_token = replacement_after_token
         self.remove_dns_after_tunnel_delete = remove_dns_after_tunnel_delete
+        self.tombstone_after_delete = tombstone_after_delete
 
     def request(
         self,
@@ -632,6 +648,13 @@ class StatefulCloudflareTransport:
             return _success({"id": NEW_TUNNEL_ID})
         if stage == "tunnel-observe":
             if not self.tunnel_present:
+                if self.tombstone_after_delete:
+                    return _success(
+                        {
+                            "id": OLD_TUNNEL_ID,
+                            "deleted_at": "2026-08-06T06:57:38Z",
+                        }
+                    )
                 return cloudflare.CloudflareHttpResponse(404, {"success": False})
             return _success({"id": OLD_TUNNEL_ID, "status": "down"})
         return _success({})
