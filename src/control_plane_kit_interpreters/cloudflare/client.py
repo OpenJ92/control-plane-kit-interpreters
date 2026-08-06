@@ -1053,6 +1053,16 @@ def _observe_tunnel(
         )
     if _mapping_text(result, "id") != tunnel_id:
         raise CloudflareApiError("Cloudflare tunnel id mismatch")
+    deleted_at = result.get("deleted_at")
+    if deleted_at is not None:
+        if not isinstance(deleted_at, str) or not deleted_at.strip():
+            raise CloudflareApiError(
+                "Cloudflare tunnel deletion marker is malformed"
+            )
+        return CloudflareTunnelObservation(
+            tunnel_id=tunnel_id,
+            presence=CloudflareResourcePresence.ABSENT,
+        )
     return CloudflareTunnelObservation(
         tunnel_id=tunnel_id,
         presence=CloudflareResourcePresence.PRESENT,
