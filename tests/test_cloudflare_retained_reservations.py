@@ -751,7 +751,6 @@ def _ingress() -> NamedPublicIngress:
         target=PublicIngressTarget("gateway", "control"),
         connector_node_id="cloudflared-gateway-001",
         hostname=HOSTNAME,
-        readiness_check_id="ready",
     )
 
 
