@@ -340,7 +340,6 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                     target=PublicIngressTarget("gateway", "control"),
                     connector_node_id="cloudflared-gateway-001",
                     hostname="gateway-001.cpk.openj92.dev",
-                    readiness_check_id="ready",
                 ),
                 authority=_authority(),
                 allocation_name="cpk-gateway-001-c0303ba7369e",
@@ -757,7 +756,6 @@ def _ingress() -> NamedPublicIngress:
         target=PublicIngressTarget("gateway", "control"),
         connector_node_id="cloudflared-gateway-001",
         hostname="cpk-gateway-001.openj92.dev",
-        readiness_check_id="ready",
     )
 
 
