@@ -2,7 +2,22 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
+import tomllib
 import unittest
+
+
+CORE_REQUIREMENT = (
+    "control-plane-kit-core @ "
+    "https://github.com/OpenJ92/control-plane-kit/archive/"
+    "e09c93ae40568f362b4b98e9faeecc180fc63009.zip"
+    "#subdirectory=control-plane-kit-core"
+)
+
+
+def _normalized_requirement_name(requirement: str) -> str:
+    name = re.split(r"\s*@\s*|[<>=!~]", requirement, maxsplit=1)[0]
+    return re.sub(r"[-_.]+", "-", name.split("[", maxsplit=1)[0]).lower()
 
 
 class PackageGateContractTests(unittest.TestCase):
@@ -23,6 +38,26 @@ class PackageGateContractTests(unittest.TestCase):
         self.assertIn('DEPENDENCY_MODE="${CPK_INTERPRETERS_DEPENDENCY_MODE:-pinned}"', self.source)
         self.assertIn('CORE_REPO="${CPK_CORE_REPO:-}"', self.source)
         self.assertNotIn('CORE_REPO="${CPK_CORE_REPO:-../control-plane-kit}"', self.source)
+
+    def test_package_metadata_is_the_only_exact_core_coordinate(self) -> None:
+        package = tomllib.loads(
+            (self.root / "pyproject.toml").read_text(encoding="utf-8")
+        )["project"]
+        requirements = list(package["dependencies"])
+        for optional_requirements in package["optional-dependencies"].values():
+            requirements.extend(optional_requirements)
+
+        core_requirements = [
+            requirement
+            for requirement in requirements
+            if _normalized_requirement_name(requirement) == "control-plane-kit-core"
+        ]
+        self.assertEqual(core_requirements, [CORE_REQUIREMENT])
+
+        dockerfile = (self.root / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn('python -m pip install ".[test]"', dockerfile)
+        self.assertNotIn("control-plane-kit/archive/", dockerfile)
+        self.assertNotIn("control-plane-kit/archive/", self.source)
 
     def test_local_core_override_requires_explicit_mode_and_repository(self) -> None:
         self.assertIn('local-core)', self.source)
