@@ -480,7 +480,10 @@ assert "docker" not in sys.modules
                     "name": "web",
                     "environment": {"PORT": "8080"},
                     "labels": {"cpk.workspace": "w"},
-                    "network_mode": "none",
+                    "network": "cpk-net",
+                    "networking_config": {
+                        "cpk-net": {"Aliases": ["web", "api"]},
+                    },
                     "volumes": {"cpk-vol": {"bind": "/data", "mode": "rw"}},
                     "mounts": [
                         {
@@ -506,10 +509,7 @@ assert "docker" not in sys.modules
                 }
             ],
         )
-        self.assertEqual(
-            fake_client.networks.resources["cpk-net"].connections,
-            [{"container": "web", "aliases": ["web", "api"]}],
-        )
+        self.assertEqual(fake_client.networks.resources["cpk-net"].connections, [])
         self.assertTrue(fake_client.containers.resources["web"].started)
 
     def test_bind_mounts_are_explicit_create_container_material(self) -> None:

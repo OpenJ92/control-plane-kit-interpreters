@@ -406,7 +406,10 @@ class DockerSdkClient:
             "name": name,
             "environment": dict(environment),
             "labels": dict(labels),
-            "network_mode": "none",
+            "network": network,
+            "networking_config": {
+                network: {"Aliases": list(aliases)},
+            },
             "volumes": mounts,
             "mounts": [
                 dict(mount.docker_mount())
@@ -439,7 +442,6 @@ class DockerSdkClient:
         if supplementary_groups:
             kwargs["group_add"] = list(supplementary_groups)
         container = self._client().containers.create(image, **kwargs)
-        self._client().networks.get(network).connect(container, aliases=list(aliases))
         container.start()
 
     def materialize_configuration_artifact(
