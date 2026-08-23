@@ -480,6 +480,7 @@ assert "docker" not in sys.modules
                     "name": "web",
                     "environment": {"PORT": "8080"},
                     "labels": {"cpk.workspace": "w"},
+                    "network_mode": "none",
                     "volumes": {"cpk-vol": {"bind": "/data", "mode": "rw"}},
                     "mounts": [
                         {

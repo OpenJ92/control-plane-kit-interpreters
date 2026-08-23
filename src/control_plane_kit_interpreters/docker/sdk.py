@@ -406,6 +406,7 @@ class DockerSdkClient:
             "name": name,
             "environment": dict(environment),
             "labels": dict(labels),
+            "network_mode": "none",
             "volumes": mounts,
             "mounts": [
                 dict(mount.docker_mount())
