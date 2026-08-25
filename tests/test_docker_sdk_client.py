@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from io import BytesIO
 import hashlib
 import os
@@ -24,6 +25,7 @@ from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkBindMount,
     DockerSdkClient,
     DockerSdkConfigurationMount,
+    DockerSdkImageInspection,
     DockerSdkPortBinding,
     DockerSdkPublishedPort,
     DockerSdkResourceInspection,
@@ -70,8 +72,16 @@ class FakeDockerModule:
 
 
 class FakeImage:
-    def __init__(self, tags: list[str]) -> None:
+    def __init__(
+        self,
+        tags: list[str],
+        *,
+        image_id: str = "sha256:" + "b" * 64,
+        repo_digests: tuple[str, ...] = (),
+    ) -> None:
         self.tags = tags
+        self.id = image_id
+        self.attrs = {"RepoDigests": list(repo_digests)}
 
 
 class FakeResource:
@@ -81,12 +91,13 @@ class FakeResource:
         *,
         labels: dict[str, str] | None = None,
         image: str | None = None,
+        image_id: str = "sha256:" + "b" * 64,
         running: bool = False,
         published_ports: dict[str, object] | None = None,
         private_addresses: dict[str, str] | None = None,
     ) -> None:
         self.name = name
-        self.image = FakeImage([image]) if image else None
+        self.image = FakeImage([image], image_id=image_id) if image else None
         self.attrs = {
             "Config": {"Labels": labels or {}},
             "State": {"Running": running},
@@ -110,6 +121,7 @@ class FakeResource:
 
     def start(self) -> None:
         self.started = True
+        self.attrs["State"]["Running"] = True
 
     def stop(self) -> None:
         self.stopped = True
@@ -138,6 +150,9 @@ class FakeResource:
 
     def connect(self, container: FakeResource, *, aliases: list[str]) -> None:
         self.connections.append({"container": container.name, "aliases": aliases})
+        container.attrs["NetworkSettings"]["Networks"][self.name] = {
+            "IPAddress": ""
+        }
 
 
 class FakeManager:
@@ -147,8 +162,11 @@ class FakeManager:
         self.created_containers: list[FakeResource] = []
         self.volume_archives: dict[str, dict[str, bytes]] = {}
         self.pulled: list[object] = []
+        self.get_error: Exception | None = None
 
     def get(self, name: str) -> FakeResource:
+        if self.get_error is not None:
+            raise self.get_error
         try:
             return self.resources[name]
         except KeyError as error:
@@ -161,11 +179,13 @@ class FakeManager:
         return resource
 
     def create_container(self, image: str, **kwargs: object) -> FakeResource:
+        network = kwargs.get("network")
         resource = FakeResource(
             str(kwargs["name"]),
             labels=dict(kwargs.get("labels", {})),
             image=image,
             running=False,
+            private_addresses={str(network): ""} if network is not None else {},
         )
         volumes = kwargs.get("volumes", {})
         if isinstance(volumes, dict) and volumes:
@@ -178,10 +198,12 @@ class FakeManager:
 
     def pull(self, image: str, **kwargs: object) -> None:
         self.pulled.append({"image": image, **kwargs})
+        self.resources[image] = FakeImage([], repo_digests=(image,))
 
 
 class FakeDockerClient:
     def __init__(self) -> None:
+        self.api = FakeDockerApi()
         self.networks = FakeManager()
         self.volumes = FakeManager()
         self.images = FakeManager()
@@ -191,6 +213,11 @@ class FakeDockerClient:
 
     def close(self) -> None:
         self.close_calls += 1
+
+
+class FakeDockerApi:
+    def create_endpoint_config(self, *, aliases: list[str]) -> dict[str, object]:
+        return {"Aliases": aliases}
 
 
 class DockerSdkClientTests(unittest.TestCase):
@@ -209,6 +236,7 @@ class DockerSdkClientTests(unittest.TestCase):
                 "create_volume",
                 "from_authority",
                 "inspect_container",
+                "inspect_image",
                 "inspect_network",
                 "inspect_volume",
                 "materialize_configuration_artifact",
@@ -219,6 +247,7 @@ class DockerSdkClientTests(unittest.TestCase):
                 "remove_volume",
                 "run_http_probe",
                 "run_container",
+                "create_container",
                 "secret_file_digest",
                 "start_container",
                 "stop_container",
@@ -362,14 +391,85 @@ assert "docker" not in sys.modules
             self.assertNotIn(str(path), repr(client))
 
     def test_missing_resources_are_absent_only_for_sdk_not_found_errors(self) -> None:
+        fake_client = FakeDockerClient()
         sdk = DockerSdkClient(
-            client=FakeDockerClient(),
-            docker_module=FakeDockerModule(FakeDockerClient()),
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
         )
 
         self.assertIsNone(sdk.inspect_network("missing"))
         self.assertIsNone(sdk.inspect_volume("missing"))
         self.assertIsNone(sdk.inspect_container("missing"))
+
+        inspect_image = getattr(sdk, "inspect_image", None)
+        self.assertTrue(callable(inspect_image))
+        self.assertIsNone(inspect_image("ghcr.io/openj92/missing@sha256:" + "a" * 64))
+
+    def test_image_absence_does_not_swallow_non_not_found_sdk_errors(self) -> None:
+        fake_client = FakeDockerClient()
+        fake_client.images.get_error = TimeoutError("daemon transport detail")
+        sdk = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
+        )
+        inspect_image = getattr(sdk, "inspect_image", None)
+
+        self.assertTrue(callable(inspect_image))
+        with self.assertRaises(TimeoutError):
+            inspect_image("ghcr.io/openj92/example@sha256:" + "a" * 64)
+
+    def test_exact_reference_image_inspection_normalizes_id_and_repo_digests(self) -> None:
+        reference = "ghcr.io/openj92/example@sha256:" + "a" * 64
+        image_id = "sha256:" + "b" * 64
+        fake_client = FakeDockerClient()
+        fake_client.images.resources[reference] = FakeImage(
+            [],
+            image_id=image_id,
+            repo_digests=(reference, "ghcr.io/openj92/foreign@sha256:" + "c" * 64),
+        )
+        sdk = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
+        )
+        inspect_image = getattr(sdk, "inspect_image", None)
+
+        self.assertTrue(callable(inspect_image))
+        inspection = inspect_image(reference)
+        self.assertEqual(getattr(inspection, "image_id", None), image_id)
+        self.assertEqual(
+            getattr(inspection, "repo_digests", None),
+            (
+                reference,
+                "ghcr.io/openj92/foreign@sha256:" + "c" * 64,
+            ),
+        )
+
+    def test_image_inspection_rejects_noncanonical_provider_image_ids(self) -> None:
+        reference = "ghcr.io/openj92/example@sha256:" + "a" * 64
+        cases = (
+            "sha256:" + "B" * 64,
+            "sha256:" + "b" * 63,
+            "sha256:" + "b" * 65,
+            "sha256:" + "g" * 64,
+        )
+        for image_id in cases:
+            with self.subTest(image_id=image_id):
+                with self.assertRaises(ValueError):
+                    DockerSdkImageInspection(image_id, (reference,))
+
+                fake_client = FakeDockerClient()
+                fake_client.images.resources[reference] = FakeImage(
+                    [],
+                    image_id=image_id,
+                    repo_digests=(reference,),
+                )
+                sdk = DockerSdkClient(
+                    client=fake_client,
+                    docker_module=FakeDockerModule(fake_client),
+                )
+
+                with self.assertRaises(RuntimeError):
+                    sdk.inspect_image(reference)
 
     def test_inspection_is_normalized_to_operations_shape(self) -> None:
         fake_client = FakeDockerClient()
@@ -413,8 +513,111 @@ assert "docker" not in sys.modules
                     ),
                 ),
                 private_addresses={"cpk-net": "172.18.0.2"},
+                image_id="sha256:" + "b" * 64,
+                network_names=("cpk-net",),
             ),
         )
+
+    def test_container_inspection_rejects_ambiguous_image_identity(self) -> None:
+        cases = (
+            ("missing", None),
+            ("blank", " "),
+            ("malformed", "sha256:not-a-digest"),
+            ("wrong-length", "sha256:" + "a" * 63),
+        )
+        for name, image_id in cases:
+            with self.subTest(case=name):
+                fake_client = FakeDockerClient()
+                resource = FakeResource(
+                    "web",
+                    image="ghcr.io/openj92/example@sha256:" + "a" * 64,
+                    image_id=image_id,
+                )
+                if name == "missing":
+                    del resource.image.id
+                fake_client.containers.resources["web"] = resource
+                sdk = DockerSdkClient(
+                    client=fake_client,
+                    docker_module=FakeDockerModule(fake_client),
+                )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "Docker container image inspection was malformed",
+                ):
+                    sdk.inspect_container("web")
+
+    def test_resource_inspection_equality_includes_runtime_identity(self) -> None:
+        inspection = DockerSdkResourceInspection(
+            name="web",
+            running=True,
+            image="ghcr.io/openj92/example@sha256:" + "a" * 64,
+            labels={"cpk.owner": "workspace-a"},
+            image_id="sha256:" + "b" * 64,
+            network_names=("cpk-net",),
+        )
+
+        self.assertNotEqual(
+            inspection,
+            replace(inspection, image_id="sha256:" + "c" * 64),
+        )
+        self.assertNotEqual(
+            inspection,
+            replace(inspection, network_names=("foreign-net",)),
+        )
+
+    def test_create_container_attaches_exact_intended_network_and_aliases(self) -> None:
+        fake_client = FakeDockerClient()
+        sdk = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
+        )
+        create_container = getattr(sdk, "create_container", None)
+
+        self.assertTrue(callable(create_container))
+        try:
+            create_container(
+                name="web",
+                image="ghcr.io/openj92/example@sha256:" + "a" * 64,
+                environment={"PORT": "8080"},
+                labels={"cpk.workspace": "w"},
+                volumes={},
+                network="cpk-net",
+                aliases=("web", "api"),
+            )
+        except TypeError:
+            self.fail("create_container lacks exact network attachment material")
+        created = fake_client.containers.created[0]
+        self.assertEqual(created["network"], "cpk-net")
+        self.assertEqual(
+            created["networking_config"],
+            {
+                "cpk-net": {"Aliases": ["web", "api"]},
+            },
+        )
+        self.assertNotIn("network_mode", created)
+        self.assertNotIn("network_disabled", created)
+        self.assertEqual(
+            tuple(
+                fake_client.containers.resources["web"]
+                .attrs["NetworkSettings"]["Networks"]
+            ),
+            ("cpk-net",),
+        )
+        self.assertFalse(fake_client.containers.resources["web"].started)
+
+    def test_start_container_is_distinct_from_create_with_network(self) -> None:
+        fake_client = FakeDockerClient()
+        fake_client.containers.resources["web"] = FakeResource("web")
+        sdk = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
+        )
+
+        sdk.start_container("web")
+
+        self.assertTrue(fake_client.containers.resources["web"].started)
+        self.assertEqual(fake_client.networks.created, [])
 
     def test_network_volume_image_and_container_calls_use_sdk_boundary(self) -> None:
         fake_client = FakeDockerClient()

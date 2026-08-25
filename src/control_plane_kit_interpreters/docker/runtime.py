@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from enum import Enum
 import hashlib
 import json
 import os
 import re
-from typing import Mapping
+from typing import Callable, Mapping, TypeVar
 
 from control_plane_kit_core.planning import (
     ActivityOperation,
@@ -54,6 +55,8 @@ from control_plane_kit_interpreters.docker.sdk import (
     DockerRegistryAuthConfig,
     DockerSdkBindMount,
     DockerSdkClient,
+    DockerSdkImageInspection,
+    DockerSdkResourceInspection,
     DockerTlsClientConfig,
     DockerSdkConfigurationMount,
     DockerSdkPortBinding,
@@ -100,6 +103,44 @@ class _AuthorityDeliveryMaterial:
 class _RuntimeAuthorityClientBinding:
     client: DockerSdkClient
     close_after_execution: bool
+
+
+class _StartNodePhase(Enum):
+    IMAGE_AVAILABILITY = "image-availability"
+    NETWORK = "network"
+    CONFIGURATION = "configuration"
+    CONTAINER_CREATE = "container-create"
+    CONTAINER_START = "container-start"
+    FINAL_INSPECT = "final-inspect"
+
+
+@dataclass(frozen=True)
+class _NodeContainerCreateMaterial:
+    environment: Mapping[str, str]
+    volumes: Mapping[str, str]
+    configuration_mounts: tuple[DockerSdkConfigurationMount, ...]
+    secret_mounts: tuple[DockerSdkSecretMount, ...]
+
+
+class _DockerStartNodeUncertainError(RuntimeError):
+    def __init__(self, phase: _StartNodePhase) -> None:
+        super().__init__(phase.value)
+        self.phase = phase
+
+
+_T = TypeVar("_T")
+
+
+def _start_node_provider_call(
+    phase: _StartNodePhase,
+    operation: Callable[[], _T],
+) -> _T:
+    try:
+        return operation()
+    except _DockerInterpreterPreconditionError:
+        raise
+    except Exception as error:
+        raise _DockerStartNodeUncertainError(phase) from error
 
 
 @dataclass(frozen=True)
@@ -150,6 +191,15 @@ class DockerRuntimeInterpreter:
             return _unsupported(request, error.code)
         except _DockerInterpreterPreconditionError as error:
             return _failed(request, error.code, str(error))
+        except _DockerStartNodeUncertainError as error:
+            return RuntimeEffectResult.uncertain(
+                request.effect_id,
+                RuntimeEffectFailure(
+                    "docker.effect-uncertain",
+                    "Docker runtime effect is uncertain",
+                    details={"phase": error.phase.value},
+                ),
+            )
         except Exception as error:
             return RuntimeEffectResult.uncertain(
                 request.effect_id,
@@ -309,44 +359,95 @@ class DockerRuntimeInterpreter:
             self.authorized_secret_resolver,
             self.image_pull_credentials,
         )
+        admitted_image = self._admit_start_node_image(material, auth_config)
         runtime_id = material.runtime_id
         network_name = _network_name(request, runtime_id)
         runtime_labels = _runtime_labels(request, runtime_id)
-        network = self.client.inspect_network(network_name)
+        network = _start_node_provider_call(
+            _StartNodePhase.NETWORK,
+            lambda: self.client.inspect_network(network_name),
+        )
         if network is None:
-            self.client.create_network(name=network_name, labels=runtime_labels)
+            _start_node_provider_call(
+                _StartNodePhase.NETWORK,
+                lambda: self.client.create_network(
+                    name=network_name,
+                    labels=runtime_labels,
+                ),
+            )
         else:
             _require_runtime_owner(network.labels, runtime_labels, "network")
 
         container_name = _container_name(request, material.node_id)
         labels = _node_labels(request, material)
-        inspection = self.client.inspect_container(container_name)
+        inspection = _start_node_provider_call(
+            _StartNodePhase.CONTAINER_CREATE,
+            lambda: self.client.inspect_container(container_name),
+        )
         if inspection is None:
-            self._create_node_container(
-                request,
-                material,
-                container_name,
-                labels,
-                auth_config,
-                secrets,
-                authority_delivery,
+            create_material = _start_node_provider_call(
+                _StartNodePhase.CONFIGURATION,
+                lambda: self._prepare_node_container(
+                    request,
+                    material,
+                    labels,
+                    secrets,
+                ),
+            )
+            _start_node_provider_call(
+                _StartNodePhase.CONTAINER_CREATE,
+                lambda: self.client.create_container(
+                    name=container_name,
+                    image=material.product.image.execution_reference,
+                    environment=create_material.environment,
+                    labels=labels,
+                    volumes=create_material.volumes,
+                    configuration_mounts=create_material.configuration_mounts,
+                    secret_mounts=create_material.secret_mounts,
+                    bind_mounts=authority_delivery.mounts,
+                    supplementary_groups=authority_delivery.supplementary_groups,
+                    port_bindings=(),
+                    network=network_name,
+                    aliases=(material.node_id,),
+                ),
+            )
+            _start_node_provider_call(
+                _StartNodePhase.CONTAINER_START,
+                lambda: self.client.start_container(container_name),
             )
             action = "created"
         else:
-            _require_owned(inspection.labels, labels, "container")
+            _require_start_node_container(
+                inspection,
+                labels=labels,
+                admitted_image=admitted_image,
+                network_name=network_name,
+                require_running=False,
+            )
             if inspection.running:
                 action = "reused"
             else:
-                self.client.start_container(container_name)
+                _start_node_provider_call(
+                    _StartNodePhase.CONTAINER_START,
+                    lambda: self.client.start_container(container_name),
+                )
                 action = "started"
 
-        published = ()
-        observed = self.client.inspect_container(container_name)
-        private_host = material.node_id
-        if observed is not None:
-            _require_owned(observed.labels, labels, "container")
-            published = observed.published_ports
-            private_host = _private_host_for_runtime(request, material, observed)
+        observed = _start_node_provider_call(
+            _StartNodePhase.FINAL_INSPECT,
+            lambda: self.client.inspect_container(container_name),
+        )
+        if observed is None:
+            raise _DockerStartNodeUncertainError(_StartNodePhase.FINAL_INSPECT)
+        _require_start_node_container(
+            observed,
+            labels=labels,
+            admitted_image=admitted_image,
+            network_name=network_name,
+            require_running=True,
+        )
+        published = observed.published_ports
+        private_host = _private_host_for_runtime(request, material, observed)
         port_bindings = _private_provider_ports(material)
         observations = runtime_endpoint_observations(
             subject_id=material.node_id,
@@ -367,6 +468,32 @@ class DockerRuntimeInterpreter:
             },
             observations=observations,
         )
+
+    def _admit_start_node_image(
+        self,
+        material: RuntimeProductMaterial,
+        auth_config: DockerRegistryAuthConfig | None,
+    ) -> DockerSdkImageInspection:
+        reference = material.product.image.execution_reference
+        inspection = _start_node_provider_call(
+            _StartNodePhase.IMAGE_AVAILABILITY,
+            lambda: self.client.inspect_image(reference),
+        )
+        if inspection is None:
+            _start_node_provider_call(
+                _StartNodePhase.IMAGE_AVAILABILITY,
+                lambda: self.client.pull_image(reference, auth_config=auth_config),
+            )
+            inspection = _start_node_provider_call(
+                _StartNodePhase.IMAGE_AVAILABILITY,
+                lambda: self.client.inspect_image(reference),
+            )
+        if inspection is None or reference not in inspection.repo_digests:
+            raise _DockerInterpreterPreconditionError(
+                "docker.image-reference-conflict",
+                "Docker image does not match the declared immutable reference",
+            )
+        return inspection
 
     def _reconcile_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         material = _single_product(request)
@@ -707,6 +834,38 @@ class DockerRuntimeInterpreter:
         secrets: ResolvedSecretDeliveries,
         authority_delivery: _AuthorityDeliveryMaterial,
     ) -> None:
+        create_material = self._prepare_node_container(
+            request,
+            material,
+            labels,
+            secrets,
+        )
+        self.client.pull_image(
+            material.product.image.execution_reference,
+            auth_config=auth_config,
+        )
+        self.client.run_container(
+            name=container_name,
+            image=material.product.image.execution_reference,
+            network=_network_name(request, material.runtime_id),
+            aliases=(material.node_id,),
+            environment=create_material.environment,
+            labels=labels,
+            volumes=create_material.volumes,
+            configuration_mounts=create_material.configuration_mounts,
+            secret_mounts=create_material.secret_mounts,
+            bind_mounts=authority_delivery.mounts,
+            supplementary_groups=authority_delivery.supplementary_groups,
+            port_bindings=(),
+        )
+
+    def _prepare_node_container(
+        self,
+        request: RuntimeEffectRequest,
+        material: RuntimeProductMaterial,
+        labels: Mapping[str, str],
+        secrets: ResolvedSecretDeliveries,
+    ) -> _NodeContainerCreateMaterial:
         contract = material.product.runtime_contract
         retained_volumes = {
             _volume_name(request, material.node_id, mount.resource_id): mount.target_path
@@ -789,15 +948,7 @@ class DockerRuntimeInterpreter:
                     )
             secret_mounts.append(DockerSdkSecretMount(secret.target_path, volume_name))
 
-        self.client.pull_image(
-            material.product.image.execution_reference,
-            auth_config=auth_config,
-        )
-        self.client.run_container(
-            name=container_name,
-            image=material.product.image.execution_reference,
-            network=_network_name(request, material.runtime_id),
-            aliases=(material.node_id,),
+        return _NodeContainerCreateMaterial(
             environment=_container_environment(
                 {
                     binding.name: binding.value
@@ -809,13 +960,9 @@ class DockerRuntimeInterpreter:
                 },
                 secrets.environment,
             ),
-            labels=labels,
             volumes=retained_volumes,
             configuration_mounts=tuple(configuration_mounts),
             secret_mounts=tuple(secret_mounts),
-            bind_mounts=authority_delivery.mounts,
-            supplementary_groups=authority_delivery.supplementary_groups,
-            port_bindings=(),
         )
 
     def _stop_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
@@ -1282,6 +1429,36 @@ def _require_owned(
         raise _DockerInterpreterPreconditionError(
             f"docker.{resource}-ownership-conflict",
             f"Docker {resource} is not owned by this runtime effect",
+        )
+
+
+def _require_start_node_container(
+    inspection: DockerSdkResourceInspection,
+    *,
+    labels: Mapping[str, str],
+    admitted_image: DockerSdkImageInspection,
+    network_name: str,
+    require_running: bool,
+) -> None:
+    if dict(inspection.labels) != dict(labels):
+        raise _DockerInterpreterPreconditionError(
+            "docker.container-ownership-conflict",
+            "Docker container is not owned by this runtime effect",
+        )
+    if inspection.image_id != admitted_image.image_id:
+        raise _DockerInterpreterPreconditionError(
+            "docker.container-image-conflict",
+            "Docker container image does not match the admitted image",
+        )
+    if inspection.network_names != (network_name,):
+        raise _DockerInterpreterPreconditionError(
+            "docker.container-network-conflict",
+            "Docker container network does not match the intended runtime",
+        )
+    if require_running and not inspection.running:
+        raise _DockerInterpreterPreconditionError(
+            "docker.container-not-running",
+            "Docker container is not running",
         )
 
 
