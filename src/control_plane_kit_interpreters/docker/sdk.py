@@ -22,6 +22,15 @@ from control_plane_kit_core.secrets import SecretFileMode, SecretValue
 from control_plane_kit_core.types import Protocol, Transport
 
 
+def _is_canonical_sha256_image_id(value: object) -> bool:
+    if not isinstance(value, str) or not value.startswith("sha256:"):
+        return False
+    digest = value.removeprefix("sha256:")
+    return len(digest) == 64 and all(
+        character in "0123456789abcdef" for character in digest
+    )
+
+
 @dataclass(frozen=True, repr=False)
 class DockerLocalAmbientClientConfig:
     """Explicit local Docker authority material using the process Docker context."""
@@ -103,6 +112,10 @@ class DockerSdkResourceInspection:
 class DockerSdkImageInspection:
     image_id: str
     repo_digests: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not _is_canonical_sha256_image_id(self.image_id):
+            raise ValueError("Docker image ID must be canonical lowercase sha256")
 
 
 @dataclass(frozen=True, order=True)
@@ -385,7 +398,7 @@ class DockerSdkClient:
         image_id = getattr(observed, "id", None)
         attrs = getattr(observed, "attrs", {})
         repo_digests = attrs.get("RepoDigests", ()) if isinstance(attrs, Mapping) else ()
-        if not isinstance(image_id, str) or not image_id.strip():
+        if not _is_canonical_sha256_image_id(image_id):
             raise RuntimeError("Docker image inspection was malformed")
         if repo_digests is None:
             repo_digests = ()
@@ -767,13 +780,9 @@ class DockerSdkClient:
     def _image_id(self, container: Any) -> str | None:
         image = getattr(container, "image", None)
         image_id = getattr(image, "id", None)
-        if not isinstance(image_id, str) or not image_id.startswith("sha256:"):
+        if not _is_canonical_sha256_image_id(image_id):
             raise RuntimeError("Docker container image inspection was malformed")
-        digest = image_id.removeprefix("sha256:")
-        if len(digest) != 64 or any(
-            character not in "0123456789abcdef" for character in digest
-        ):
-            raise RuntimeError("Docker container image inspection was malformed")
+        assert isinstance(image_id, str)
         return image_id
 
     def _network_names(self, container: Any) -> tuple[str, ...]:
