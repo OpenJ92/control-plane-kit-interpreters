@@ -95,6 +95,14 @@ class DockerSdkResourceInspection:
     labels: Mapping[str, str]
     published_ports: tuple["DockerSdkPublishedPort", ...] = ()
     private_addresses: Mapping[str, str] = field(default_factory=dict)
+    image_id: str | None = field(default=None, compare=False)
+    network_names: tuple[str, ...] = field(default=(), compare=False)
+
+
+@dataclass(frozen=True)
+class DockerSdkImageInspection:
+    image_id: str
+    repo_digests: tuple[str, ...]
 
 
 @dataclass(frozen=True, order=True)
@@ -366,6 +374,30 @@ class DockerSdkClient:
             auth_config=dict(auth_config.docker_auth_config()),
         )
 
+    def inspect_image(self, image: str) -> DockerSdkImageInspection | None:
+        try:
+            observed = self._client().images.get(image)
+        except Exception as error:
+            if self._is_not_found(error):
+                return None
+            raise
+
+        image_id = getattr(observed, "id", None)
+        attrs = getattr(observed, "attrs", {})
+        repo_digests = attrs.get("RepoDigests", ()) if isinstance(attrs, Mapping) else ()
+        if not isinstance(image_id, str) or not image_id.strip():
+            raise RuntimeError("Docker image inspection was malformed")
+        if repo_digests is None:
+            repo_digests = ()
+        if not isinstance(repo_digests, Sequence) or isinstance(repo_digests, (str, bytes)):
+            raise RuntimeError("Docker image inspection was malformed")
+        if not all(isinstance(value, str) and value.strip() for value in repo_digests):
+            raise RuntimeError("Docker image inspection was malformed")
+        return DockerSdkImageInspection(
+            image_id=image_id,
+            repo_digests=tuple(sorted(repo_digests)),
+        )
+
     def inspect_container(self, name: str) -> DockerSdkResourceInspection | None:
         try:
             container = self._client().containers.get(name)
@@ -379,6 +411,42 @@ class DockerSdkClient:
             running=self._container_running(container),
             image=self._image_name(container),
         )
+
+    def create_container(
+        self,
+        *,
+        name: str,
+        image: str,
+        environment: Mapping[str, str],
+        labels: Mapping[str, str],
+        volumes: Mapping[str, str],
+        command: Sequence[str] = (),
+        configuration_mounts: Sequence[DockerSdkConfigurationMount] = (),
+        secret_mounts: Sequence[DockerSdkSecretMount] = (),
+        bind_mounts: Sequence[DockerSdkBindMount] = (),
+        supplementary_groups: Sequence[str] = (),
+        port_bindings: Sequence[DockerSdkPortBinding] = (),
+        network: str,
+        aliases: Sequence[str],
+    ) -> None:
+        kwargs = self._container_create_kwargs(
+            name=name,
+            environment=environment,
+            labels=labels,
+            volumes=volumes,
+            command=command,
+            configuration_mounts=configuration_mounts,
+            secret_mounts=secret_mounts,
+            bind_mounts=bind_mounts,
+            supplementary_groups=supplementary_groups,
+            port_bindings=port_bindings,
+        )
+        endpoint_config = self._client().api.create_endpoint_config(
+            aliases=list(aliases),
+        )
+        kwargs["network"] = network
+        kwargs["networking_config"] = {network: endpoint_config}
+        self._client().containers.create(image, **kwargs)
 
     def run_container(
         self,
@@ -397,6 +465,36 @@ class DockerSdkClient:
         supplementary_groups: Sequence[str] = (),
         port_bindings: Sequence[DockerSdkPortBinding] = (),
     ) -> None:
+        kwargs = self._container_create_kwargs(
+            name=name,
+            environment=environment,
+            labels=labels,
+            volumes=volumes,
+            command=command,
+            configuration_mounts=configuration_mounts,
+            secret_mounts=secret_mounts,
+            bind_mounts=bind_mounts,
+            supplementary_groups=supplementary_groups,
+            port_bindings=port_bindings,
+        )
+        container = self._client().containers.create(image, **kwargs)
+        self._client().networks.get(network).connect(container, aliases=list(aliases))
+        container.start()
+
+    def _container_create_kwargs(
+        self,
+        *,
+        name: str,
+        environment: Mapping[str, str],
+        labels: Mapping[str, str],
+        volumes: Mapping[str, str],
+        command: Sequence[str],
+        configuration_mounts: Sequence[DockerSdkConfigurationMount],
+        secret_mounts: Sequence[DockerSdkSecretMount],
+        bind_mounts: Sequence[DockerSdkBindMount],
+        supplementary_groups: Sequence[str],
+        port_bindings: Sequence[DockerSdkPortBinding],
+    ) -> dict[str, object]:
         mounts = {
             volume_name: {"bind": target_path, "mode": "rw"}
             for volume_name, target_path in volumes.items()
@@ -437,9 +535,7 @@ class DockerSdkClient:
             kwargs["command"] = list(command)
         if supplementary_groups:
             kwargs["group_add"] = list(supplementary_groups)
-        container = self._client().containers.create(image, **kwargs)
-        self._client().networks.get(network).connect(container, aliases=list(aliases))
-        container.start()
+        return kwargs
 
     def materialize_configuration_artifact(
         self,
@@ -633,6 +729,8 @@ class DockerSdkClient:
             labels=self._labels(resource),
             published_ports=self._published_ports(resource),
             private_addresses=self._private_addresses(resource),
+            image_id=self._image_id(resource),
+            network_names=self._network_names(resource),
         )
 
     def _labels(self, resource: Any) -> Mapping[str, str]:
@@ -661,6 +759,21 @@ class DockerSdkClient:
         if short_id is not None:
             return str(short_id)
         return None
+
+    def _image_id(self, container: Any) -> str | None:
+        image = getattr(container, "image", None)
+        image_id = getattr(image, "id", None)
+        return image_id if isinstance(image_id, str) and image_id.strip() else None
+
+    def _network_names(self, container: Any) -> tuple[str, ...]:
+        attrs = getattr(container, "attrs", {})
+        settings = attrs.get("NetworkSettings", {}) if isinstance(attrs, Mapping) else {}
+        networks = settings.get("Networks", {}) if isinstance(settings, Mapping) else {}
+        if not isinstance(networks, Mapping):
+            raise RuntimeError("Docker network membership inspection was malformed")
+        if not all(isinstance(name, str) and name.strip() for name in networks):
+            raise RuntimeError("Docker network membership inspection was malformed")
+        return tuple(sorted(networks))
 
     def _published_ports(self, container: Any) -> tuple[DockerSdkPublishedPort, ...]:
         attrs = getattr(container, "attrs", {})
