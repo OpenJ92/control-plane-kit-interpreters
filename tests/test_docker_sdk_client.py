@@ -25,6 +25,7 @@ from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkBindMount,
     DockerSdkClient,
     DockerSdkConfigurationMount,
+    DockerSdkImageInspection,
     DockerSdkPortBinding,
     DockerSdkPublishedPort,
     DockerSdkResourceInspection,
@@ -443,6 +444,33 @@ assert "docker" not in sys.modules
             ),
         )
 
+    def test_image_inspection_rejects_noncanonical_provider_image_ids(self) -> None:
+        reference = "ghcr.io/openj92/example@sha256:" + "a" * 64
+        cases = (
+            "sha256:" + "B" * 64,
+            "sha256:" + "b" * 63,
+            "sha256:" + "b" * 65,
+            "sha256:" + "g" * 64,
+        )
+        for image_id in cases:
+            with self.subTest(image_id=image_id):
+                with self.assertRaises(ValueError):
+                    DockerSdkImageInspection(image_id, (reference,))
+
+                fake_client = FakeDockerClient()
+                fake_client.images.resources[reference] = FakeImage(
+                    [],
+                    image_id=image_id,
+                    repo_digests=(reference,),
+                )
+                sdk = DockerSdkClient(
+                    client=fake_client,
+                    docker_module=FakeDockerModule(fake_client),
+                )
+
+                with self.assertRaises(RuntimeError):
+                    sdk.inspect_image(reference)
+
     def test_inspection_is_normalized_to_operations_shape(self) -> None:
         fake_client = FakeDockerClient()
         fake_client.containers.resources["web"] = FakeResource(
@@ -578,7 +606,7 @@ assert "docker" not in sys.modules
         )
         self.assertFalse(fake_client.containers.resources["web"].started)
 
-    def test_start_container_is_distinct_from_create_and_connect(self) -> None:
+    def test_start_container_is_distinct_from_create_with_network(self) -> None:
         fake_client = FakeDockerClient()
         fake_client.containers.resources["web"] = FakeResource("web")
         sdk = DockerSdkClient(

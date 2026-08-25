@@ -27,6 +27,7 @@ from control_plane_kit_core.types import RuntimeKind
 
 from control_plane_kit_interpreters.docker import DockerRuntimeInterpreter
 from control_plane_kit_interpreters.docker.runtime import _node_labels
+from control_plane_kit_interpreters.docker.sdk import DockerSdkImageInspection
 from control_plane_kit_interpreters.secrets import (
     ImagePullCredentialMissing,
     ImagePullCredentialResolved,
@@ -71,12 +72,6 @@ HELLO_DOCUMENT = (
 
 
 @dataclass(frozen=True)
-class _ImageInspection:
-    image_id: str
-    repo_digests: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
 class _ResourceInspection:
     name: str
     running: bool
@@ -102,6 +97,8 @@ class _PhaseClient:
         final_labels: dict[str, str] | None = None,
         cached_repo_digests: tuple[str, ...] = (HELLO_REFERENCE,),
         pulled_repo_digests: tuple[str, ...] = (HELLO_REFERENCE,),
+        cached_image_id: str = HELLO_IMAGE_ID,
+        pulled_image_id: str = HELLO_IMAGE_ID,
     ) -> None:
         self.cached_image = cached_image
         self.fail_at = fail_at
@@ -113,6 +110,8 @@ class _PhaseClient:
         self.final_labels = final_labels
         self.cached_repo_digests = cached_repo_digests
         self.pulled_repo_digests = pulled_repo_digests
+        self.cached_image_id = cached_image_id
+        self.pulled_image_id = pulled_image_id
         self.network_name: str | None = None
         self.network_labels: dict[str, str] | None = None
         self.container_name: str | None = None
@@ -182,7 +181,8 @@ class _PhaseClient:
         repo_digests = (
             self.pulled_repo_digests if self.pull_calls else self.cached_repo_digests
         )
-        return _ImageInspection(HELLO_IMAGE_ID, repo_digests)
+        image_id = self.pulled_image_id if self.pull_calls else self.cached_image_id
+        return DockerSdkImageInspection(image_id, repo_digests)
 
     def pull_image(self, image: str, *, auth_config: object = None) -> None:
         self.calls.append("image-pull")
@@ -321,6 +321,58 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
         self.assertEqual(client.calls, ["image-inspect", "image-pull", "image-inspect"])
         self.assertIs(result.kind, EffectResultKind.FAILED)
         self.assertEqual(result.failure.code, "docker.image-reference-conflict")
+
+    def test_malformed_image_identity_is_uncertain_at_exact_admission_phase(self) -> None:
+        cases = (
+            (
+                "cached-malformed",
+                {"cached_image_id": "sha256:" + "G" * 64},
+                ["image-inspect"],
+            ),
+            (
+                "cached-wrong-length",
+                {"cached_image_id": "sha256:" + "a" * 63},
+                ["image-inspect"],
+            ),
+            (
+                "post-pull-malformed",
+                {
+                    "cached_image": False,
+                    "pulled_image_id": "sha256:" + "G" * 64,
+                },
+                ["image-inspect", "image-pull", "image-inspect"],
+            ),
+            (
+                "post-pull-wrong-length",
+                {
+                    "cached_image": False,
+                    "pulled_image_id": "sha256:" + "a" * 65,
+                },
+                ["image-inspect", "image-pull", "image-inspect"],
+            ),
+        )
+        for name, kwargs, expected_calls in cases:
+            with self.subTest(case=name):
+                client = _PhaseClient(**kwargs)
+
+                result = DockerRuntimeInterpreter(client).execute(_hello_request())
+
+                self.assertEqual(client.calls, expected_calls)
+                expected_references = [HELLO_REFERENCE] * (
+                    2 if client.pull_calls else 1
+                )
+                self.assertEqual(client.image_inspect_references, expected_references)
+                self.assertFalse(client.container_created)
+                self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+                self.assertEqual(result.failure.code, "docker.effect-uncertain")
+                self.assertEqual(
+                    result.failure.details,
+                    {"phase": "image-availability"},
+                )
+                self.assertEqual(
+                    result.failure.message,
+                    "Docker runtime effect is uncertain",
+                )
 
     def test_pull_authority_is_validated_before_cached_image_admission(self) -> None:
         reference = SecretReference("secret://registry/ghcr/hello-server")
