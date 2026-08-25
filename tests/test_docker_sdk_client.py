@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from io import BytesIO
 import hashlib
 import os
@@ -484,10 +485,58 @@ assert "docker" not in sys.modules
                     ),
                 ),
                 private_addresses={"cpk-net": "172.18.0.2"},
+                image_id="sha256:" + "b" * 64,
+                network_names=("cpk-net",),
             ),
         )
-        self.assertEqual(getattr(inspection, "image_id", None), "sha256:" + "b" * 64)
-        self.assertEqual(getattr(inspection, "network_names", None), ("cpk-net",))
+
+    def test_container_inspection_rejects_ambiguous_image_identity(self) -> None:
+        cases = (
+            ("missing", None),
+            ("blank", " "),
+            ("malformed", "sha256:not-a-digest"),
+            ("wrong-length", "sha256:" + "a" * 63),
+        )
+        for name, image_id in cases:
+            with self.subTest(case=name):
+                fake_client = FakeDockerClient()
+                resource = FakeResource(
+                    "web",
+                    image="ghcr.io/openj92/example@sha256:" + "a" * 64,
+                    image_id=image_id,
+                )
+                if name == "missing":
+                    del resource.image.id
+                fake_client.containers.resources["web"] = resource
+                sdk = DockerSdkClient(
+                    client=fake_client,
+                    docker_module=FakeDockerModule(fake_client),
+                )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "Docker container image inspection was malformed",
+                ):
+                    sdk.inspect_container("web")
+
+    def test_resource_inspection_equality_includes_runtime_identity(self) -> None:
+        inspection = DockerSdkResourceInspection(
+            name="web",
+            running=True,
+            image="ghcr.io/openj92/example@sha256:" + "a" * 64,
+            labels={"cpk.owner": "workspace-a"},
+            image_id="sha256:" + "b" * 64,
+            network_names=("cpk-net",),
+        )
+
+        self.assertNotEqual(
+            inspection,
+            replace(inspection, image_id="sha256:" + "c" * 64),
+        )
+        self.assertNotEqual(
+            inspection,
+            replace(inspection, network_names=("foreign-net",)),
+        )
 
     def test_create_container_attaches_exact_intended_network_and_aliases(self) -> None:
         fake_client = FakeDockerClient()

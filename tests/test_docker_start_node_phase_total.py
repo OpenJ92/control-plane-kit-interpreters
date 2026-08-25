@@ -507,6 +507,25 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
         self.assertEqual(result.failure.code, "docker.effect-uncertain")
         self.assertEqual(result.failure.details, {"phase": "final-inspect"})
 
+    def test_container_image_inspection_ambiguity_is_phase_specific(self) -> None:
+        cases = (
+            ("container-inspect", "container-create"),
+            ("final-inspect", "final-inspect"),
+        )
+        for fail_at, phase in cases:
+            with self.subTest(fail_at=fail_at):
+                client = _PhaseClient(fail_at=fail_at)
+
+                result = DockerRuntimeInterpreter(client).execute(_hello_request())
+
+                self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+                self.assertEqual(result.failure.code, "docker.effect-uncertain")
+                self.assertEqual(result.failure.details, {"phase": phase})
+                self.assertEqual(
+                    result.failure.message,
+                    "Docker runtime effect is uncertain",
+                )
+
     def test_success_requires_running_exact_image_on_intended_network(self) -> None:
         cases = (
             ("not-running", {"final_running": False}, "docker.container-not-running"),
