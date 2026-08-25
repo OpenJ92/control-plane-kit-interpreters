@@ -95,8 +95,8 @@ class DockerSdkResourceInspection:
     labels: Mapping[str, str]
     published_ports: tuple["DockerSdkPublishedPort", ...] = ()
     private_addresses: Mapping[str, str] = field(default_factory=dict)
-    image_id: str | None = field(default=None, compare=False)
-    network_names: tuple[str, ...] = field(default=(), compare=False)
+    image_id: str | None = None
+    network_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -410,6 +410,7 @@ class DockerSdkClient:
             container,
             running=self._container_running(container),
             image=self._image_name(container),
+            include_runtime_identity=True,
         )
 
     def create_container(
@@ -721,6 +722,7 @@ class DockerSdkClient:
         *,
         running: bool,
         image: str | None,
+        include_runtime_identity: bool = False,
     ) -> DockerSdkResourceInspection:
         return DockerSdkResourceInspection(
             name=str(getattr(resource, "name", "")),
@@ -729,8 +731,10 @@ class DockerSdkClient:
             labels=self._labels(resource),
             published_ports=self._published_ports(resource),
             private_addresses=self._private_addresses(resource),
-            image_id=self._image_id(resource),
-            network_names=self._network_names(resource),
+            image_id=self._image_id(resource) if include_runtime_identity else None,
+            network_names=(
+                self._network_names(resource) if include_runtime_identity else ()
+            ),
         )
 
     def _labels(self, resource: Any) -> Mapping[str, str]:
@@ -763,7 +767,14 @@ class DockerSdkClient:
     def _image_id(self, container: Any) -> str | None:
         image = getattr(container, "image", None)
         image_id = getattr(image, "id", None)
-        return image_id if isinstance(image_id, str) and image_id.strip() else None
+        if not isinstance(image_id, str) or not image_id.startswith("sha256:"):
+            raise RuntimeError("Docker container image inspection was malformed")
+        digest = image_id.removeprefix("sha256:")
+        if len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest
+        ):
+            raise RuntimeError("Docker container image inspection was malformed")
+        return image_id
 
     def _network_names(self, container: Any) -> tuple[str, ...]:
         attrs = getattr(container, "attrs", {})
