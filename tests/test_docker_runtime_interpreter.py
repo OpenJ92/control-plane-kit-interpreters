@@ -667,7 +667,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         )
 
         self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
-        self.assertEqual(result.evidence["action"], "started")
+        self.assertEqual(result.evidence["action"], "reused")
         self.assertEqual(len(_workload_container_records(fake_client)), 1)
 
     def test_reconcile_node_tracks_delegation_verifier_projection_material(
