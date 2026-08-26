@@ -622,28 +622,44 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
 
     def test_node_realization_cannot_confirm_unobservable_authority_delivery(self):
         for operation_type in (StartNode, ReconcileNode):
-            for remote_delivery in (False, True):
-                with self.subTest(operation=operation_type.__name__, remote_delivery=remote_delivery):
-                    request = _request(operation_type(NodeTarget("api")))
-                    if remote_delivery:
+            for delivery in ("none", "local", "remote"):
+                with self.subTest(operation=operation_type.__name__, delivery=delivery):
+                    request = _plain_node_request(operation_type)
+                    contract = request.products[0].product.runtime_contract
+                    self.assertEqual(contract.configuration_artifacts, ())
+                    self.assertEqual(contract.secret_deliveries, ())
+                    self.assertEqual(contract.retained_data_mounts, ())
+                    self.assertEqual(contract.verification.checks, ())
+                    self.assertEqual(request.authority_deliveries, ())
+                    self.assertEqual(request.secret_resolution_grants, ())
+                    if delivery == "remote":
                         request, authority, _ = _remote_request(request)
                     else:
                         reference = RuntimeAuthorityReference("local-docker")
                         request = replace(
                             request, authority_ref=reference,
-                            authority_deliveries=(RuntimeAuthorityAccessDelivery(
+                            authority_deliveries=() if delivery == "none" else (RuntimeAuthorityAccessDelivery(
                                 reference, RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT,
                             ),),
                         )
                         authority = _local_runtime_authority()
+                    self.assertEqual(len(request.authority_deliveries), 0 if delivery == "none" else 1)
                     client, resolver = _ReadClient(request), _Resolver()
+                    before = repr((client.network, client.container, client.image, client.volumes))
                     with patch.object(DockerSdkClient, "from_authority") as factory:
                         result = self.observer(client, authorized_secret_resolver=resolver).observe(RuntimeEffectObservationRequest(request), authority)
-                    self.assertEqual(client.calls, [])
+                    expected_reads = [] if delivery != "none" else [
+                        ("inspect_network", _network_name(request, "docker")),
+                        ("inspect_container", _container_name(request, "api")),
+                        ("inspect_image", request.products[0].product.image.execution_reference),
+                    ]
+                    self.assertEqual(client.calls, expected_reads)
                     self.assertEqual(client.mutations, [])
+                    self.assertEqual(client.close_calls, 0)
+                    self.assertEqual(before, repr((client.network, client.container, client.image, client.volumes)))
                     self.assertEqual(resolver.calls, [])
                     factory.assert_not_called()
-                    self.assertEqual(self.assert_observation(result, request), "observer-unsupported")
+                    self.assertEqual(self.assert_observation(result, request), "succeeded" if delivery == "none" else "observer-unsupported")
 
     def test_node_target_and_single_product_are_admitted_before_reads(self):
         template = _request(StartNode(NodeTarget("api")))
