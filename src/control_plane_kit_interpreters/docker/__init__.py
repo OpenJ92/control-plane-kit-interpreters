@@ -15,10 +15,12 @@ from control_plane_kit_interpreters.docker.sdk import (
     verify_published_ports,
 )
 from control_plane_kit_interpreters.docker.runtime import DockerRuntimeInterpreter
+from control_plane_kit_interpreters.docker.observer import DockerRuntimeEffectObserver
 
 __all__ = [
     "DockerRegistryAuthConfig",
     "DockerLocalAmbientClientConfig",
+    "DockerRuntimeEffectObserver",
     "DockerRuntimeInterpreter",
     "DockerSdkBindMount",
     "DockerSdkClient",

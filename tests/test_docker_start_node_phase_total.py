@@ -9,6 +9,7 @@ from control_plane_kit_core.configuration import (
     ConfigurationMediaType,
 )
 from control_plane_kit_core.operations.execution import EffectResultKind
+from control_plane_kit_core.operations.run_identity import RunId
 from control_plane_kit_core.planning import ActivityId, NodeTarget, StartNode
 from control_plane_kit_core.products import (
     ProductDescriptorCodec,
@@ -651,11 +652,11 @@ def _hello_request(
         source=RuntimeEffectSource(
             workspace_id="cpk92-exact-hello",
             request_id="request-cpk92-exact-hello",
-            run_id="run-cpk92-exact-hello",
+            run_id=RunId("run-cpk92-exact-hello"),
             plan_id="plan-cpk92-exact-hello",
             base_graph_id="graph-cpk92-base",
             desired_graph_id="graph-cpk92-desired",
-            intent_event_id="event-cpk92-exact-hello",
+            intent_event_id="effect-cpk92-exact-hello",
         ),
         activity_id=ActivityId("start-node:cpk92-exact-hello"),
         operation=StartNode(NodeTarget("hello")),

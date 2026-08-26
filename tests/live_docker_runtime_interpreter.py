@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from control_plane_kit_core.operations.run_identity import RunId
+
 import json
 
 from control_plane_kit_core.algebra import BlockSockets, ProviderSocket
@@ -94,11 +96,11 @@ def _request(
         source=RuntimeEffectSource(
             workspace_id="live-workspace",
             request_id="live-request",
-            run_id="live-run",
+            run_id=RunId("live-run"),
             plan_id="live-plan",
             base_graph_id="live-base-graph",
             desired_graph_id="live-desired-graph",
-            intent_event_id="live-intent",
+            intent_event_id=f"effect-{operation.__class__.__name__.lower()}",
         ),
         activity_id=ActivityId("live-activity"),
         operation=operation,

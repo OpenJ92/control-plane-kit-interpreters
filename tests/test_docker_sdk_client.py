@@ -155,6 +155,43 @@ class FakeResource:
         }
 
 
+MALFORMED_CONTAINER_STATES = (
+    "attrs-missing", "attrs-none", "attrs-list", "attrs-text",
+    "state-missing", "state-none", "state-list", "state-text",
+    "running-missing", "running-none", "running-text", "running-zero", "running-one",
+)
+MISLEADING_CONTAINER_STATUSES = ("running", "exited", "unknown")
+
+
+class StateInspectionResource(FakeResource):
+    def __init__(self, *args, misleading_status: str, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.misleading_status = misleading_status
+        self.status_reads = 0
+
+    @property
+    def status(self) -> str:
+        self.status_reads += 1
+        return self.misleading_status
+
+
+def malform_container_state(resource: FakeResource, case: str) -> None:
+    if case == "attrs-missing":
+        del resource.attrs
+    elif case.startswith("attrs-"):
+        resource.attrs = {"attrs-none": None, "attrs-list": [], "attrs-text": "provider-state"}[case]
+    elif case == "state-missing":
+        del resource.attrs["State"]
+    elif case.startswith("state-"):
+        resource.attrs["State"] = {"state-none": None, "state-list": [], "state-text": "provider-state"}[case]
+    elif case == "running-missing":
+        del resource.attrs["State"]["Running"]
+    else:
+        resource.attrs["State"]["Running"] = {
+            "running-none": None, "running-text": "false", "running-zero": 0, "running-one": 1,
+        }[case]
+
+
 class FakeManager:
     def __init__(self) -> None:
         self.resources: dict[str, FakeResource] = {}
@@ -546,6 +583,47 @@ assert "docker" not in sys.modules
                     "Docker container image inspection was malformed",
                 ):
                     sdk.inspect_container("web")
+
+    def test_container_inspection_rejects_unknown_state_without_status_fallback(self) -> None:
+        for case in MALFORMED_CONTAINER_STATES:
+            for status in MISLEADING_CONTAINER_STATUSES:
+                with self.subTest(case=case, status=status):
+                    raw = FakeDockerClient()
+                    resource = StateInspectionResource(
+                        "web", image="ghcr.io/openj92/example@sha256:" + "a" * 64,
+                        misleading_status=status,
+                    )
+                    malform_container_state(resource, case)
+                    raw.containers.resources["web"] = resource
+                    sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+                    caught = None
+                    try:
+                        sdk.inspect_container("web")
+                    except RuntimeError as error:
+                        caught = error
+                    with self.subTest(boundary="reject-malformed-state"):
+                        self.assertIsNotNone(caught)
+                        self.assertIs(type(caught), RuntimeError)
+                        self.assertEqual(caught.args, ("Docker container state inspection was malformed",))
+                    with self.subTest(boundary="never-read-status"):
+                        self.assertEqual(resource.status_reads, 0)
+                    self.assertFalse(resource.started or resource.stopped or resource.removed)
+
+    def test_container_inspection_uses_only_exact_boolean_running(self) -> None:
+        for running in (True, False):
+            for status in MISLEADING_CONTAINER_STATUSES:
+                with self.subTest(running=running, status=status):
+                    raw = FakeDockerClient()
+                    resource = StateInspectionResource(
+                        "web", image="ghcr.io/openj92/example@sha256:" + "a" * 64,
+                        running=running, misleading_status=status,
+                    )
+                    raw.containers.resources["web"] = resource
+                    sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+                    inspection = sdk.inspect_container("web")
+                    self.assertIs(inspection.running, running)
+                    self.assertEqual(resource.status_reads, 0)
+                    self.assertFalse(resource.started or resource.stopped or resource.removed)
 
     def test_resource_inspection_equality_includes_runtime_identity(self) -> None:
         inspection = DockerSdkResourceInspection(

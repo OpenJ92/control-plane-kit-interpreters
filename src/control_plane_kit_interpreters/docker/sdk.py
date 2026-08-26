@@ -761,11 +761,11 @@ class DockerSdkClient:
         return {str(key): str(value) for key, value in labels.items()}
 
     def _container_running(self, container: Any) -> bool:
-        attrs = getattr(container, "attrs", {})
-        state = attrs.get("State", {}) if isinstance(attrs, Mapping) else {}
-        if isinstance(state, Mapping) and isinstance(state.get("Running"), bool):
+        attrs = getattr(container, "attrs", None)
+        state = attrs.get("State") if isinstance(attrs, Mapping) else None
+        if isinstance(state, Mapping) and type(state.get("Running")) is bool:
             return state["Running"]
-        return getattr(container, "status", None) == "running"
+        raise RuntimeError("Docker container state inspection was malformed")
 
     def _image_name(self, container: Any) -> str | None:
         image = getattr(container, "image", None)

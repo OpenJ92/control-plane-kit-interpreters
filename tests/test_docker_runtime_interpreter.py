@@ -56,6 +56,7 @@ from control_plane_kit_core.runtime_effects import (
     RuntimeEffectSource,
     RuntimeProductMaterial,
 )
+from control_plane_kit_core.operations.run_identity import RunId
 from control_plane_kit_core.secrets import (
     SecretEnvironmentDelivery,
     SecretFileDelivery,
@@ -2213,13 +2214,13 @@ def _request(
     secret_resolution_grants: tuple[SecretResolutionGrant, ...] = (),
 ) -> RuntimeEffectRequest:
     return RuntimeEffectRequest(
-        effect_id="effect-a",
+        effect_id="event-started",
         kind=RuntimeEffectKind.REALIZE_ACTIVITY,
         runtime_kind=RuntimeKind.DOCKER,
         source=RuntimeEffectSource(
             workspace_id="workspace-a",
             request_id="request-a",
-            run_id="run-a",
+            run_id=RunId("run-a"),
             plan_id="plan-a",
             base_graph_id="graph-base",
             desired_graph_id=desired_graph_id,
@@ -2252,7 +2253,7 @@ def _grant(
         intent_fingerprint="d" * 64,
         run_id="run-a",
         activity_id="activity-a",
-        effect_id="effect-a",
+        effect_id="event-started",
     )
 
 
