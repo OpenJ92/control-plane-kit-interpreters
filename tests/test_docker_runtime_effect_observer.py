@@ -22,7 +22,7 @@ from control_plane_kit_core.runtime_effect_observation import (
     RuntimeEffectObservedSucceeded, RuntimeEffectObserverUnsupported,
     runtime_effect_observation_fingerprint,
 )
-from control_plane_kit_core.runtime_effects import ImagePullAuthority
+from control_plane_kit_core.runtime_effects import EffectResultKind, ImagePullAuthority
 from control_plane_kit_core.runtime_authority import (
     RuntimeAuthorityAccessDelivery, RuntimeAuthorityAccessDeliveryKind,
     RuntimeAuthorityDeliverySecretReference, RuntimeAuthorityReference,
@@ -47,9 +47,12 @@ from test_docker_start_node_phase_total import (
 from test_docker_runtime_interpreter import (
     _grant, _local_runtime_authority, _material, _product_with_secret_delivery,
     _remote_tls_runtime_authority, _request, _unsupported_runtime_authority,
+    _product_with_retained_data,
 )
 from test_docker_sdk_client import (
     FakeDockerClient, FakeDockerModule, FakeImage, FakeResource,
+    MALFORMED_CONTAINER_STATES, MISLEADING_CONTAINER_STATUSES,
+    StateInspectionResource, malform_container_state,
 )
 
 
@@ -345,7 +348,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                 with self.subTest(operation=type(operation).__name__, state=state):
                     changed = replace(request, operation=operation)
                     if isinstance(operation, ReconcileNode):
-                        changed = _request(ReconcileNode(NodeTarget("api")))
+                        changed = _plain_node_request(ReconcileNode)
                     client = _ReadClient(changed)
                     if state == "absent":
                         client.container = None
@@ -406,6 +409,54 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                 client.container = replace(client.container, running=False)
                 self.assertEqual(self.observe(request, client), "succeeded")
                 self.assertNotIn("inspect_volume", [name for name, _ in client.calls])
+
+    def test_retained_mount_realization_is_unsupported_regardless_of_volume_records(self):
+        for operation_type in (StartNode, ReconcileNode):
+            for volume_state in ("absent", "foreign", "exact"):
+                with self.subTest(operation=operation_type.__name__, volume=volume_state):
+                    request, client = _retained_fixture(operation_type, volume_state)
+                    contract = request.products[0].product.runtime_contract
+                    self.assertEqual(len(contract.retained_data_mounts), 1)
+                    self.assertEqual(contract.configuration_artifacts, ())
+                    self.assertEqual(contract.secret_deliveries, ())
+                    self.assertEqual(contract.verification.checks, ())
+                    self.assertEqual(request.authority_deliveries, ())
+                    before = repr(client.volumes)
+                    resolver = _Resolver()
+                    with patch.object(DockerSdkClient, "from_authority") as factory:
+                        result = self.observer(client, authorized_secret_resolver=resolver).observe(RuntimeEffectObservationRequest(request), None)
+                    with self.subTest(boundary="no-io-or-resolution"):
+                        self.assertEqual(client.calls, [])
+                        self.assertEqual(resolver.calls, [])
+                        factory.assert_not_called()
+                    with self.subTest(boundary="fixed-unsupported"):
+                        self.assertEqual(self.assert_observation(result, request), "observer-unsupported")
+                    self.assertEqual(client.mutations, [])
+                    self.assertEqual(repr(client.volumes), before)
+
+    def test_retained_mounts_preserve_stop_and_remove_without_volume_reads(self):
+        for operation_type in (StopNode, RemoveNodeResource):
+            for volume_state in ("absent", "foreign", "exact"):
+                for state in ("absent", "running", "stopped", "foreign"):
+                    with self.subTest(operation=operation_type.__name__, volume=volume_state, state=state):
+                        request, client = _retained_fixture(operation_type, volume_state)
+                        if state == "absent":
+                            client.container = None
+                        elif state == "foreign":
+                            client.container = replace(client.container, labels={})
+                        else:
+                            client.container = replace(client.container, running=state == "running")
+                        expected = {"absent": "absent", "foreign": "conflict"}.get(state, "indeterminate")
+                        if operation_type is StopNode and state == "stopped":
+                            expected = "succeeded"
+                        before = repr(client.volumes)
+                        resolver = _Resolver()
+                        result = self.observer(client, authorized_secret_resolver=resolver).observe(RuntimeEffectObservationRequest(request), None)
+                        self.assertEqual(client.calls, [("inspect_container", _container_name(request, "api"))])
+                        self.assertEqual(client.mutations, [])
+                        self.assertEqual(resolver.calls, [])
+                        self.assertEqual(repr(client.volumes), before)
+                        self.assertEqual(self.assert_observation(result, request), expected)
 
     def test_reconcile_with_verification_is_unsupported_but_start_needs_no_health_probe(self):
         request = _hello_request()
@@ -640,6 +691,8 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                 for corruption in ("name", "missing-fingerprint", "wrong-fingerprint", "foreign"):
                     with self.subTest(operation=operation_type.__name__, resource=resource, corruption=corruption):
                         request = _request(operation_type(NodeTarget("api")))
+                        if operation_type is ReconcileNode:
+                            request = _plain_node_request(operation_type)
                         client = _ReadClient(request)
                         if operation_type is StopNode:
                             client.container = replace(client.container, running=False)
@@ -688,6 +741,84 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                 self.assertEqual([name for name, _ in calls], sequence[:sequence.index(phase) + 1])
                 self.assertEqual(self.assert_observation(result, request), "indeterminate")
 
+    def test_actual_sdk_unknown_container_state_is_indeterminate_only(self):
+        for operation_type in (StartNode, ReconcileNode, StopNode):
+            for case in MALFORMED_CONTAINER_STATES:
+                for status in MISLEADING_CONTAINER_STATUSES:
+                    with self.subTest(operation=operation_type.__name__, case=case, status=status):
+                        request = _plain_node_request(operation_type)
+                        sdk, raw, calls, _ = _sdk_state_fixture(request, status, case=case)
+                        result = self.observer(sdk).observe(RuntimeEffectObservationRequest(request), None)
+                        _assert_sdk_no_mutation(self, raw)
+                        expected = ["container"] if operation_type is StopNode else ["network", "container"]
+                        with self.subTest(boundary="no-later-read"):
+                            self.assertEqual([phase for phase, _ in calls], expected)
+                        with self.subTest(boundary="indeterminate-only"):
+                            self.assertEqual(self.assert_observation(result, request), "indeterminate")
+
+    def test_actual_sdk_known_container_states_preserve_observation_postconditions(self):
+        for operation_type in (StartNode, ReconcileNode, StopNode):
+            for running in (True, False):
+                for status in MISLEADING_CONTAINER_STATUSES:
+                    with self.subTest(operation=operation_type.__name__, running=running, status=status):
+                        request = _plain_node_request(operation_type)
+                        sdk, raw, _, resource = _sdk_state_fixture(request, status, running=running)
+                        result = self.observer(sdk).observe(RuntimeEffectObservationRequest(request), None)
+                        _assert_sdk_no_mutation(self, raw)
+                        self.assertEqual(resource.status_reads, 0)
+                        succeeded = not running if operation_type is StopNode else running
+                        self.assertEqual(self.assert_observation(result, request), "succeeded" if succeeded else "indeterminate")
+
+    def test_same_state_error_text_outside_sdk_preserves_programming_exception(self):
+        request = _plain_node_request(StopNode)
+        client = _ReadClient(request)
+        error = RuntimeError("Docker container state inspection was malformed")
+        with patch.object(client, "inspect_container", side_effect=error):
+            with self.assertRaises(RuntimeError) as caught:
+                self.observer(client).observe(RuntimeEffectObservationRequest(request), None)
+        self.assertIs(caught.exception, error)
+        self.assertIsNone(error.__cause__)
+        self.assertIsNone(error.__context__)
+        self.assertEqual(client.mutations, [])
+
+    def test_execute_unknown_preaction_state_blocks_all_later_mutation(self):
+        for operation_type in (StartNode, StopNode, RemoveNodeResource):
+            for case in MALFORMED_CONTAINER_STATES:
+                for status in MISLEADING_CONTAINER_STATUSES:
+                    with self.subTest(operation=operation_type.__name__, case=case, status=status):
+                        request = _plain_node_request(operation_type)
+                        sdk, raw, calls, _ = _sdk_state_fixture(request, status, case=case)
+                        result = docker_interpreters.DockerRuntimeInterpreter(sdk).execute(request)
+                        expected = ["image", "network", "container"] if operation_type is StartNode else ["container"]
+                        with self.subTest(boundary="no-later-operation"):
+                            self.assertEqual([phase for phase, _ in calls], expected)
+                        with self.subTest(boundary="no-mutation"):
+                            _assert_sdk_no_mutation(self, raw)
+                        with self.subTest(boundary="uncertain-not-success-or-conflict"):
+                            self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+                            self.assertEqual(result.observations, ())
+                            if operation_type is StartNode:
+                                self.assertEqual(dict(result.failure.details), {"phase": "container-create"})
+
+    def test_execute_known_start_state_preserves_success_and_private_endpoints(self):
+        for running in (True, False):
+            for status in MISLEADING_CONTAINER_STATUSES:
+                with self.subTest(running=running, status=status):
+                    request = _plain_node_request(StartNode)
+                    sdk, raw, _, resource = _sdk_state_fixture(request, status, running=running)
+                    result = docker_interpreters.DockerRuntimeInterpreter(sdk).execute(request)
+                    self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+                    self.assertEqual(resource.status_reads, 0)
+                    self.assertEqual(resource.started, not running)
+                    self.assertEqual(result.evidence["action"], "reused" if running else "started")
+                    self.assertEqual([
+                        (value.subject_id, value.socket_name, value.address.value)
+                        for value in result.observations
+                    ], [("api", "http", "http://172.31.0.8:8080")])
+                    for manager in (raw.networks, raw.containers, raw.images, raw.volumes):
+                        self.assertEqual(manager.created, [])
+                        self.assertEqual(manager.pulled, [])
+
     def test_remote_client_construction_faults_never_use_ambient_client(self):
         for fault in ("authorization", "timeout", "connection", "sdk"):
             with self.subTest(fault=fault):
@@ -716,6 +847,48 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
         self.assertEqual(resolver.calls, list(grants))
         self.assertEqual(ambient.calls, [])
         self.assertEqual(ambient.close_calls, 0)
+
+
+def _plain_node_request(operation_type):
+    request = _request(operation_type(NodeTarget("api")))
+    material = request.products[0]
+    product = replace(material.product, runtime_contract=replace(
+        material.product.runtime_contract, configuration_artifacts=(),
+    ))
+    return replace(request, products=(replace(material, product=product),))
+
+
+def _retained_fixture(operation_type, volume_state):
+    product = _product_with_retained_data()
+    product = replace(product, runtime_contract=replace(
+        product.runtime_contract, configuration_artifacts=(),
+    ))
+    request = _request(operation_type(NodeTarget("api")), products=(_material(product),))
+    client = _ReadClient(request)
+    mount = product.runtime_contract.retained_data_mounts[0]
+    name = _volume_name(request, "api", mount.resource_id)
+    if volume_state != "absent":
+        labels = {**client.container.labels, "org.openj92.cpk.volume.kind": "retained-data"}
+        client.volumes[name] = DockerSdkResourceInspection(
+            name, False, None, labels if volume_state == "exact" else {},
+        )
+    return request, client
+
+
+def _sdk_state_fixture(request, status, *, case=None, running=True):
+    sdk, raw, calls = _sdk_fixture(request)
+    material = request.products[0]
+    name = _container_name(request, material.node_id)
+    resource = StateInspectionResource(
+        name, image=material.product.image.execution_reference,
+        image_id=HELLO_IMAGE_ID, labels=_node_labels(request, material),
+        running=running, misleading_status=status,
+        private_addresses={_network_name(request, material.runtime_id): "172.31.0.8"},
+    )
+    if case is not None:
+        malform_container_state(resource, case)
+    raw.containers.resources[name] = resource
+    return sdk, raw, calls, resource
 
 
 def _provider_fault(kind):
