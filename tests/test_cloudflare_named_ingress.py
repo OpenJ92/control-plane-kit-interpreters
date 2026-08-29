@@ -214,6 +214,220 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
             self.assertTrue(issubclass(enum_type, Enum))
             self.assertEqual({member.value for member in enum_type}, values)
 
+    def test_tunnel_allocation_without_receipt_is_uncertain_and_withheld(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "transport",
+                FakeCloudflareTransport(raise_stages={"tunnel-allocation"}),
+                "transport",
+            ),
+            (
+                "provider-status",
+                FakeCloudflareTransport(fault_stages={"tunnel-allocation"}),
+                "provider-status",
+            ),
+            (
+                "missing-id",
+                FakeCloudflareTransport(missing_tunnel_id=True),
+                "malformed-response",
+            ),
+        )
+        for case, transport, category in cases:
+            with self.subTest(case=case):
+                interpreter = CloudflareNamedIngressInterpreter(
+                    transport=transport,
+                    authorized_secret_resolver=_authorized_resolver(),
+                    secret_custodian=RecordingSecretCustodian(),
+                )
+
+                with self.assertRaises(CloudflareApiError) as raised:
+                    interpreter.create(
+                        _ingress(),
+                        authority=_authority(),
+                        allocation_name="cpk-gateway-001-c0303ba7369e",
+                        origin_service_url="http://gateway:8000",
+                        secret_resolution_grant=_resolution_grant(),
+                        secret_custody_grant=_custody_grant(),
+                    )
+
+                self.assertEqual(
+                    [request.stage for request in transport.requests],
+                    ["dns-pre-observation", "tunnel-allocation"],
+                )
+                self.assertFalse(
+                    any(
+                        request.method == "DELETE"
+                        for request in transport.requests
+                    )
+                )
+                _assert_failure_evidence(
+                    self,
+                    raised.exception,
+                    stage="tunnel-allocation",
+                    category=category,
+                    mutation_certainty="uncertain",
+                    tunnel_id=None,
+                    dns_record_id=None,
+                    cleanup_result="withheld",
+                )
+
+    def test_unexpected_response_mapping_exceptions_preserve_identity(self) -> None:
+        cases = (
+            (
+                "initial-observation",
+                "dns-pre-observation",
+                ["dns-pre-observation"],
+            ),
+            (
+                "configuration-after-receipt",
+                "tunnel-configuration",
+                [
+                    "dns-pre-observation",
+                    "tunnel-allocation",
+                    "tunnel-configuration",
+                    "tunnel-delete",
+                ],
+            ),
+        )
+        for case, stage, expected_stages in cases:
+            with self.subTest(case=case):
+                sentinel = SentinelProviderException(
+                    f"{RAW_PROVIDER_EXCEPTION}-{case}"
+                )
+                transport = FakeCloudflareTransport(
+                    response_get_errors={stage: sentinel},
+                )
+                interpreter = CloudflareNamedIngressInterpreter(
+                    transport=transport,
+                    authorized_secret_resolver=_authorized_resolver(),
+                    secret_custodian=RecordingSecretCustodian(),
+                )
+
+                try:
+                    interpreter.create(
+                        _ingress(),
+                        authority=_authority(),
+                        allocation_name="cpk-gateway-001-c0303ba7369e",
+                        origin_service_url="http://gateway:8000",
+                        secret_resolution_grant=_resolution_grant(),
+                        secret_custody_grant=_custody_grant(),
+                    )
+                except Exception as error:
+                    self.assertIs(error, sentinel)
+                else:
+                    self.fail("unexpected response exception was suppressed")
+                self.assertEqual(
+                    [request.stage for request in transport.requests],
+                    expected_stages,
+                )
+
+    def test_unexpected_exception_cleanup_failure_keeps_cleanup_precedence(
+        self,
+    ) -> None:
+        sentinel = SentinelProviderException(RAW_PROVIDER_EXCEPTION)
+        transport = FakeCloudflareTransport(
+            response_get_errors={"tunnel-configuration": sentinel},
+            fault_stages={"tunnel-delete"},
+        )
+        interpreter = CloudflareNamedIngressInterpreter(
+            transport=transport,
+            authorized_secret_resolver=_authorized_resolver(),
+            secret_custodian=RecordingSecretCustodian(),
+        )
+
+        with self.assertRaises(CloudflareApiError) as raised:
+            interpreter.create(
+                _ingress(),
+                authority=_authority(),
+                allocation_name="cpk-gateway-001-c0303ba7369e",
+                origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
+                secret_custody_grant=_custody_grant(),
+            )
+
+        self.assertIsNot(raised.exception, sentinel)
+        self.assertEqual(
+            str(raised.exception),
+            "Cloudflare exact cleanup is uncertain: tunnel",
+        )
+        self.assertNotIn(RAW_PROVIDER_EXCEPTION, repr(raised.exception))
+        self.assertEqual(
+            [request.stage for request in transport.requests],
+            [
+                "dns-pre-observation",
+                "tunnel-allocation",
+                "tunnel-configuration",
+                "tunnel-delete",
+            ],
+        )
+
+    def test_direct_dns_create_remains_name_checked_and_api_error_compatible(
+        self,
+    ) -> None:
+        success_transport = FakeCloudflareTransport(dns_lookup_results=[[]])
+        client = CloudflareApiClient(
+            _authority(),
+            api_token=SecretValue(API_TOKEN),
+            transport=success_transport,
+        )
+
+        self.assertEqual(
+            client.create_dns_cname(
+                hostname=_ingress().hostname,
+                tunnel_id="tunnel-001",
+            ),
+            "dns-001",
+        )
+        self.assertEqual(
+            [
+                (request.method, request.stage, request.params)
+                for request in success_transport.requests
+            ],
+            [
+                (
+                    "GET",
+                    "dns-pre-observation",
+                    {"name": "cpk-gateway-001.openj92.dev"},
+                ),
+                ("POST", "dns-create", None),
+            ],
+        )
+
+        cases = (
+            (
+                "other-record-type",
+                FakeCloudflareTransport(
+                    dns_lookup_results=[
+                        [_dns_record("dns-existing", "A", "192.0.2.10")]
+                    ],
+                ),
+            ),
+            (
+                "malformed-top-level",
+                FakeCloudflareTransport(
+                    malformed_result_stages={"dns-pre-observation"},
+                ),
+            ),
+        )
+        for case, transport in cases:
+            with self.subTest(case=case):
+                client = CloudflareApiClient(
+                    _authority(),
+                    api_token=SecretValue(API_TOKEN),
+                    transport=transport,
+                )
+                with self.assertRaises(CloudflareApiError):
+                    client.create_dns_cname(
+                        hostname=_ingress().hostname,
+                        tunnel_id="tunnel-001",
+                    )
+                self.assertEqual(
+                    [request.stage for request in transport.requests],
+                    ["dns-pre-observation"],
+                )
+
     def test_exact_hostname_occupants_are_preobserved_before_tunnel_creation(
         self,
     ) -> None:
@@ -501,6 +715,153 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                     dns_record_id=dns_record_id,
                     cleanup_result=cleanup_result,
                 )
+
+    def test_unexpected_dns_create_response_reconciles_once_and_preserves_identity(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "absent",
+                [],
+                ["tunnel-delete"],
+            ),
+            (
+                "new-tunnel-target",
+                [_dns_cname("dns-race", "tunnel-001")],
+                [],
+            ),
+        )
+        for case, reconciled_rows, expected_cleanup in cases:
+            with self.subTest(case=case):
+                sentinel = SentinelProviderException(
+                    f"{RAW_PROVIDER_EXCEPTION}-{case}"
+                )
+                transport = FakeCloudflareTransport(
+                    dns_lookup_results=[[], [], reconciled_rows],
+                    response_get_errors={"dns-create": sentinel},
+                )
+                interpreter = CloudflareNamedIngressInterpreter(
+                    transport=transport,
+                    authorized_secret_resolver=_authorized_resolver(),
+                    secret_custodian=RecordingSecretCustodian(),
+                )
+
+                try:
+                    interpreter.create(
+                        _ingress(),
+                        authority=_authority(),
+                        allocation_name="cpk-gateway-001-c0303ba7369e",
+                        origin_service_url="http://gateway:8000",
+                        secret_resolution_grant=_resolution_grant(),
+                        secret_custody_grant=_custody_grant(),
+                    )
+                except Exception as error:
+                    self.assertIs(error, sentinel)
+                else:
+                    self.fail("unexpected DNS-create exception was suppressed")
+
+                stages = [request.stage for request in transport.requests]
+                self.assertEqual(
+                    stages,
+                    [
+                        "dns-pre-observation",
+                        "tunnel-allocation",
+                        "tunnel-configuration",
+                        "dns-pre-mutation-observation",
+                        "dns-create",
+                        "dns-reconciliation",
+                        *expected_cleanup,
+                    ],
+                )
+                self.assertEqual(stages.count("dns-reconciliation"), 1)
+
+    def test_unexpected_dns_create_cleanup_failure_keeps_precedence(self) -> None:
+        sentinel = SentinelProviderException(RAW_PROVIDER_EXCEPTION)
+        transport = FakeCloudflareTransport(
+            dns_lookup_results=[[], [], []],
+            response_get_errors={"dns-create": sentinel},
+            fault_stages={"tunnel-delete"},
+        )
+        interpreter = CloudflareNamedIngressInterpreter(
+            transport=transport,
+            authorized_secret_resolver=_authorized_resolver(),
+            secret_custodian=RecordingSecretCustodian(),
+        )
+
+        with self.assertRaises(CloudflareApiError) as raised:
+            interpreter.create(
+                _ingress(),
+                authority=_authority(),
+                allocation_name="cpk-gateway-001-c0303ba7369e",
+                origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
+                secret_custody_grant=_custody_grant(),
+            )
+
+        self.assertIsNot(raised.exception, sentinel)
+        self.assertEqual(
+            str(raised.exception),
+            "Cloudflare exact cleanup is uncertain: tunnel",
+        )
+        self.assertNotIn(RAW_PROVIDER_EXCEPTION, repr(raised.exception))
+        stages = [request.stage for request in transport.requests]
+        self.assertEqual(
+            stages,
+            [
+                "dns-pre-observation",
+                "tunnel-allocation",
+                "tunnel-configuration",
+                "dns-pre-mutation-observation",
+                "dns-create",
+                "dns-reconciliation",
+                "tunnel-delete",
+            ],
+        )
+        self.assertEqual(stages.count("dns-reconciliation"), 1)
+
+    def test_malformed_tunnel_token_is_typed_and_compensated(self) -> None:
+        transport = FakeCloudflareTransport(
+            malformed_result_stages={"tunnel-token"},
+        )
+        interpreter = CloudflareNamedIngressInterpreter(
+            transport=transport,
+            authorized_secret_resolver=_authorized_resolver(),
+            secret_custodian=RecordingSecretCustodian(),
+        )
+
+        with self.assertRaises(CloudflareApiError) as raised:
+            interpreter.create(
+                _ingress(),
+                authority=_authority(),
+                allocation_name="cpk-gateway-001-c0303ba7369e",
+                origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
+                secret_custody_grant=_custody_grant(),
+            )
+
+        self.assertEqual(
+            [request.stage for request in transport.requests],
+            [
+                "dns-pre-observation",
+                "tunnel-allocation",
+                "tunnel-configuration",
+                "dns-pre-mutation-observation",
+                "dns-create",
+                "tunnel-token",
+                "dns-delete",
+                "tunnel-delete",
+            ],
+        )
+        _assert_failure_evidence(
+            self,
+            raised.exception,
+            stage="tunnel-token",
+            category="malformed-response",
+            mutation_certainty="dns-and-tunnel-created",
+            tunnel_id="tunnel-001",
+            dns_record_id="dns-001",
+            cleanup_result="complete",
+        )
 
     def test_dns_reconciliation_failures_withhold_all_cleanup(self) -> None:
         cases = (
@@ -1155,6 +1516,19 @@ class FailingAuthorizedSecretResolver:
         raise RuntimeError(API_TOKEN)
 
 
+class SentinelProviderException(RuntimeError):
+    pass
+
+
+class RaisingResponseBody(dict[str, object]):
+    def __init__(self, error: BaseException) -> None:
+        super().__init__()
+        self.error = error
+
+    def get(self, key: str, default: object = None) -> object:
+        raise self.error
+
+
 class FakeCloudflareTransport:
     def __init__(
         self,
@@ -1165,6 +1539,8 @@ class FakeCloudflareTransport:
         raise_stages: set[str] | None = None,
         malformed_result_stages: set[str] | None = None,
         dns_lookup_results: list[list[object]] | None = None,
+        missing_tunnel_id: bool = False,
+        response_get_errors: Mapping[str, BaseException] | None = None,
     ) -> None:
         self.requests: list[RecordedRequest] = []
         self.existing_dns_record_id = existing_dns_record_id
@@ -1180,6 +1556,12 @@ class FakeCloudflareTransport:
             None
             if dns_lookup_results is None
             else [list(result) for result in dns_lookup_results]
+        )
+        self.missing_tunnel_id = missing_tunnel_id
+        self.response_get_errors = (
+            {}
+            if response_get_errors is None
+            else dict(response_get_errors)
         )
 
     def request(
@@ -1199,6 +1581,11 @@ class FakeCloudflareTransport:
         if stage in self.raise_stages:
             raise RuntimeError(
                 f"{RAW_PROVIDER_EXCEPTION} {RAW_PROVIDER_URL} {API_TOKEN}"
+            )
+        if stage in self.response_get_errors:
+            return CloudflareHttpResponse(
+                200,
+                RaisingResponseBody(self.response_get_errors[stage]),
             )
         if self.status_code != 200:
             return CloudflareHttpResponse(self.status_code, {"success": False})
@@ -1220,7 +1607,14 @@ class FakeCloudflareTransport:
         if method == "POST" and path == "/accounts/account-001/cfd_tunnel":
             return CloudflareHttpResponse(
                 200,
-                {"success": True, "result": {"id": "tunnel-001"}},
+                {
+                    "success": True,
+                    "result": (
+                        {"missing": "id"}
+                        if self.missing_tunnel_id
+                        else {"id": "tunnel-001"}
+                    ),
+                },
             )
         if method == "GET" and path == "/zones/zone-001/dns_records":
             if self.dns_lookup_results is not None:
