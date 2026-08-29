@@ -49,6 +49,99 @@ class CloudflareApiTransportError(CloudflareApiError):
     """Raised when a request outcome is ambiguous at the transport boundary."""
 
 
+class CloudflareProviderFailureStage(StrEnum):
+    DNS_PRE_OBSERVATION = "dns-pre-observation"
+    TUNNEL_ALLOCATION = "tunnel-allocation"
+    TUNNEL_CONFIGURATION = "tunnel-configuration"
+    DNS_PRE_MUTATION_OBSERVATION = "dns-pre-mutation-observation"
+    DNS_CREATE = "dns-create"
+    DNS_RECONCILIATION = "dns-reconciliation"
+    TUNNEL_TOKEN = "tunnel-token"
+    SECRET_CUSTODY = "secret-custody"
+    CLEANUP = "cleanup"
+
+
+class CloudflareProviderFailureCategory(StrEnum):
+    HOSTNAME_OCCUPIED = "hostname-occupied"
+    DNS_CONFLICT = "dns-conflict"
+    MALFORMED_RESPONSE = "malformed-response"
+    PROVIDER_STATUS = "provider-status"
+    TRANSPORT = "transport"
+    SECRET_CUSTODY = "secret-custody"
+    CLEANUP = "cleanup"
+
+
+class CloudflareProviderMutationCertainty(StrEnum):
+    NONE = "none"
+    TUNNEL_CREATED = "tunnel-created"
+    DNS_AND_TUNNEL_CREATED = "dns-and-tunnel-created"
+    UNCERTAIN = "uncertain"
+
+
+class CloudflareProviderCleanupResult(StrEnum):
+    NOT_REQUIRED = "not-required"
+    COMPLETE = "complete"
+    WITHHELD = "withheld"
+    UNCERTAIN = "uncertain"
+
+
+@dataclass(frozen=True)
+class CloudflareProviderFailureEvidence:
+    stage: CloudflareProviderFailureStage
+    category: CloudflareProviderFailureCategory
+    mutation_certainty: CloudflareProviderMutationCertainty
+    tunnel_id: str | None
+    dns_record_id: str | None
+    cleanup_result: CloudflareProviderCleanupResult
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.stage, CloudflareProviderFailureStage):
+            raise CloudflareApiError("provider failure stage must be closed")
+        if not isinstance(self.category, CloudflareProviderFailureCategory):
+            raise CloudflareApiError("provider failure category must be closed")
+        if not isinstance(
+            self.mutation_certainty,
+            CloudflareProviderMutationCertainty,
+        ):
+            raise CloudflareApiError("provider mutation certainty must be closed")
+        if not isinstance(self.cleanup_result, CloudflareProviderCleanupResult):
+            raise CloudflareApiError("provider cleanup result must be closed")
+        if self.tunnel_id is not None:
+            _validate_identifier(self.tunnel_id, "tunnel_id")
+        if self.dns_record_id is not None:
+            _validate_identifier(self.dns_record_id, "dns_record_id")
+
+
+class CloudflareProviderOperationError(CloudflareApiError):
+    """Bounded provider failure suitable for durable Operations evidence."""
+
+    def __init__(
+        self,
+        message: str,
+        provider_failure: CloudflareProviderFailureEvidence,
+    ) -> None:
+        super().__init__(message)
+        self.provider_failure = provider_failure
+
+
+class _CloudflareMalformedResponse(CloudflareApiError):
+    pass
+
+
+class _CloudflareHostnameState(StrEnum):
+    ABSENT = "absent"
+    OCCUPIED = "occupied"
+    TARGETS_TUNNEL = "targets-tunnel"
+    DUPLICATE = "duplicate"
+    MALFORMED = "malformed"
+
+
+@dataclass(frozen=True)
+class _CloudflareHostnameObservation:
+    state: _CloudflareHostnameState
+    dns_record_id: str | None = None
+
+
 class CloudflareHttpTransport(Protocol):
     def request(
         self,
@@ -275,63 +368,246 @@ class CloudflareNamedIngressInterpreter:
             transport=self.transport,
         )
         tunnel_name = allocation_name
-        tunnel_id: str | None = None
-        dns_record_id: str | None = None
-        custody_receipt: SecretCustodyReceipt | None = None
-        custody_write_attempted = False
+        try:
+            pre_observation = _observe_exact_hostname(
+                client,
+                ingress.hostname,
+            )
+        except Exception as error:
+            if not _is_provider_operation_failure(error):
+                raise
+            raise _provider_operation_error(
+                str(error),
+                stage=CloudflareProviderFailureStage.DNS_PRE_OBSERVATION,
+                category=_provider_failure_category(error),
+                mutation_certainty=CloudflareProviderMutationCertainty.NONE,
+                cleanup_result=CloudflareProviderCleanupResult.NOT_REQUIRED,
+            ) from None
+        if pre_observation.state is not _CloudflareHostnameState.ABSENT:
+            raise _hostname_observation_error(
+                pre_observation,
+                stage=CloudflareProviderFailureStage.DNS_PRE_OBSERVATION,
+                tunnel_id=None,
+                mutation_certainty=CloudflareProviderMutationCertainty.NONE,
+                cleanup_result=CloudflareProviderCleanupResult.NOT_REQUIRED,
+            ) from None
+
         try:
             tunnel_id = client.create_tunnel(tunnel_name)
+        except Exception as error:
+            if not _is_provider_operation_failure(error):
+                raise
+            raise _provider_operation_error(
+                str(error),
+                stage=CloudflareProviderFailureStage.TUNNEL_ALLOCATION,
+                category=_provider_failure_category(error),
+                mutation_certainty=CloudflareProviderMutationCertainty.UNCERTAIN,
+                cleanup_result=CloudflareProviderCleanupResult.WITHHELD,
+            ) from None
+
+        try:
             client.configure_tunnel(
                 tunnel_id,
                 hostname=ingress.hostname,
                 origin_service_url=origin_service_url,
             )
-            dns_record_id = client.create_dns_cname(
+        except Exception as error:
+            cleanup_result = _delete_known_tunnel(client, tunnel_id)
+            if not _is_provider_operation_failure(error):
+                if cleanup_result is CloudflareProviderCleanupResult.UNCERTAIN:
+                    raise CloudflareApiError(
+                        "Cloudflare exact cleanup is uncertain: tunnel"
+                    ) from None
+                raise
+            certainty = CloudflareProviderMutationCertainty.TUNNEL_CREATED
+            if isinstance(error, CloudflareApiTransportError):
+                certainty = CloudflareProviderMutationCertainty.UNCERTAIN
+            raise _provider_operation_error(
+                str(error),
+                stage=CloudflareProviderFailureStage.TUNNEL_CONFIGURATION,
+                category=_provider_failure_category(error),
+                mutation_certainty=certainty,
+                tunnel_id=tunnel_id,
+                cleanup_result=cleanup_result,
+            ) from None
+
+        try:
+            pre_mutation_observation = _observe_exact_hostname(
+                client,
+                ingress.hostname,
+                tunnel_id=tunnel_id,
+            )
+        except Exception as error:
+            cleanup_result = _delete_known_tunnel(client, tunnel_id)
+            if not _is_provider_operation_failure(error):
+                if cleanup_result is CloudflareProviderCleanupResult.UNCERTAIN:
+                    raise CloudflareApiError(
+                        "Cloudflare exact cleanup is uncertain: tunnel"
+                    ) from None
+                raise
+            raise _provider_operation_error(
+                str(error),
+                stage=(
+                    CloudflareProviderFailureStage.DNS_PRE_MUTATION_OBSERVATION
+                ),
+                category=_provider_failure_category(error),
+                mutation_certainty=(
+                    CloudflareProviderMutationCertainty.TUNNEL_CREATED
+                ),
+                tunnel_id=tunnel_id,
+                cleanup_result=cleanup_result,
+            ) from None
+        if pre_mutation_observation.state is not _CloudflareHostnameState.ABSENT:
+            if pre_mutation_observation.state is _CloudflareHostnameState.OCCUPIED:
+                cleanup_result = _delete_known_tunnel(client, tunnel_id)
+                certainty = CloudflareProviderMutationCertainty.TUNNEL_CREATED
+            else:
+                cleanup_result = CloudflareProviderCleanupResult.WITHHELD
+                certainty = CloudflareProviderMutationCertainty.UNCERTAIN
+            raise _hostname_observation_error(
+                pre_mutation_observation,
+                stage=(
+                    CloudflareProviderFailureStage.DNS_PRE_MUTATION_OBSERVATION
+                ),
+                tunnel_id=tunnel_id,
+                mutation_certainty=certainty,
+                cleanup_result=cleanup_result,
+            ) from None
+
+        try:
+            dns_record_id = client._create_dns_cname_unchecked(
                 hostname=ingress.hostname,
                 tunnel_id=tunnel_id,
             )
-            tunnel_token = client.get_tunnel_token(tunnel_id)
-            custody_write_attempted = True
+        except Exception as dns_create_error:
             try:
-                custody_receipt = self.secret_custodian.store(
-                    secret_custody_grant,
-                    tunnel_token,
+                reconciliation = _observe_exact_hostname(
+                    client,
+                    ingress.hostname,
+                    tunnel_id=tunnel_id,
                 )
-            except Exception:
-                raise CloudflareApiError(
-                    "Cloudflare generated secret custody failed"
+            except Exception as reconciliation_error:
+                if not _is_provider_operation_failure(reconciliation_error):
+                    raise
+                raise _provider_operation_error(
+                    "Cloudflare DNS reconciliation failed",
+                    stage=CloudflareProviderFailureStage.DNS_RECONCILIATION,
+                    category=_provider_failure_category(reconciliation_error),
+                    mutation_certainty=(
+                        CloudflareProviderMutationCertainty.UNCERTAIN
+                    ),
+                    tunnel_id=tunnel_id,
+                    cleanup_result=CloudflareProviderCleanupResult.WITHHELD,
                 ) from None
+            if reconciliation.state in {
+                _CloudflareHostnameState.ABSENT,
+                _CloudflareHostnameState.OCCUPIED,
+            }:
+                cleanup_result = _delete_known_tunnel(client, tunnel_id)
+            else:
+                cleanup_result = CloudflareProviderCleanupResult.WITHHELD
+            if not _is_provider_operation_failure(dns_create_error):
+                if cleanup_result is CloudflareProviderCleanupResult.UNCERTAIN:
+                    raise CloudflareApiError(
+                        "Cloudflare exact cleanup is uncertain: tunnel"
+                    ) from None
+                raise dns_create_error
+            raise _provider_operation_error(
+                str(dns_create_error),
+                stage=CloudflareProviderFailureStage.DNS_CREATE,
+                category=_provider_failure_category(dns_create_error),
+                mutation_certainty=CloudflareProviderMutationCertainty.UNCERTAIN,
+                tunnel_id=tunnel_id,
+                dns_record_id=reconciliation.dns_record_id,
+                cleanup_result=cleanup_result,
+            ) from None
+
+        try:
+            tunnel_token = client.get_tunnel_token(tunnel_id)
+        except Exception as error:
+            cleanup_result, failed_stages = _cleanup_created_ingress(
+                client,
+                tunnel_id=tunnel_id,
+                dns_record_id=dns_record_id,
+            )
+            if not _is_provider_operation_failure(error):
+                if failed_stages:
+                    raise CloudflareApiError(
+                        "Cloudflare exact cleanup is uncertain: "
+                        + ",".join(failed_stages)
+                    ) from None
+                raise
+            if failed_stages:
+                message = (
+                    "Cloudflare exact cleanup is uncertain: "
+                    + ",".join(failed_stages)
+                )
+                stage = CloudflareProviderFailureStage.CLEANUP
+                category = CloudflareProviderFailureCategory.CLEANUP
+            else:
+                message = str(error)
+                stage = CloudflareProviderFailureStage.TUNNEL_TOKEN
+                category = _provider_failure_category(error)
+            raise _provider_operation_error(
+                message,
+                stage=stage,
+                category=category,
+                mutation_certainty=(
+                    CloudflareProviderMutationCertainty.DNS_AND_TUNNEL_CREATED
+                    if not failed_stages
+                    else CloudflareProviderMutationCertainty.UNCERTAIN
+                ),
+                tunnel_id=tunnel_id,
+                dns_record_id=dns_record_id,
+                cleanup_result=cleanup_result,
+            ) from None
+
+        custody_write_attempted = True
+        try:
+            custody_receipt = self.secret_custodian.store(
+                secret_custody_grant,
+                tunnel_token,
+            )
             if not custody_receipt.matches(secret_custody_grant):
                 raise CloudflareApiError(
                     "secret custodian returned mismatched receipt"
                 )
-        except Exception as error:
-            cleanup: list[tuple[str, Callable[[], None]]] = []
-            if custody_write_attempted:
-                cleanup.append(
-                    (
-                        "custody",
-                        lambda: self.secret_custodian.revoke(secret_custody_grant),
-                    )
+        except Exception:
+            cleanup_result, failed_stages = _cleanup_created_ingress(
+                client,
+                tunnel_id=tunnel_id,
+                dns_record_id=dns_record_id,
+                custody=(
+                    "custody",
+                    lambda: self.secret_custodian.revoke(secret_custody_grant),
                 )
-            if dns_record_id is not None:
-                cleanup.append(
-                    ("dns", lambda: client.delete_dns_record(dns_record_id))
-                )
-            if tunnel_id is not None:
-                cleanup.append(
-                    ("tunnel", lambda: client.delete_tunnel(tunnel_id))
-                )
-            failed_stages = _attempt_exact_cleanup(cleanup)
+                if custody_write_attempted
+                else None,
+            )
+            message = "Cloudflare generated secret custody failed"
+            stage = CloudflareProviderFailureStage.SECRET_CUSTODY
+            category = CloudflareProviderFailureCategory.SECRET_CUSTODY
+            certainty = (
+                CloudflareProviderMutationCertainty.DNS_AND_TUNNEL_CREATED
+            )
             if failed_stages:
-                raise CloudflareApiError(
+                message = (
                     "Cloudflare exact cleanup is uncertain: "
                     + ",".join(failed_stages)
-                ) from error
-            raise
-        assert tunnel_id is not None
-        assert dns_record_id is not None
-        assert custody_receipt is not None
+                )
+                stage = CloudflareProviderFailureStage.CLEANUP
+                category = CloudflareProviderFailureCategory.CLEANUP
+                certainty = CloudflareProviderMutationCertainty.UNCERTAIN
+            raise _provider_operation_error(
+                message,
+                stage=stage,
+                category=category,
+                mutation_certainty=certainty,
+                tunnel_id=tunnel_id,
+                dns_record_id=dns_record_id,
+                cleanup_result=cleanup_result,
+            ) from None
+
         return CloudflareIngressAllocation(
             tunnel_id=tunnel_id,
             tunnel_name=tunnel_name,
@@ -658,6 +934,150 @@ class CloudflareNamedIngressInterpreter:
         )
 
 
+def _observe_exact_hostname(
+    client: "CloudflareApiClient",
+    hostname: str,
+    *,
+    tunnel_id: str | None = None,
+) -> _CloudflareHostnameObservation:
+    records = client.list_dns_records_for_hostname(hostname)
+    if not records:
+        return _CloudflareHostnameObservation(_CloudflareHostnameState.ABSENT)
+    if len(records) != 1:
+        return _CloudflareHostnameObservation(_CloudflareHostnameState.DUPLICATE)
+    record = records[0]
+    if not isinstance(record, Mapping):
+        return _CloudflareHostnameObservation(_CloudflareHostnameState.MALFORMED)
+    try:
+        record_id = _mapping_text(record, "id")
+        _validate_identifier(record_id, "dns_record_id")
+        record_type = _mapping_text(record, "type")
+        record_name = _mapping_text(record, "name")
+        content = _mapping_text(record, "content")
+    except CloudflareApiError:
+        return _CloudflareHostnameObservation(_CloudflareHostnameState.MALFORMED)
+    if record_name.lower() != hostname.lower():
+        return _CloudflareHostnameObservation(_CloudflareHostnameState.MALFORMED)
+    if (
+        tunnel_id is not None
+        and record_type == "CNAME"
+        and content == _tunnel_target(tunnel_id)
+    ):
+        return _CloudflareHostnameObservation(
+            _CloudflareHostnameState.TARGETS_TUNNEL,
+            dns_record_id=record_id,
+        )
+    return _CloudflareHostnameObservation(
+        _CloudflareHostnameState.OCCUPIED,
+        dns_record_id=record_id,
+    )
+
+
+def _provider_failure_category(
+    error: Exception,
+) -> CloudflareProviderFailureCategory:
+    if isinstance(
+        error,
+        (_CloudflareMalformedResponse, PublicIngressContractError),
+    ):
+        return CloudflareProviderFailureCategory.MALFORMED_RESPONSE
+    if isinstance(error, CloudflareApiTransportError):
+        return CloudflareProviderFailureCategory.TRANSPORT
+    return CloudflareProviderFailureCategory.PROVIDER_STATUS
+
+
+def _is_provider_operation_failure(error: Exception) -> bool:
+    return isinstance(
+        error,
+        (CloudflareApiError, PublicIngressContractError),
+    )
+
+
+def _provider_operation_error(
+    message: str,
+    *,
+    stage: CloudflareProviderFailureStage,
+    category: CloudflareProviderFailureCategory,
+    mutation_certainty: CloudflareProviderMutationCertainty,
+    tunnel_id: str | None = None,
+    dns_record_id: str | None = None,
+    cleanup_result: CloudflareProviderCleanupResult,
+) -> CloudflareProviderOperationError:
+    return CloudflareProviderOperationError(
+        message,
+        CloudflareProviderFailureEvidence(
+            stage=stage,
+            category=category,
+            mutation_certainty=mutation_certainty,
+            tunnel_id=tunnel_id,
+            dns_record_id=dns_record_id,
+            cleanup_result=cleanup_result,
+        ),
+    )
+
+
+def _hostname_observation_error(
+    observation: _CloudflareHostnameObservation,
+    *,
+    stage: CloudflareProviderFailureStage,
+    tunnel_id: str | None,
+    mutation_certainty: CloudflareProviderMutationCertainty,
+    cleanup_result: CloudflareProviderCleanupResult,
+) -> CloudflareProviderOperationError:
+    if observation.state is _CloudflareHostnameState.OCCUPIED:
+        category = CloudflareProviderFailureCategory.HOSTNAME_OCCUPIED
+        message = "Cloudflare DNS hostname is already allocated"
+    elif observation.state is _CloudflareHostnameState.MALFORMED:
+        category = CloudflareProviderFailureCategory.MALFORMED_RESPONSE
+        message = "Cloudflare DNS observation is malformed"
+    else:
+        category = CloudflareProviderFailureCategory.DNS_CONFLICT
+        message = "Cloudflare DNS hostname observation is conflicting"
+    return _provider_operation_error(
+        message,
+        stage=stage,
+        category=category,
+        mutation_certainty=mutation_certainty,
+        tunnel_id=tunnel_id,
+        dns_record_id=observation.dns_record_id,
+        cleanup_result=cleanup_result,
+    )
+
+
+def _delete_known_tunnel(
+    client: "CloudflareApiClient",
+    tunnel_id: str,
+) -> CloudflareProviderCleanupResult:
+    failed = _attempt_exact_cleanup(
+        (("tunnel", lambda: client.delete_tunnel(tunnel_id)),)
+    )
+    if failed:
+        return CloudflareProviderCleanupResult.UNCERTAIN
+    return CloudflareProviderCleanupResult.COMPLETE
+
+
+def _cleanup_created_ingress(
+    client: "CloudflareApiClient",
+    *,
+    tunnel_id: str,
+    dns_record_id: str,
+    custody: tuple[str, Callable[[], None]] | None = None,
+) -> tuple[CloudflareProviderCleanupResult, tuple[str, ...]]:
+    cleanup: list[tuple[str, Callable[[], None]]] = []
+    if custody is not None:
+        cleanup.append(custody)
+    cleanup.extend(
+        (
+            ("dns", lambda: client.delete_dns_record(dns_record_id)),
+            ("tunnel", lambda: client.delete_tunnel(tunnel_id)),
+        )
+    )
+    failed = _attempt_exact_cleanup(cleanup)
+    if failed:
+        return CloudflareProviderCleanupResult.UNCERTAIN, failed
+    return CloudflareProviderCleanupResult.COMPLETE, ()
+
+
 def _attempt_exact_cleanup(
     stages: tuple[tuple[str, Callable[[], None]], ...]
     | list[tuple[str, Callable[[], None]]],
@@ -721,7 +1141,12 @@ class CloudflareApiClient:
             f"/accounts/{self.authority.account_id}/cfd_tunnel",
             json={"name": name, "config_src": "cloudflare"},
         )
-        return _result_text(result, "id")
+        try:
+            return _result_text(result, "id")
+        except CloudflareApiError:
+            raise _CloudflareMalformedResponse(
+                "Cloudflare tunnel allocation response malformed"
+            ) from None
 
     def configure_tunnel(
         self,
@@ -753,24 +1178,51 @@ class CloudflareApiClient:
     def create_dns_cname(self, *, hostname: str, tunnel_id: str) -> str:
         _validate_hostname(hostname)
         _validate_identifier(tunnel_id, "tunnel_id")
-        content = f"{tunnel_id}.cfargotunnel.com"
-        records = self._request(
-            "GET",
-            f"/zones/{self.authority.zone_id}/dns_records",
-            params={"type": "CNAME", "name": hostname},
-        ).get("result")
-        if not isinstance(records, list):
-            raise CloudflareApiError("Cloudflare DNS lookup response malformed")
+        records = self.list_dns_records_for_hostname(hostname)
         if records:
             raise CloudflareApiError(
                 "Cloudflare DNS hostname is already allocated"
             )
+        return self._create_dns_cname_unchecked(
+            hostname=hostname,
+            tunnel_id=tunnel_id,
+        )
+
+    def list_dns_records_for_hostname(
+        self,
+        hostname: str,
+    ) -> list[object]:
+        _validate_hostname(hostname)
+        records = self._request(
+            "GET",
+            f"/zones/{self.authority.zone_id}/dns_records",
+            params={"name": hostname},
+        ).get("result")
+        if not isinstance(records, list):
+            raise _CloudflareMalformedResponse(
+                "Cloudflare DNS lookup response malformed"
+            )
+        return records
+
+    def _create_dns_cname_unchecked(
+        self,
+        *,
+        hostname: str,
+        tunnel_id: str,
+    ) -> str:
+        _validate_hostname(hostname)
+        _validate_identifier(tunnel_id, "tunnel_id")
         created = self._request(
             "POST",
             f"/zones/{self.authority.zone_id}/dns_records",
-            json=_dns_record_body(hostname, content),
+            json=_dns_record_body(hostname, _tunnel_target(tunnel_id)),
         )
-        return _result_text(created, "id")
+        try:
+            return _result_text(created, "id")
+        except CloudflareApiError:
+            raise _CloudflareMalformedResponse(
+                "Cloudflare DNS create response malformed"
+            ) from None
 
     def get_dns_record(self, record_id: str) -> Mapping[str, object]:
         _validate_identifier(record_id, "dns_record_id")
@@ -806,7 +1258,9 @@ class CloudflareApiClient:
         )
         token = result.get("result")
         if not isinstance(token, str) or not token.strip():
-            raise CloudflareApiError("Cloudflare tunnel token response malformed")
+            raise _CloudflareMalformedResponse(
+                "Cloudflare tunnel token response malformed"
+            )
         return SecretValue(token)
 
     def get_tunnel(self, tunnel_id: str) -> Mapping[str, object]:
