@@ -288,6 +288,29 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                 setattr(client, resource, replace(inspection, name="foreign"))
                 self.assertEqual(self.observe(request, client), "conflict")
 
+    def test_container_ownership_ignores_only_non_cpk_image_metadata(self):
+        request = _hello_request()
+        client = _ReadClient(request)
+        client.container = replace(
+            client.container,
+            labels={
+                **client.container.labels,
+                "CI_BUILD_DATE": "2026-06-18 14:45:41.322332",
+                "org.opencontainers.image.source": "https://github.com/cloudflare/cloudflared",
+                "org.openj92.cpkx.near-prefix": "foreign",
+            },
+        )
+        self.assertEqual(self.observe(request, client), "succeeded")
+
+        client.container = replace(
+            client.container,
+            labels={
+                **client.container.labels,
+                "org.openj92.cpk.unexpected": "foreign",
+            },
+        )
+        self.assertEqual(self.observe(request, client), "conflict")
+
     def test_changed_material_or_graph_cannot_reuse_prior_success(self):
         request = _hello_request()
         for changed in (
