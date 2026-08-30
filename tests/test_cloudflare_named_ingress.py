@@ -598,33 +598,144 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                     cleanup_result=cleanup_result,
                 )
 
-    def test_ambiguous_dns_create_reconciles_once_before_exact_cleanup(
-        self,
-    ) -> None:
+    def test_ambiguous_dns_create_adopts_one_complete_exact_record(self) -> None:
+        reconciled_record = _dns_cname("dns-race", "tunnel-001")
+        reconciled_record.update(
+            {
+                "comment": RAW_PROVIDER_BODY,
+                "meta": {"token": API_TOKEN, "endpoint": RAW_PROVIDER_URL},
+            }
+        )
+        transport = FakeCloudflareTransport(
+            dns_lookup_pages=[
+                _dns_page([]),
+                _dns_page([]),
+                _dns_page(
+                    [reconciled_record],
+                    total_count=47,
+                    total_pages=24,
+                ),
+            ],
+            raise_stages={"dns-create"},
+        )
+        custodian = RecordingSecretCustodian()
+        interpreter = CloudflareNamedIngressInterpreter(
+            transport=transport,
+            authorized_secret_resolver=_authorized_resolver(),
+            secret_custodian=custodian,
+        )
+
+        allocation = None
+        failure = None
+        try:
+            allocation = interpreter.create(
+                _ingress(),
+                authority=_authority(),
+                allocation_name="cpk-gateway-001-c0303ba7369e",
+                origin_service_url="http://gateway:8000",
+                secret_resolution_grant=_resolution_grant(),
+                secret_custody_grant=_custody_grant(),
+            )
+        except CloudflareApiError as error:
+            failure = error
+
+        self.assertIsNotNone(
+            allocation,
+            f"one exact reconciled record was not admitted: {failure!r}",
+        )
+        assert allocation is not None
+        self.assertEqual(allocation.tunnel_id, "tunnel-001")
+        self.assertEqual(allocation.dns_record_id, "dns-race")
+        self.assertTrue(allocation.secret_custody_receipt.matches(_custody_grant()))
+        self.assertEqual(custodian.stored_references, [_custody_grant().reference])
+        self.assertEqual(
+            [request.stage for request in transport.requests],
+            [
+                "dns-pre-observation",
+                "tunnel-allocation",
+                "tunnel-configuration",
+                "dns-pre-mutation-observation",
+                "dns-create",
+                "dns-reconciliation",
+                "tunnel-token",
+            ],
+        )
+        self.assertEqual(
+            [
+                request
+                for request in transport.requests
+                if request.method == "POST"
+                and request.path == "/zones/zone-001/dns_records"
+            ],
+            [transport.requests[4]],
+        )
+        self.assertEqual(
+            [
+                request.params
+                for request in transport.requests
+                if request.stage == "dns-reconciliation"
+            ],
+            [
+                {
+                    "name": "cpk-gateway-001.openj92.dev",
+                    "page": "1",
+                    "per_page": "2",
+                }
+            ],
+        )
+        for forbidden in (API_TOKEN, RAW_PROVIDER_BODY, RAW_PROVIDER_URL):
+            self.assertNotIn(forbidden, repr(allocation))
+
+        interpreter.teardown(
+            authority=_authority(),
+            resources=CloudflareOwnedIngressResources(
+                tunnel_id=allocation.tunnel_id,
+                tunnel_name=allocation.tunnel_name,
+                dns_record_id=allocation.dns_record_id,
+                hostname=allocation.hostname,
+            ),
+            secret_resolution_grant=_resolution_grant(),
+            secret_custody_grant=_custody_grant(),
+        )
+
+        self.assertEqual(
+            [
+                request.path
+                for request in transport.requests
+                if request.method == "DELETE"
+            ],
+            [
+                "/zones/zone-001/dns_records/dns-race",
+                "/accounts/account-001/cfd_tunnel/tunnel-001/connections",
+                "/accounts/account-001/cfd_tunnel/tunnel-001",
+            ],
+        )
+
+    def test_ambiguous_dns_create_cleanup_uses_only_closed_truth(self) -> None:
         cases = (
             (
                 "absent",
                 [],
                 ["tunnel-delete"],
-                "uncertain",
                 None,
                 "complete",
+                False,
             ),
             (
                 "foreign-target",
                 [_dns_cname("dns-race", "foreign-tunnel")],
                 ["tunnel-delete"],
-                "uncertain",
                 "dns-race",
                 "complete",
+                False,
             ),
             (
-                "new-tunnel-target",
-                [_dns_cname("dns-race", "tunnel-001")],
-                [],
-                "uncertain",
+                "foreign-content",
+                [_dns_record("dns-race", "CNAME", "elsewhere.example")],
+                ["tunnel-delete"],
                 "dns-race",
-                "withheld",
+                "complete",
+                False,
             ),
             (
                 "duplicate-records",
@@ -633,39 +744,194 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                     _dns_cname("dns-race-b", "tunnel-001"),
                 ],
                 [],
-                "uncertain",
                 None,
                 "withheld",
+                False,
+            ),
+            (
+                "duplicate-all-foreign-records",
+                [
+                    _dns_cname("dns-race-a", "foreign-tunnel-a"),
+                    _dns_cname("dns-race-b", "foreign-tunnel-b"),
+                ],
+                [],
+                None,
+                "withheld",
+                False,
             ),
             (
                 "malformed-record",
-                [{"id": "dns-race"}],
+                [
+                    {
+                        "id": "dns-race",
+                        "token": API_TOKEN,
+                        "endpoint": RAW_PROVIDER_URL,
+                    }
+                ],
                 [],
-                "uncertain",
                 None,
                 "withheld",
+                False,
+            ),
+            (
+                "missing-id-may-target-fresh-tunnel",
+                [
+                    {
+                        **_dns_cname("dns-race", "tunnel-001"),
+                        "id": None,
+                    }
+                ],
+                [],
+                None,
+                "withheld",
+                False,
+            ),
+            (
+                "empty-id-may-target-fresh-tunnel",
+                [
+                    {
+                        **_dns_cname("dns-race", "tunnel-001"),
+                        "id": "",
+                    }
+                ],
+                [],
+                None,
+                "withheld",
+                False,
+            ),
+            (
+                "non-string-id-may-target-fresh-tunnel",
+                [
+                    {
+                        **_dns_cname("dns-race", "tunnel-001"),
+                        "id": 7,
+                    }
+                ],
+                [],
+                None,
+                "withheld",
+                False,
+            ),
+            (
+                "overlong-id-may-target-fresh-tunnel",
+                [
+                    {
+                        **_dns_cname("dns-race", "tunnel-001"),
+                        "id": "a" * 129,
+                    }
+                ],
+                [],
+                None,
+                "withheld",
+                False,
+            ),
+            (
+                "invalid-id-may-target-fresh-tunnel",
+                [
+                    {
+                        **_dns_cname("dns-race", "tunnel-001"),
+                        "id": "dns/race",
+                    }
+                ],
+                [],
+                None,
+                "withheld",
+                False,
+            ),
+            (
+                "wrong-name-may-target-fresh-tunnel",
+                [
+                    {
+                        **_dns_cname("dns-race", "tunnel-001"),
+                        "name": "other.openj92.dev",
+                    }
+                ],
+                [],
+                None,
+                "withheld",
+                False,
+            ),
+            (
+                "wrong-type-may-target-fresh-tunnel",
+                [
+                    _dns_record(
+                        "dns-race",
+                        "A",
+                        "tunnel-001.cfargotunnel.com",
+                    )
+                ],
+                [],
+                "dns-race",
+                "withheld",
+                False,
+            ),
+            (
+                "wrong-proxy-may-target-fresh-tunnel",
+                [
+                    {
+                        **_dns_cname("dns-race", "tunnel-001"),
+                        "proxied": False,
+                    }
+                ],
+                [],
+                "dns-race",
+                "withheld",
+                False,
+            ),
+            (
+                "missing-proxy-may-target-fresh-tunnel",
+                [
+                    {
+                        key: value
+                        for key, value in _dns_cname(
+                            "dns-race",
+                            "tunnel-001",
+                        ).items()
+                        if key != "proxied"
+                    }
+                ],
+                [],
+                "dns-race",
+                "withheld",
+                False,
+            ),
+            (
+                "non-bool-proxy-may-target-fresh-tunnel",
+                [
+                    {
+                        **_dns_cname("dns-race", "tunnel-001"),
+                        "proxied": 1,
+                    }
+                ],
+                [],
+                "dns-race",
+                "withheld",
+                False,
             ),
             (
                 "provider-status-absent",
                 [],
                 ["tunnel-delete"],
-                "uncertain",
                 None,
                 "complete",
+                True,
             ),
         )
         for (
             case,
             reconciled_rows,
             expected_cleanup,
-            mutation_certainty,
             dns_record_id,
             cleanup_result,
+            provider_status,
         ) in cases:
             with self.subTest(case=case):
-                provider_status = case == "provider-status-absent"
                 transport = FakeCloudflareTransport(
-                    dns_lookup_results=[[], [], reconciled_rows],
+                    dns_lookup_pages=[
+                        _dns_page([]),
+                        _dns_page([]),
+                        _dns_page(reconciled_rows),
+                    ],
                     fault_stages={"dns-create"} if provider_status else None,
                     raise_stages=None if provider_status else {"dns-create"},
                 )
@@ -697,23 +963,153 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                         *expected_cleanup,
                     ],
                 )
-                self.assertEqual(
-                    [
-                        request.params
-                        for request in transport.requests
-                        if request.stage == "dns-reconciliation"
-                    ],
-                    [{"name": "cpk-gateway-001.openj92.dev"}],
+                self.assertFalse(
+                    any(request.stage == "dns-delete" for request in transport.requests)
                 )
                 _assert_failure_evidence(
                     self,
                     raised.exception,
                     stage="dns-create",
                     category="provider-status" if provider_status else "transport",
-                    mutation_certainty=mutation_certainty,
+                    mutation_certainty="uncertain",
                     tunnel_id="tunnel-001",
                     dns_record_id=dns_record_id,
                     cleanup_result=cleanup_result,
+                )
+
+    def test_ambiguous_dns_create_requires_one_complete_first_page(self) -> None:
+        exact_record = _dns_cname("dns-race", "tunnel-001")
+        cases = (
+            (
+                "missing-result-info",
+                _hostile_dns_envelope(
+                    {"success": True, "result": [exact_record]}
+                ),
+                "dns-race",
+            ),
+            (
+                "missing-page",
+                _hostile_dns_envelope(
+                    _dns_page_without_result_info_field([exact_record], "page")
+                ),
+                "dns-race",
+            ),
+            (
+                "missing-page-size",
+                _hostile_dns_envelope(
+                    _dns_page_without_result_info_field(
+                        [exact_record],
+                        "per_page",
+                    )
+                ),
+                "dns-race",
+            ),
+            (
+                "missing-count",
+                _hostile_dns_envelope(
+                    _dns_page_without_result_info_field([exact_record], "count")
+                ),
+                "dns-race",
+            ),
+            (
+                "not-first-page",
+                _hostile_dns_envelope(_dns_page([exact_record], page=2)),
+                "dns-race",
+            ),
+            (
+                "wrong-page-size",
+                _hostile_dns_envelope(_dns_page([exact_record], per_page=3)),
+                "dns-race",
+            ),
+            (
+                "non-integer-page-size",
+                _hostile_dns_envelope(_dns_page([exact_record], per_page=2.0)),
+                "dns-race",
+            ),
+            (
+                "count-mismatch",
+                _hostile_dns_envelope(_dns_page([exact_record], count=0)),
+                "dns-race",
+            ),
+            (
+                "bool-page-field",
+                _hostile_dns_envelope(_dns_page([exact_record], page=True)),
+                "dns-race",
+            ),
+            (
+                "bool-count-field",
+                _hostile_dns_envelope(_dns_page([exact_record], count=True)),
+                "dns-race",
+            ),
+            (
+                "malformed-count-field",
+                _hostile_dns_envelope(_dns_page([exact_record], count="1")),
+                "dns-race",
+            ),
+            (
+                "malformed-result-info",
+                _hostile_dns_envelope(
+                    {
+                        "success": True,
+                        "result": [exact_record],
+                        "result_info": [RAW_PROVIDER_BODY],
+                    }
+                ),
+                "dns-race",
+            ),
+            (
+                "more-than-two-records",
+                _hostile_dns_envelope(
+                    _dns_page(
+                        [
+                            exact_record,
+                            _dns_cname("dns-race-b", "foreign-tunnel"),
+                            _dns_cname("dns-race-c", "foreign-tunnel"),
+                        ]
+                    )
+                ),
+                None,
+            ),
+        )
+        for case, reconciliation_page, expected_dns_record_id in cases:
+            with self.subTest(case=case):
+                transport = FakeCloudflareTransport(
+                    dns_lookup_pages=[
+                        _dns_page([]),
+                        _dns_page([]),
+                        reconciliation_page,
+                    ],
+                    raise_stages={"dns-create"},
+                )
+                interpreter = CloudflareNamedIngressInterpreter(
+                    transport=transport,
+                    authorized_secret_resolver=_authorized_resolver(),
+                    secret_custodian=RecordingSecretCustodian(),
+                )
+
+                with self.assertRaises(CloudflareApiError) as raised:
+                    interpreter.create(
+                        _ingress(),
+                        authority=_authority(),
+                        allocation_name="cpk-gateway-001-c0303ba7369e",
+                        origin_service_url="http://gateway:8000",
+                        secret_resolution_grant=_resolution_grant(),
+                        secret_custody_grant=_custody_grant(),
+                    )
+
+                stages = [request.stage for request in transport.requests]
+                self.assertEqual(stages.count("dns-create"), 1)
+                self.assertEqual(stages.count("dns-reconciliation"), 1)
+                self.assertFalse(any(stage.endswith("delete") for stage in stages))
+                _assert_failure_evidence(
+                    self,
+                    raised.exception,
+                    stage="dns-create",
+                    category="transport",
+                    mutation_certainty="uncertain",
+                    tunnel_id="tunnel-001",
+                    dns_record_id=expected_dns_record_id,
+                    cleanup_result="withheld",
                 )
 
     def test_unexpected_dns_create_response_reconciles_once_and_preserves_identity(
@@ -737,7 +1133,11 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
                     f"{RAW_PROVIDER_EXCEPTION}-{case}"
                 )
                 transport = FakeCloudflareTransport(
-                    dns_lookup_results=[[], [], reconciled_rows],
+                    dns_lookup_pages=[
+                        _dns_page([]),
+                        _dns_page([]),
+                        _dns_page(reconciled_rows),
+                    ],
                     response_get_errors={"dns-create": sentinel},
                 )
                 interpreter = CloudflareNamedIngressInterpreter(
@@ -778,7 +1178,7 @@ class CloudflareNamedIngressInterpreterTests(unittest.TestCase):
     def test_unexpected_dns_create_cleanup_failure_keeps_precedence(self) -> None:
         sentinel = SentinelProviderException(RAW_PROVIDER_EXCEPTION)
         transport = FakeCloudflareTransport(
-            dns_lookup_results=[[], [], []],
+            dns_lookup_pages=[_dns_page([]), _dns_page([]), _dns_page([])],
             response_get_errors={"dns-create": sentinel},
             fault_stages={"tunnel-delete"},
         )
@@ -1539,9 +1939,12 @@ class FakeCloudflareTransport:
         raise_stages: set[str] | None = None,
         malformed_result_stages: set[str] | None = None,
         dns_lookup_results: list[list[object]] | None = None,
+        dns_lookup_pages: list[Mapping[str, object]] | None = None,
         missing_tunnel_id: bool = False,
         response_get_errors: Mapping[str, BaseException] | None = None,
     ) -> None:
+        if dns_lookup_results is not None and dns_lookup_pages is not None:
+            raise ValueError("DNS lookup results and pages are mutually exclusive")
         self.requests: list[RecordedRequest] = []
         self.existing_dns_record_id = existing_dns_record_id
         self.status_code = status_code
@@ -1556,6 +1959,11 @@ class FakeCloudflareTransport:
             None
             if dns_lookup_results is None
             else [list(result) for result in dns_lookup_results]
+        )
+        self.dns_lookup_pages = (
+            None
+            if dns_lookup_pages is None
+            else [dict(page) for page in dns_lookup_pages]
         )
         self.missing_tunnel_id = missing_tunnel_id
         self.response_get_errors = (
@@ -1617,6 +2025,13 @@ class FakeCloudflareTransport:
                 },
             )
         if method == "GET" and path == "/zones/zone-001/dns_records":
+            if self.dns_lookup_pages is not None:
+                body = (
+                    self.dns_lookup_pages.pop(0)
+                    if self.dns_lookup_pages
+                    else _dns_page([])
+                )
+                return CloudflareHttpResponse(200, body)
             if self.dns_lookup_results is not None:
                 result = (
                     self.dns_lookup_results.pop(0)
@@ -1717,6 +2132,56 @@ def _dns_record(
         "content": content,
         "proxied": True,
     }
+
+
+def _dns_page(
+    records: list[object],
+    *,
+    page: object = 1,
+    per_page: object = 2,
+    count: object | None = None,
+    total_count: object | None = None,
+    total_pages: object = 1,
+) -> dict[str, object]:
+    return {
+        "success": True,
+        "result": list(records),
+        "result_info": {
+            "page": page,
+            "per_page": per_page,
+            "count": len(records) if count is None else count,
+            "total_count": len(records) if total_count is None else total_count,
+            "total_pages": total_pages,
+        },
+    }
+
+
+def _hostile_dns_envelope(body: Mapping[str, object]) -> dict[str, object]:
+    hostile = dict(body)
+    hostile["token"] = API_TOKEN
+    hostile["endpoint"] = RAW_PROVIDER_URL
+    hostile["errors"] = [
+        RAW_PROVIDER_BODY,
+        RAW_PROVIDER_EXCEPTION,
+        RAW_PROVIDER_STATUS,
+    ]
+    result_info = hostile.get("result_info")
+    if isinstance(result_info, Mapping):
+        result_info = dict(result_info)
+        result_info["credential"] = TUNNEL_TOKEN
+        hostile["result_info"] = result_info
+    return hostile
+
+
+def _dns_page_without_result_info_field(
+    records: list[object],
+    field_name: str,
+) -> dict[str, object]:
+    page = _dns_page(records)
+    result_info = page["result_info"]
+    assert isinstance(result_info, dict)
+    result_info.pop(field_name)
+    return page
 
 
 def _assert_failure_evidence(
