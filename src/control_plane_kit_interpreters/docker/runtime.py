@@ -1440,7 +1440,7 @@ def _require_start_node_container(
     network_name: str,
     require_running: bool,
 ) -> None:
-    if dict(inspection.labels) != dict(labels):
+    if _cpk_ownership_labels(inspection.labels) != _cpk_ownership_labels(labels):
         raise _DockerInterpreterPreconditionError(
             "docker.container-ownership-conflict",
             "Docker container is not owned by this runtime effect",
@@ -1460,6 +1460,13 @@ def _require_start_node_container(
             "docker.container-not-running",
             "Docker container is not running",
         )
+
+
+def _cpk_ownership_labels(labels: Mapping[str, str]) -> dict[str, str]:
+    label_prefix = f"{_LABEL_PREFIX}."
+    return {
+        key: value for key, value in labels.items() if key.startswith(label_prefix)
+    }
 
 
 def _fingerprint_matches(

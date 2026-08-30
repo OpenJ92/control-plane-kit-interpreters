@@ -27,7 +27,7 @@ from control_plane_kit_core.secrets import SecretReference, SecretValue
 from control_plane_kit_core.types import RuntimeKind
 
 from control_plane_kit_interpreters.docker import DockerRuntimeInterpreter
-from control_plane_kit_interpreters.docker.runtime import _node_labels
+from control_plane_kit_interpreters.docker.runtime import _network_name, _node_labels
 from control_plane_kit_interpreters.docker.sdk import DockerSdkImageInspection
 from control_plane_kit_interpreters.secrets import (
     ImagePullCredentialMissing,
@@ -580,6 +580,8 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
                 )
 
     def test_success_requires_running_exact_image_on_intended_network(self) -> None:
+        request = _hello_request()
+        expected_labels = _node_labels(request, request.products[0])
         cases = (
             ("not-running", {"final_running": False}, "docker.container-not-running"),
             (
@@ -598,19 +600,51 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
                 "docker.container-network-conflict",
             ),
             (
-                "wrong-labels",
+                "missing-cpk-label",
                 {"final_labels": {"org.openj92.cpk.workspace": "foreign"}},
+                "docker.container-ownership-conflict",
+            ),
+            (
+                "extra-cpk-label",
+                {
+                    "final_labels": {
+                        **expected_labels,
+                        "org.openj92.cpk.unexpected": "foreign",
+                    }
+                },
                 "docker.container-ownership-conflict",
             ),
         )
         for name, kwargs, code in cases:
             with self.subTest(case=name):
                 client = _PhaseClient(**kwargs)
-                result = DockerRuntimeInterpreter(client).execute(_hello_request())
+                result = DockerRuntimeInterpreter(client).execute(request)
 
                 self.assertIs(result.kind, EffectResultKind.FAILED)
                 self.assertEqual(result.failure.code, code)
                 self.assertTrue(client.container_created)
+
+    def test_inherited_image_labels_do_not_change_cpk_ownership(self) -> None:
+        request = _hello_request()
+        labels = {
+            **_node_labels(request, request.products[0]),
+            "CI_BUILD_DATE": "2026-06-18 14:45:41.322332",
+            "org.opencontainers.image.source": "https://github.com/cloudflare/cloudflared",
+        }
+        cases = ("created", "reused")
+        for action in cases:
+            with self.subTest(action=action):
+                client = _PhaseClient(final_labels=labels)
+                if action == "reused":
+                    client.container_created = True
+                    client.container_started = True
+                    client.container_network_name = _network_name(request, "docker")
+                    client.container_labels = labels
+
+                result = DockerRuntimeInterpreter(client).execute(request)
+
+                self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+                self.assertEqual(result.evidence["action"], action)
 
     def test_preexisting_wrong_network_is_definite_and_untouched(self) -> None:
         request = _hello_request()

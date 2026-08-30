@@ -43,6 +43,7 @@ from control_plane_kit_core.secrets import (
 from control_plane_kit_core.types import RuntimeKind
 
 from control_plane_kit_interpreters.docker.runtime import (
+    _cpk_ownership_labels,
     _container_name,
     _network_name,
     _node_labels,
@@ -289,7 +290,12 @@ def _inspect(request: RuntimeEffectRequest, client: DockerSdkClient) -> _Postcon
     container = client.inspect_container(container_name)
     if container is None:
         return _Postcondition.ABSENT
-    ownership = _ownership(container, container_name, _node_labels(request, material))
+    ownership = _ownership(
+        container,
+        container_name,
+        _node_labels(request, material),
+        cpk_labels_only=True,
+    )
     if ownership is not None:
         return ownership
     if operation_type is RemoveNodeResource:
@@ -324,13 +330,20 @@ def _ownership(
     inspection: DockerSdkResourceInspection,
     name: str,
     labels: Mapping[str, str],
+    *,
+    cpk_labels_only: bool = False,
 ) -> _Postcondition | None:
     if (
         not isinstance(inspection, DockerSdkResourceInspection)
         or not isinstance(inspection.labels, Mapping)
     ):
         return _Postcondition.UNESTABLISHED
-    if inspection.name != name or dict(inspection.labels) != dict(labels):
+    observed_labels = dict(inspection.labels)
+    expected_labels = dict(labels)
+    if cpk_labels_only:
+        observed_labels = _cpk_ownership_labels(observed_labels)
+        expected_labels = _cpk_ownership_labels(expected_labels)
+    if inspection.name != name or observed_labels != expected_labels:
         return _Postcondition.CONFLICT
     return None
 
