@@ -481,7 +481,7 @@ class CloudflareNamedIngressInterpreter:
             )
         except Exception as dns_create_error:
             try:
-                reconciliation = _observe_exact_hostname(
+                reconciliation = _observe_reconciled_exact_hostname(
                     client,
                     ingress.hostname,
                     tunnel_id=tunnel_id,
@@ -499,28 +499,41 @@ class CloudflareNamedIngressInterpreter:
                     tunnel_id=tunnel_id,
                     cleanup_result=CloudflareProviderCleanupResult.WITHHELD,
                 ) from None
-            if reconciliation.state in {
-                _CloudflareHostnameState.ABSENT,
-                _CloudflareHostnameState.OCCUPIED,
-            }:
-                cleanup_result = _delete_known_tunnel(client, tunnel_id)
+            if (
+                isinstance(dns_create_error, CloudflareApiTransportError)
+                and reconciliation.state
+                is _CloudflareHostnameState.TARGETS_TUNNEL
+                and reconciliation.dns_record_id is not None
+            ):
+                dns_record_id = reconciliation.dns_record_id
             else:
-                cleanup_result = CloudflareProviderCleanupResult.WITHHELD
-            if not _is_provider_operation_failure(dns_create_error):
-                if cleanup_result is CloudflareProviderCleanupResult.UNCERTAIN:
-                    raise CloudflareApiError(
-                        "Cloudflare exact cleanup is uncertain: tunnel"
-                    ) from None
-                raise dns_create_error
-            raise _provider_operation_error(
-                str(dns_create_error),
-                stage=CloudflareProviderFailureStage.DNS_CREATE,
-                category=_provider_failure_category(dns_create_error),
-                mutation_certainty=CloudflareProviderMutationCertainty.UNCERTAIN,
-                tunnel_id=tunnel_id,
-                dns_record_id=reconciliation.dns_record_id,
-                cleanup_result=cleanup_result,
-            ) from None
+                if reconciliation.state in {
+                    _CloudflareHostnameState.ABSENT,
+                    _CloudflareHostnameState.OCCUPIED,
+                }:
+                    cleanup_result = _delete_known_tunnel(client, tunnel_id)
+                else:
+                    cleanup_result = CloudflareProviderCleanupResult.WITHHELD
+                if not _is_provider_operation_failure(dns_create_error):
+                    if (
+                        cleanup_result
+                        is CloudflareProviderCleanupResult.UNCERTAIN
+                    ):
+                        raise CloudflareApiError(
+                            "Cloudflare exact cleanup is uncertain: tunnel"
+                        ) from None
+                    raise dns_create_error
+                raise _provider_operation_error(
+                    str(dns_create_error),
+                    stage=CloudflareProviderFailureStage.DNS_CREATE,
+                    category=_provider_failure_category(dns_create_error),
+                    mutation_certainty=(
+                        CloudflareProviderMutationCertainty.UNCERTAIN
+                    ),
+                    tunnel_id=tunnel_id,
+                    dns_record_id=reconciliation.dns_record_id,
+                    cleanup_result=cleanup_result,
+                ) from None
 
         try:
             tunnel_token = client.get_tunnel_token(tunnel_id)
@@ -973,6 +986,89 @@ def _observe_exact_hostname(
     )
 
 
+def _observe_reconciled_exact_hostname(
+    client: "CloudflareApiClient",
+    hostname: str,
+    *,
+    tunnel_id: str,
+) -> _CloudflareHostnameObservation:
+    page = client._read_dns_reconciliation_page(hostname)
+    records = page.get("result")
+    if not isinstance(records, list):
+        raise _CloudflareMalformedResponse(
+            "Cloudflare DNS reconciliation response malformed"
+        )
+
+    observation = _classify_reconciled_dns_records(
+        records,
+        hostname=hostname,
+        tunnel_id=tunnel_id,
+    )
+    result_info = page.get("result_info")
+    if not isinstance(result_info, Mapping):
+        return _CloudflareHostnameObservation(
+            _CloudflareHostnameState.MALFORMED,
+            dns_record_id=observation.dns_record_id,
+        )
+    page_number = result_info.get("page")
+    per_page = result_info.get("per_page")
+    count = result_info.get("count")
+    if (
+        page.get("success") is not True
+        or type(page_number) is not int
+        or page_number != 1
+        or type(per_page) is not int
+        or per_page != 2
+        or type(count) is not int
+        or count != len(records)
+        or len(records) > 2
+    ):
+        return _CloudflareHostnameObservation(
+            _CloudflareHostnameState.MALFORMED,
+            dns_record_id=observation.dns_record_id,
+        )
+    return observation
+
+
+def _classify_reconciled_dns_records(
+    records: list[object],
+    *,
+    hostname: str,
+    tunnel_id: str,
+) -> _CloudflareHostnameObservation:
+    if not records:
+        return _CloudflareHostnameObservation(_CloudflareHostnameState.ABSENT)
+    if len(records) != 1:
+        return _CloudflareHostnameObservation(_CloudflareHostnameState.DUPLICATE)
+    record = records[0]
+    if not isinstance(record, Mapping):
+        return _CloudflareHostnameObservation(_CloudflareHostnameState.MALFORMED)
+    try:
+        record_id = _mapping_text(record, "id")
+        _validate_identifier(record_id, "dns_record_id")
+        record_type = _mapping_text(record, "type")
+        record_name = _mapping_text(record, "name")
+        content = _mapping_text(record, "content")
+    except CloudflareApiError:
+        return _CloudflareHostnameObservation(_CloudflareHostnameState.MALFORMED)
+    if record_name != hostname:
+        return _CloudflareHostnameObservation(_CloudflareHostnameState.MALFORMED)
+    if record_type != "CNAME" or record.get("proxied") is not True:
+        return _CloudflareHostnameObservation(
+            _CloudflareHostnameState.MALFORMED,
+            dns_record_id=record_id,
+        )
+    if content == _tunnel_target(tunnel_id):
+        return _CloudflareHostnameObservation(
+            _CloudflareHostnameState.TARGETS_TUNNEL,
+            dns_record_id=record_id,
+        )
+    return _CloudflareHostnameObservation(
+        _CloudflareHostnameState.OCCUPIED,
+        dns_record_id=record_id,
+    )
+
+
 def _provider_failure_category(
     error: Exception,
 ) -> CloudflareProviderFailureCategory:
@@ -1203,6 +1299,17 @@ class CloudflareApiClient:
                 "Cloudflare DNS lookup response malformed"
             )
         return records
+
+    def _read_dns_reconciliation_page(
+        self,
+        hostname: str,
+    ) -> Mapping[str, object]:
+        _validate_hostname(hostname)
+        return self._request(
+            "GET",
+            f"/zones/{self.authority.zone_id}/dns_records",
+            params={"name": hostname, "page": "1", "per_page": "2"},
+        )
 
     def _create_dns_cname_unchecked(
         self,
