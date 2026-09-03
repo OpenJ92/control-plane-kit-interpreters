@@ -1590,8 +1590,8 @@ def _volume_name(
 def _resource_name(kind: str, *parts: str) -> str:
     readable = "-".join(_segment(part) for part in (kind, *parts))
     suffix = _digest(kind, *parts)[:12]
-    value = f"cpk-{readable}-{suffix}".strip("-")
-    return value[:63].rstrip("-.")
+    prefix = f"cpk-{readable}"[: 63 - len(suffix) - 1].rstrip("-.")
+    return f"{prefix}-{suffix}"
 
 
 def _segment(value: str) -> str:
