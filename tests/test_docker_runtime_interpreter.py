@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import socket
 import unittest
@@ -74,7 +75,12 @@ from control_plane_kit_core.secrets import (
     SecretValue,
 )
 from control_plane_kit_core.types import Protocol, RuntimeKind
-from control_plane_kit_core.verification import HttpCheck, VerificationContract
+from control_plane_kit_core.verification import (
+    HttpCheck,
+    HttpVerificationEvidence,
+    VerificationContract,
+    VerificationOutcome,
+)
 from control_plane_kit_core.verification import (
     PostgresPasswordAuthentication,
     PostgresQueryCheck,
@@ -94,7 +100,22 @@ from test_docker_sdk_client import (
     FakeDockerClient,
     FakeDockerModule,
     FakeResource,
+    OVERSIZED_HELPER_RECORD,
+    REJECTED_HELPER_RECORD,
 )
+
+
+@dataclass(frozen=True)
+class RuntimeHttpProbeResult:
+    status_code: int | None
+    response_size: int
+    exit_code: int
+    classification: str
+    body_sha256_matches: bool | None
+
+    @property
+    def timed_out(self) -> bool:
+        return self.classification == "timed-out"
 
 
 class DockerRuntimeInterpreterTests(unittest.TestCase):
@@ -1174,12 +1195,16 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
 
     def test_wait_for_healthy_executes_http_verification_against_runtime_endpoint(self) -> None:
         fake_client = FakeDockerClient()
-        interpreter = DockerRuntimeInterpreter(
-            DockerSdkClient(
-                client=fake_client,
-                docker_module=FakeDockerModule(fake_client),
-            )
+        client = DockerSdkClient(
+            client=fake_client,
+            docker_module=FakeDockerModule(fake_client),
         )
+        calls: list[dict[str, object]] = []
+        client.run_http_probe = (  # type: ignore[method-assign]
+            lambda **kwargs: calls.append(dict(kwargs))
+            or RuntimeHttpProbeResult(200, 3, 0, "completed", None)
+        )
+        interpreter = DockerRuntimeInterpreter(client)
 
         result = interpreter.execute(
             _request(
@@ -1190,13 +1215,20 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
 
         self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
         self.assertEqual(result.evidence["action"], "verified-healthy")
-        helper = fake_client.containers.created[0]
-        self.assertTrue(str(helper["network"]).startswith("cpk-net-workspace-a-docker-"))
-        self.assertIn("http://api:8080/health/ready", helper["command"])
-        self.assertEqual(
-            result.evidence["checks"][0]["outcome"],
-            "passed",
-        )
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(str(calls[0]["network"]).startswith("cpk-net-workspace-a-docker-"))
+        self.assertEqual(calls[0]["url"], "http://api:8080/health/ready")
+        with self.subTest(boundary="typed-completion-is-authoritative"):
+            self.assertEqual(len(result.observations), 1)
+        with self.subTest(boundary="generic-check-duplicate-is-absent"):
+            self.assertNotIn("checks", result.evidence)
+        if result.observations:
+            completion = result.observations[0]
+            self.assertIs(completion.outcome, VerificationOutcome.PASSED)
+            self.assertEqual(
+                completion.evidence,
+                HttpVerificationEvidence(200, 3),
+            )
 
     def test_wait_for_healthy_fails_when_http_verification_fails(self) -> None:
         fake_client = FakeDockerClient()
@@ -1204,7 +1236,9 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
             client=fake_client,
             docker_module=FakeDockerModule(fake_client),
         )
-        client.run_http_probe = lambda **_: DockerSdkHttpProbeResult(503, 9, 0)  # type: ignore[method-assign]
+        client.run_http_probe = (  # type: ignore[method-assign]
+            lambda **_: RuntimeHttpProbeResult(503, 9, 0, "completed", None)
+        )
         interpreter = DockerRuntimeInterpreter(
             client,
         )
@@ -1218,7 +1252,149 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
 
         self.assertIs(result.kind, EffectResultKind.FAILED)
         self.assertEqual(result.failure.code, "docker.health-check-failed")
-        self.assertEqual(result.failure.details["checks"][0]["outcome"], "failed")
+        with self.subTest(boundary="typed-failure-is-authoritative"):
+            self.assertEqual(len(result.observations), 1)
+        with self.subTest(boundary="generic-check-duplicate-is-absent"):
+            self.assertNotIn("checks", result.failure.details)
+        if result.observations:
+            completion = result.observations[0]
+            self.assertIs(completion.outcome, VerificationOutcome.FAILED)
+            self.assertEqual(
+                completion.evidence,
+                HttpVerificationEvidence(503, 9),
+            )
+
+    def test_wait_for_healthy_emits_typed_body_digest_match_and_mismatch(self) -> None:
+        expected_digest = hashlib.sha256(b"hello").hexdigest()
+        cases = (
+            ("match", True, EffectResultKind.SUCCEEDED, VerificationOutcome.PASSED),
+            ("mismatch", False, EffectResultKind.FAILED, VerificationOutcome.FAILED),
+        )
+        for boundary, matches, result_kind, completion_outcome in cases:
+            with self.subTest(boundary=boundary):
+                fake_client = FakeDockerClient()
+                client = DockerSdkClient(
+                    client=fake_client,
+                    docker_module=FakeDockerModule(fake_client),
+                )
+                calls: list[dict[str, object]] = []
+                probe = RuntimeHttpProbeResult(
+                    200,
+                    5,
+                    0,
+                    "completed",
+                    matches,
+                )
+                client.run_http_probe = (  # type: ignore[method-assign]
+                    lambda **kwargs: calls.append(dict(kwargs)) or probe
+                )
+                interpreter = DockerRuntimeInterpreter(client)
+
+                result = interpreter.execute(
+                    _request(
+                        WaitForHealthy(NodeTarget("api")),
+                        products=(
+                            _material(
+                                _product_with_health_check(
+                                    expected_body_sha256=expected_digest,
+                                )
+                            ),
+                        ),
+                    )
+                )
+
+                self.assertEqual(
+                    calls,
+                    [
+                        {
+                            "network": calls[0]["network"],
+                            "url": "http://api:8080/health/ready",
+                            "timeout_seconds": 5.0,
+                            "maximum_response_bytes": 16_384,
+                            "expected_body_sha256": expected_digest,
+                        }
+                    ],
+                )
+                self.assertIs(result.kind, result_kind)
+                self.assertEqual(len(result.observations), 1)
+                if result.kind is EffectResultKind.SUCCEEDED:
+                    self.assertNotIn("checks", result.evidence)
+                else:
+                    self.assertNotIn("checks", result.failure.details)
+                if not result.observations:
+                    continue
+                completion = result.observations[0]
+                self.assertIs(completion.outcome, completion_outcome)
+                self.assertEqual(
+                    completion.evidence,
+                    HttpVerificationEvidence(200, 5, expected_digest, matches),
+                )
+
+    def test_wait_for_healthy_maps_private_probe_failures_without_fabrication(self) -> None:
+        expected_digest = hashlib.sha256(b"hello").hexdigest()
+        cases = (
+            (
+                "redirect",
+                RuntimeHttpProbeResult(
+                    REJECTED_HELPER_RECORD["status_code"],
+                    REJECTED_HELPER_RECORD["response_bytes"],
+                    0,
+                    REJECTED_HELPER_RECORD["category"],
+                    REJECTED_HELPER_RECORD["match"],
+                ),
+                VerificationOutcome.REJECTED,
+            ),
+            (
+                "oversize",
+                RuntimeHttpProbeResult(
+                    OVERSIZED_HELPER_RECORD["status_code"],
+                    OVERSIZED_HELPER_RECORD["response_bytes"],
+                    0,
+                    OVERSIZED_HELPER_RECORD["category"],
+                    OVERSIZED_HELPER_RECORD["match"],
+                ),
+                VerificationOutcome.MALFORMED,
+            ),
+            (
+                "timeout",
+                RuntimeHttpProbeResult(None, 0, 124, "timed-out", None),
+                VerificationOutcome.TIMED_OUT,
+            ),
+            (
+                "unavailable",
+                RuntimeHttpProbeResult(None, 0, 1, "unavailable", None),
+                VerificationOutcome.FAILED,
+            ),
+        )
+        for boundary, probe, expected_outcome in cases:
+            with self.subTest(boundary=boundary):
+                fake_client = FakeDockerClient()
+                client = DockerSdkClient(
+                    client=fake_client,
+                    docker_module=FakeDockerModule(fake_client),
+                )
+                client.run_http_probe = lambda **_: probe  # type: ignore[method-assign]
+                result = DockerRuntimeInterpreter(client).execute(
+                    _request(
+                        WaitForHealthy(NodeTarget("api")),
+                        products=(
+                            _material(
+                                _product_with_health_check(
+                                    expected_body_sha256=expected_digest,
+                                )
+                            ),
+                        ),
+                    )
+                )
+
+                self.assertIs(result.kind, EffectResultKind.FAILED)
+                self.assertEqual(len(result.observations), 1)
+                self.assertNotIn("checks", result.failure.details)
+                if not result.observations:
+                    continue
+                completion = result.observations[0]
+                self.assertIs(completion.outcome, expected_outcome)
+                self.assertIsNone(completion.evidence)
 
     def test_wait_for_healthy_uses_product_verification_cadence(self) -> None:
         fake_client = FakeDockerClient()
@@ -2305,6 +2481,7 @@ def _product() -> ContainerServerProduct:
 def _product_with_health_check(
     *,
     policy: VerificationPolicy | None = None,
+    expected_body_sha256: str | None = None,
 ) -> ContainerServerProduct:
     product = _product()
     return ContainerServerProduct(
@@ -2322,6 +2499,7 @@ def _product_with_health_check(
                         provider_socket="http",
                         path="/health/ready",
                         policy=policy or VerificationPolicy(),
+                        expected_body_sha256=expected_body_sha256,
                     ),
                 ),
             ),

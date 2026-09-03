@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
+import json
 import os
 from io import BytesIO
 from importlib import import_module
@@ -212,10 +213,12 @@ class DockerSdkHttpProbeResult:
     status_code: int | None
     response_size: int
     exit_code: int
+    classification: str = "completed"
+    body_sha256_matches: bool | None = None
 
     @property
     def timed_out(self) -> bool:
-        return self.exit_code == 124
+        return self.classification == "timed-out"
 
 
 @dataclass
@@ -649,30 +652,81 @@ class DockerSdkClient:
         url: str,
         timeout_seconds: float,
         maximum_response_bytes: int,
+        expected_body_sha256: str | None = None,
     ) -> DockerSdkHttpProbeResult:
         if not isinstance(network, str) or not network.strip():
             raise ValueError("HTTP probe network must not be empty")
         if not isinstance(url, str) or not url.startswith(("http://", "https://")):
             raise ValueError("HTTP probe URL must be absolute")
+        if expected_body_sha256 is not None and not _is_canonical_sha256(
+            expected_body_sha256
+        ):
+            raise ValueError("HTTP probe expected body SHA-256 must be canonical")
         timeout = max(1, min(int(timeout_seconds), 30))
         maximum_bytes = max(0, min(int(maximum_response_bytes), 65536))
         script = (
-            "import sys,urllib.request\n"
+            "import hashlib,json,socket,sys,urllib.error,urllib.request\n"
             "url=sys.argv[1]\n"
             "limit=int(sys.argv[2])\n"
             "timeout=float(sys.argv[3])\n"
+            "expected=sys.argv[4] or None\n"
+            "class NoRedirect(urllib.request.HTTPRedirectHandler):\n"
+            "    def redirect_request(self, req, fp, code, msg, headers, newurl):\n"
+            "        return None\n"
+            "def finish(category,status,size,match,code=0):\n"
+            "    print(json.dumps({'category':category,'match':match,'response_bytes':size,'status_code':status},sort_keys=True,separators=(',',':')))\n"
+            "    raise SystemExit(code)\n"
+            "opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())\n"
             "try:\n"
-            "    with urllib.request.urlopen(url, timeout=timeout) as response:\n"
-            "        data=response.read(limit + 1)\n"
-            "        print(f'{response.status} {len(data)}')\n"
-            "except TimeoutError:\n"
-            "    sys.exit(124)\n"
+            "    try:\n"
+            "        response=opener.open(urllib.request.Request(url,method='GET'),timeout=timeout)\n"
+            "    except urllib.error.HTTPError as error:\n"
+            "        if 300 <= error.code < 400:\n"
+            "            finish('response-rejected',error.code,0,None)\n"
+            "        response=error\n"
+            "    with response:\n"
+            "        status=getattr(response,'status',None)\n"
+            "        if type(status) is not int or not 100 <= status <= 599:\n"
+            "            finish('unavailable',None,0,None,1)\n"
+            "        chunks=[]\n"
+            "        remaining=limit + 1\n"
+            "        while remaining:\n"
+            "            chunk=response.read(remaining)\n"
+            "            if not isinstance(chunk,bytes):\n"
+            "                finish('unavailable',None,0,None,1)\n"
+            "            if not chunk:\n"
+            "                break\n"
+            "            if len(chunk) > remaining:\n"
+            "                finish('unavailable',None,0,None,1)\n"
+            "            chunks.append(chunk)\n"
+            "            remaining-=len(chunk)\n"
+            "        data=b''.join(chunks)\n"
+            "        if len(data) > limit:\n"
+            "            finish('response-oversized',status,limit,None)\n"
+            "        match=None if expected is None else hashlib.sha256(data).hexdigest() == expected\n"
+            "        finish('completed',status,len(data),match)\n"
+            "except (TimeoutError,socket.timeout):\n"
+            "    finish('timed-out',None,0,None,124)\n"
+            "except urllib.error.URLError as error:\n"
+            "    if isinstance(error.reason,(TimeoutError,socket.timeout)):\n"
+            "        finish('timed-out',None,0,None,124)\n"
+            "    finish('unavailable',None,0,None,1)\n"
+            "except SystemExit:\n"
+            "    raise\n"
             "except Exception:\n"
-            "    sys.exit(1)\n"
+            "    finish('unavailable',None,0,None,1)\n"
         )
         helper = self._client().containers.create(
             self.configuration_helper_image,
-            command=["python", "-c", script, url, str(maximum_bytes), str(timeout)],
+            command=[
+                "python",
+                "-c",
+                script,
+                url,
+                str(maximum_bytes),
+                str(timeout),
+                "" if expected_body_sha256 is None else expected_body_sha256,
+            ],
             detach=True,
             name=f"cpk-http-probe-{uuid4().hex}",
             network=network,
@@ -684,19 +738,15 @@ class DockerSdkClient:
             helper.start()
             wait_result = helper.wait(timeout=timeout + 2)
             exit_code = _wait_status_code(wait_result)
-            output = _container_logs(helper, maximum_bytes=128).strip()
+            output = _container_logs(helper, maximum_bytes=256).strip()
         finally:
             helper.remove(force=True)
-        status_code = None
-        response_size = 0
-        if exit_code == 0 and output:
-            parts = output.split(maxsplit=1)
-            try:
-                status_code = int(parts[0])
-                response_size = int(parts[1]) if len(parts) > 1 else 0
-            except ValueError:
-                exit_code = 1
-        return DockerSdkHttpProbeResult(status_code, response_size, exit_code)
+        return _http_probe_result(
+            output,
+            exit_code=exit_code,
+            maximum_response_bytes=maximum_bytes,
+            expected_body_sha256=expected_body_sha256,
+        )
 
     def _create_configuration_helper(
         self,
@@ -1034,6 +1084,104 @@ def _wait_status_code(result: Any) -> int:
     raise RuntimeError("Docker wait result was malformed")
 
 
+def _http_probe_result(
+    output: str,
+    *,
+    exit_code: int,
+    maximum_response_bytes: int,
+    expected_body_sha256: str | None,
+) -> DockerSdkHttpProbeResult:
+    unavailable = DockerSdkHttpProbeResult(
+        None,
+        0,
+        1,
+        "unavailable",
+        None,
+    )
+    try:
+        record = json.loads(output)
+    except (TypeError, ValueError):
+        return unavailable
+    if not isinstance(record, Mapping) or set(record) != {
+        "category",
+        "match",
+        "response_bytes",
+        "status_code",
+    }:
+        return unavailable
+
+    category = record["category"]
+    status_code = record["status_code"]
+    response_size = record["response_bytes"]
+    matches = record["match"]
+    if (
+        not isinstance(category, str)
+        or type(response_size) is not int
+        or response_size < 0
+        or response_size > maximum_response_bytes
+    ):
+        return unavailable
+
+    if category == "completed":
+        if (
+            exit_code != 0
+            or type(status_code) is not int
+            or not 100 <= status_code <= 599
+            or (
+                (expected_body_sha256 is None and matches is not None)
+                or (
+                    expected_body_sha256 is not None
+                    and type(matches) is not bool
+                )
+            )
+        ):
+            return unavailable
+    elif category == "response-rejected":
+        if not (
+            exit_code == 0
+            and type(status_code) is int
+            and 300 <= status_code < 400
+            and response_size == 0
+            and matches is None
+        ):
+            return unavailable
+    elif category == "response-oversized":
+        if not (
+            exit_code == 0
+            and type(status_code) is int
+            and 100 <= status_code <= 599
+            and response_size == maximum_response_bytes
+            and matches is None
+        ):
+            return unavailable
+    elif category == "timed-out":
+        if not (
+            exit_code == 124
+            and status_code is None
+            and response_size == 0
+            and matches is None
+        ):
+            return unavailable
+    elif category == "unavailable":
+        if not (
+            exit_code == 1
+            and status_code is None
+            and response_size == 0
+            and matches is None
+        ):
+            return unavailable
+    else:
+        return unavailable
+
+    return DockerSdkHttpProbeResult(
+        status_code,
+        response_size,
+        exit_code,
+        category,
+        matches,
+    )
+
+
 def _container_logs(container: Any, *, maximum_bytes: int) -> str:
     logs = container.logs(stdout=True, stderr=False, tail=1)
     if isinstance(logs, bytes):
@@ -1041,3 +1189,11 @@ def _container_logs(container: Any, *, maximum_bytes: int) -> str:
     if isinstance(logs, str):
         return logs[:maximum_bytes]
     raise RuntimeError("Docker logs result was malformed")
+
+
+def _is_canonical_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
