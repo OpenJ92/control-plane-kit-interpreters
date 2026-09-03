@@ -603,6 +603,7 @@ class DockerRuntimeInterpreter:
             )
         }
         completed: list[dict[str, object]] = []
+        observations: list[VerificationCompleted] = []
         for check in checks:
             endpoint = endpoints.get(check.provider_socket)
             if endpoint is None:
@@ -641,23 +642,31 @@ class DockerRuntimeInterpreter:
                     "docker.health-result-malformed",
                     "health verification returned malformed result",
                 )
-            completed.append(result.descriptor())
+            if isinstance(check, HttpCheck):
+                observations.append(result)
+            else:
+                completed.append(result.descriptor())
             if result.outcome is not VerificationOutcome.PASSED:
+                details = {} if not completed else {"checks": completed}
                 return RuntimeEffectResult.failed(
                     request.effect_id,
                     RuntimeEffectFailure(
                         "docker.health-check-failed",
                         "health verification did not pass",
-                        {"checks": completed},
+                        details,
                     ),
+                    observations=tuple(observations),
                 )
+        evidence: dict[str, object] = {
+            "action": "verified-healthy",
+            "node_id": material.node_id,
+        }
+        if completed:
+            evidence["checks"] = completed
         return RuntimeEffectResult.succeeded(
             request.effect_id,
-            evidence={
-                "action": "verified-healthy",
-                "node_id": material.node_id,
-                "checks": completed,
-            },
+            evidence=evidence,
+            observations=tuple(observations),
         )
 
     def _execute_http_health_check(
@@ -725,25 +734,34 @@ class DockerRuntimeInterpreter:
                 url=endpoint.address.value + check.path,
                 timeout_seconds=check.policy.timeout_seconds,
                 maximum_response_bytes=check.policy.maximum_evidence_bytes,
+                expected_body_sha256=check.expected_body_sha256,
             )
             evidence = (
                 None
-                if probe.status_code is None
+                if probe.classification != "completed"
+                or probe.status_code is None
                 else HttpVerificationEvidence(
                     probe.status_code,
-                    min(
-                        probe.response_size,
-                        check.policy.maximum_evidence_bytes,
-                    ),
+                    probe.response_size,
+                    check.expected_body_sha256,
+                    probe.body_sha256_matches,
                 )
             )
-            if probe.timed_out:
+            if probe.classification == "timed-out":
                 outcome = VerificationOutcome.TIMED_OUT
-            elif probe.exit_code != 0 or probe.status_code is None:
-                outcome = VerificationOutcome.FAILED
-            elif probe.response_size > check.policy.maximum_evidence_bytes:
+            elif probe.classification == "response-rejected":
+                outcome = VerificationOutcome.REJECTED
+            elif probe.classification == "response-oversized":
                 outcome = VerificationOutcome.MALFORMED
-            elif probe.status_code in check.expected_statuses:
+            elif probe.classification != "completed" or probe.status_code is None:
+                outcome = VerificationOutcome.FAILED
+            elif (
+                probe.status_code in check.expected_statuses
+                and (
+                    check.expected_body_sha256 is None
+                    or probe.body_sha256_matches is True
+                )
+            ):
                 outcome = VerificationOutcome.PASSED
             else:
                 outcome = VerificationOutcome.FAILED

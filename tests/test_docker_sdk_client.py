@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 from dataclasses import replace
-from io import BytesIO
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO, StringIO
 import hashlib
+import inspect
+import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tarfile
+from threading import Thread
+import time
 import unittest
+from unittest.mock import patch
 
 from control_plane_kit_core.configuration import (
     ConfigurationArtifact,
@@ -117,7 +124,10 @@ class FakeResource:
         self.execs: list[list[str]] = []
         self.connections: list[dict[str, object]] = []
         self.wait_result: object = {"StatusCode": 0}
-        self.log_output: bytes = b"200 3\n"
+        self.log_output: bytes = (
+            b'{"category":"completed","match":null,'
+            b'"response_bytes":3,"status_code":200}\n'
+        )
 
     def start(self) -> None:
         self.started = True
@@ -200,6 +210,8 @@ class FakeManager:
         self.volume_archives: dict[str, dict[str, bytes]] = {}
         self.pulled: list[object] = []
         self.get_error: Exception | None = None
+        self.next_container_log_output: bytes | None = None
+        self.next_container_wait_result: object | None = None
 
     def get(self, name: str) -> FakeResource:
         if self.get_error is not None:
@@ -224,6 +236,12 @@ class FakeManager:
             running=False,
             private_addresses={str(network): ""} if network is not None else {},
         )
+        if self.next_container_log_output is not None:
+            resource.log_output = self.next_container_log_output
+            self.next_container_log_output = None
+        if self.next_container_wait_result is not None:
+            resource.wait_result = self.next_container_wait_result
+            self.next_container_wait_result = None
         volumes = kwargs.get("volumes", {})
         if isinstance(volumes, dict) and volumes:
             volume_name = next(iter(volumes))
@@ -255,6 +273,79 @@ class FakeDockerClient:
 class FakeDockerApi:
     def create_endpoint_config(self, *, aliases: list[str]) -> dict[str, object]:
         return {"Aliases": aliases}
+
+
+class ProbeHttpHandler(BaseHTTPRequestHandler):
+    routes: dict[str, tuple[int, bytes, dict[str, str]]] = {}
+    requests: list[str] = []
+
+    def do_GET(self) -> None:
+        self.__class__.requests.append(self.path)
+        status, body, headers = self.__class__.routes[self.path]
+        if self.path == "/slow":
+            time.sleep(1.25)
+        self.send_response(status)
+        for name, value in headers.items():
+            self.send_header(name, value)
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+REJECTED_HELPER_RECORD = {
+    "category": "response-rejected",
+    "match": None,
+    "response_bytes": 0,
+    "status_code": 302,
+}
+OVERSIZED_HELPER_RECORD = {
+    "category": "response-oversized",
+    "match": None,
+    "response_bytes": 4,
+    "status_code": 200,
+}
+
+
+class ProbeReadResponse:
+    def __init__(self, body: bytes, *, maximum_read_size: int | None = None) -> None:
+        self.status = 200
+        self.body = body
+        self.maximum_read_size = maximum_read_size
+        self.offset = 0
+        self.read_requests: list[int] = []
+        self.read_results: list[bytes] = []
+        self.events: list[tuple[str, bytes]] = []
+
+    def __enter__(self) -> ProbeReadResponse:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        pass
+
+    def read(self, size: int = -1) -> bytes:
+        self.read_requests.append(size)
+        if size < 0:
+            size = len(self.body) - self.offset
+        if self.maximum_read_size is not None:
+            size = min(size, self.maximum_read_size)
+        result = self.body[self.offset : self.offset + size]
+        self.offset += len(result)
+        self.read_results.append(result)
+        self.events.append(("read", result))
+        return result
+
+
+class ProbeOpener:
+    def __init__(self, response: ProbeReadResponse) -> None:
+        self.response = response
+
+    def open(self, request: object, *, timeout: float) -> ProbeReadResponse:
+        return self.response
 
 
 class DockerSdkClientTests(unittest.TestCase):
@@ -325,6 +416,8 @@ assert "docker" not in sys.modules
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.response_size, 3)
         self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.classification, "completed")
+        self.assertIsNone(result.body_sha256_matches)
         helper = fake_client.containers.created[0]
         self.assertEqual(helper["network"], "cpk-net-workspace-docker")
         self.assertEqual(helper["read_only"], True)
@@ -332,6 +425,449 @@ assert "docker" not in sys.modules
         self.assertEqual(helper["security_opt"], ["no-new-privileges"])
         self.assertIn("http://hello:8000/health/ready", helper["command"])
         self.assertTrue(fake_client.containers.created_containers[0].force_removed)
+
+    def test_http_probe_emitted_helper_is_bounded_and_transport_isolated(self) -> None:
+        self.assertIn(
+            "expected_body_sha256",
+            inspect.signature(DockerSdkClient.run_http_probe).parameters,
+        )
+        handler = type(
+            "BoundedProbeHttpHandler",
+            (ProbeHttpHandler,),
+            {
+                "routes": {
+                    "/match": (200, b"hello", {}),
+                    "/mismatch": (200, b"wrong", {}),
+                    "/empty": (200, b"", {}),
+                    "/missing": (404, b"missing", {}),
+                    "/unavailable": (503, b"later", {}),
+                    "/redirect": (
+                        302,
+                        b"redirect-body",
+                        {"Location": "http://credential.example/secret-location"},
+                    ),
+                    "/slow": (200, b"too-late", {}),
+                },
+                "requests": [],
+            },
+        )
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def emitted_command(
+            path: str,
+            *,
+            limit: int,
+            expected: str,
+            timeout_seconds: float = 2.0,
+        ) -> list[str]:
+            fake_client = FakeDockerClient()
+            fake_client.containers.next_container_log_output = (
+                b'{"category":"completed","match":null,'
+                b'"response_bytes":0,"status_code":200}\n'
+            )
+            client = DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+            client.run_http_probe(
+                network="cpk-net-workspace-docker",
+                url=f"http://127.0.0.1:{server.server_port}{path}",
+                timeout_seconds=timeout_seconds,
+                maximum_response_bytes=limit,
+                expected_body_sha256=expected,
+            )
+            self.assertTrue(
+                fake_client.containers.created_containers[0].force_removed
+            )
+            return list(fake_client.containers.created[0]["command"])
+
+        def execute(
+            path: str,
+            *,
+            limit: int,
+            expected: str,
+            expected_exit: int = 0,
+            timeout_seconds: float = 2.0,
+        ) -> tuple[dict[str, object], bytes]:
+            command = emitted_command(
+                path,
+                limit=limit,
+                expected=expected,
+                timeout_seconds=timeout_seconds,
+            )
+            environment = dict(os.environ)
+            environment.update(
+                {
+                    "HTTP_PROXY": "http://127.0.0.1:1",
+                    "HTTPS_PROXY": "http://127.0.0.1:1",
+                    "NO_PROXY": "",
+                    "http_proxy": "http://127.0.0.1:1",
+                    "https_proxy": "http://127.0.0.1:1",
+                    "no_proxy": "",
+                }
+            )
+            completed = subprocess.run(
+                command,
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=5,
+                env=environment,
+            )
+            self.assertEqual(completed.returncode, expected_exit, completed.stderr)
+            self.assertEqual(completed.stderr, "")
+            for protected in (
+                "hello",
+                "wrong",
+                "missing",
+                "later",
+                "redirect-body",
+                "too-late",
+                "credential.example",
+                "secret-location",
+                expected,
+                path,
+                str(server.server_port),
+            ):
+                self.assertNotIn(protected, completed.stdout)
+            return json.loads(completed.stdout), completed.stdout.encode("ascii")
+
+        def execute_with_response(
+            body: bytes,
+            *,
+            limit: int,
+            expected: str,
+            maximum_read_size: int | None = None,
+        ) -> tuple[dict[str, object], bytes, ProbeReadResponse]:
+            command = emitted_command("/bounded", limit=limit, expected=expected)
+            response = ProbeReadResponse(
+                body,
+                maximum_read_size=maximum_read_size,
+            )
+            output = StringIO()
+            exit_code = 0
+            real_sha256 = hashlib.sha256
+
+            class RecordingDigest:
+                def __init__(self, data: bytes = b"") -> None:
+                    self.digest = real_sha256()
+                    if data:
+                        self.update(data)
+
+                def update(self, data: bytes) -> None:
+                    response.events.append(("hash", bytes(data)))
+                    self.digest.update(data)
+
+                def hexdigest(self) -> str:
+                    return self.digest.hexdigest()
+
+            with (
+                patch("urllib.request.build_opener", return_value=ProbeOpener(response)),
+                patch("hashlib.sha256", RecordingDigest),
+                patch.object(sys, "argv", ["-c", *command[3:]]),
+                redirect_stdout(output),
+            ):
+                try:
+                    exec(command[2], {})
+                except SystemExit as error:
+                    exit_code = int(error.code or 0)
+            self.assertEqual(exit_code, 0)
+            self.assertNotIn(body.decode("ascii"), output.getvalue())
+            return (
+                json.loads(output.getvalue()),
+                output.getvalue().encode("ascii"),
+                response,
+            )
+
+        def parse_emitted(
+            output: bytes,
+            *,
+            wait_exit: int,
+            expected: str,
+            limit: int,
+        ):
+            fake_client = FakeDockerClient()
+            fake_client.containers.next_container_log_output = output
+            fake_client.containers.next_container_wait_result = {
+                "StatusCode": wait_exit
+            }
+            result = DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            ).run_http_probe(
+                network="cpk-net-workspace-docker",
+                url="http://hello:8000/health/ready",
+                timeout_seconds=2.0,
+                maximum_response_bytes=limit,
+                expected_body_sha256=expected,
+            )
+            self.assertTrue(
+                fake_client.containers.created_containers[0].force_removed
+            )
+            return result
+
+        try:
+            cases = (
+                ("match", "/match", b"hello", b"hello", 200),
+                ("mismatch", "/mismatch", b"wrong", b"hello", 200),
+                ("empty", "/empty", b"", b"", 200),
+                ("not-found-is-response", "/missing", b"missing", b"missing", 404),
+                ("server-error-is-response", "/unavailable", b"later", b"later", 503),
+            )
+            emitted: dict[str, bytes] = {}
+            for boundary, path, body, expected_body, status in cases:
+                with self.subTest(boundary=boundary):
+                    actual, raw = execute(
+                        path,
+                        limit=len(body) or 1,
+                        expected=hashlib.sha256(expected_body).hexdigest(),
+                    )
+                    emitted[boundary] = raw
+                    self.assertEqual(
+                        actual,
+                        {
+                            "category": "completed",
+                            "match": body == expected_body,
+                            "response_bytes": len(body),
+                            "status_code": status,
+                        },
+                    )
+
+            exact, _, exact_response = execute_with_response(
+                b"1234",
+                limit=4,
+                expected=hashlib.sha256(b"1234").hexdigest(),
+            )
+            self.assertEqual(
+                exact,
+                {
+                    "category": "completed",
+                    "match": True,
+                    "response_bytes": 4,
+                    "status_code": 200,
+                },
+            )
+            self.assertEqual(sum(map(len, exact_response.read_results)), 4)
+            self.assertEqual(exact_response.read_results[-1], b"")
+            eof_index = next(
+                index
+                for index, event in enumerate(exact_response.events)
+                if event == ("read", b"")
+            )
+            hash_indexes = [
+                index
+                for index, (kind, _) in enumerate(exact_response.events)
+                if kind == "hash"
+            ]
+            self.assertTrue(hash_indexes)
+            self.assertLess(eof_index, min(hash_indexes))
+            self.assertEqual(
+                b"".join(
+                    value
+                    for kind, value in exact_response.events
+                    if kind == "hash"
+                ),
+                b"1234",
+            )
+
+            chunked, _, chunked_response = execute_with_response(
+                b"1234",
+                limit=4,
+                expected=hashlib.sha256(b"1234").hexdigest(),
+                maximum_read_size=2,
+            )
+            self.assertEqual(
+                chunked,
+                {
+                    "category": "completed",
+                    "match": True,
+                    "response_bytes": 4,
+                    "status_code": 200,
+                },
+            )
+            self.assertLessEqual(
+                sum(map(len, chunked_response.read_results)),
+                5,
+            )
+            chunked_eof = next(
+                index
+                for index, event in enumerate(chunked_response.events)
+                if event == ("read", b"")
+            )
+            chunked_hashes = [
+                (index, value)
+                for index, (kind, value) in enumerate(chunked_response.events)
+                if kind == "hash"
+            ]
+            self.assertTrue(chunked_hashes)
+            self.assertLess(chunked_eof, min(index for index, _ in chunked_hashes))
+            self.assertEqual(
+                b"".join(value for _, value in chunked_hashes),
+                b"1234",
+            )
+
+            oversize, oversize_raw, oversize_response = execute_with_response(
+                b"123456789",
+                limit=4,
+                expected=hashlib.sha256(b"1234").hexdigest(),
+            )
+            self.assertEqual(oversize, OVERSIZED_HELPER_RECORD)
+            self.assertEqual(sum(map(len, oversize_response.read_results)), 5)
+            self.assertNotIn("hash", [event for event, _ in oversize_response.events])
+            self.assertNotIn(b"123456789", oversize_raw)
+
+            requests_before_redirect = tuple(handler.requests)
+            redirect, redirect_raw = execute(
+                "/redirect",
+                limit=64,
+                expected=hashlib.sha256(b"redirect-body").hexdigest(),
+            )
+            self.assertEqual(redirect, REJECTED_HELPER_RECORD)
+            self.assertNotIn(b"credential.example", redirect_raw)
+            self.assertNotIn(b"secret-location", redirect_raw)
+            self.assertEqual(
+                tuple(handler.requests)[len(requests_before_redirect) :],
+                ("/redirect",),
+            )
+
+            timeout, timeout_raw = execute(
+                "/slow",
+                limit=64,
+                expected=hashlib.sha256(b"too-late").hexdigest(),
+                expected_exit=124,
+                timeout_seconds=1.0,
+            )
+            self.assertEqual(
+                timeout,
+                {
+                    "category": "timed-out",
+                    "match": None,
+                    "response_bytes": 0,
+                    "status_code": None,
+                },
+            )
+
+            parsed = (
+                ("mismatch", emitted["mismatch"], 0, 5, b"hello", "completed", False),
+                (
+                    "not-found",
+                    emitted["not-found-is-response"],
+                    0,
+                    7,
+                    b"missing",
+                    "completed",
+                    True,
+                ),
+                (
+                    "server-error",
+                    emitted["server-error-is-response"],
+                    0,
+                    5,
+                    b"later",
+                    "completed",
+                    True,
+                ),
+                ("redirect", redirect_raw, 0, 64, b"redirect-body", "response-rejected", None),
+                ("oversize", oversize_raw, 0, 4, b"1234", "response-oversized", None),
+                ("timeout", timeout_raw, 124, 64, b"too-late", "timed-out", None),
+            )
+            for boundary, raw, exit_code, limit, expected_body, category, matches in parsed:
+                with self.subTest(boundary=f"parsed-{boundary}"):
+                    emitted_record = json.loads(raw)
+                    result = parse_emitted(
+                        raw,
+                        wait_exit=exit_code,
+                        expected=hashlib.sha256(expected_body).hexdigest(),
+                        limit=limit,
+                    )
+                    self.assertEqual(
+                        (
+                            result.status_code,
+                            result.response_size,
+                            result.classification,
+                            result.body_sha256_matches,
+                            result.exit_code,
+                        ),
+                        (
+                            emitted_record["status_code"],
+                            emitted_record["response_bytes"],
+                            category,
+                            matches,
+                            exit_code,
+                        ),
+                    )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_http_probe_protocol_is_closed_and_helper_is_always_removed(self) -> None:
+        self.assertIn(
+            "expected_body_sha256",
+            inspect.signature(DockerSdkClient.run_http_probe).parameters,
+        )
+        cases = (("transport-unavailable", {
+            "category": "unavailable",
+            "match": None,
+            "response_bytes": 0,
+            "status_code": None,
+        }, (None, 0, 1, "unavailable", None)),)
+        for boundary, output, expected in cases:
+            with self.subTest(boundary=boundary):
+                fake_client = FakeDockerClient()
+                fake_client.containers.next_container_log_output = (
+                    json.dumps(output, sort_keys=True, separators=(",", ":"))
+                    + "\n"
+                ).encode("ascii")
+                client = DockerSdkClient(
+                    client=fake_client,
+                    docker_module=FakeDockerModule(fake_client),
+                )
+                result = client.run_http_probe(
+                    network="cpk-net-workspace-docker",
+                    url="http://hello:8000/health/ready",
+                    timeout_seconds=5.0,
+                    maximum_response_bytes=128,
+                    expected_body_sha256=hashlib.sha256(b"hello").hexdigest(),
+                )
+                self.assertEqual(
+                    (
+                        result.status_code,
+                        result.response_size,
+                        result.exit_code,
+                        result.classification,
+                        result.body_sha256_matches,
+                    ),
+                    expected,
+                )
+                self.assertTrue(
+                    fake_client.containers.created_containers[0].force_removed
+                )
+
+        for output in (b"provider failure\n", b"{}\n", b"[]\n"):
+            with self.subTest(boundary="malformed-helper-output", output=output):
+                fake_client = FakeDockerClient()
+                fake_client.containers.next_container_log_output = output
+                client = DockerSdkClient(
+                    client=fake_client,
+                    docker_module=FakeDockerModule(fake_client),
+                )
+                result = client.run_http_probe(
+                    network="cpk-net-workspace-docker",
+                    url="http://hello:8000/health/ready",
+                    timeout_seconds=5.0,
+                    maximum_response_bytes=128,
+                    expected_body_sha256=hashlib.sha256(b"hello").hexdigest(),
+                )
+                self.assertEqual(result.classification, "unavailable")
+                self.assertIsNone(result.status_code)
+                self.assertIsNone(result.body_sha256_matches)
+                self.assertNotIn("provider failure", repr(result))
+                self.assertTrue(
+                    fake_client.containers.created_containers[0].force_removed
+                )
 
     def test_client_creation_lazily_uses_docker_from_env(self) -> None:
         fake_client = FakeDockerClient()
