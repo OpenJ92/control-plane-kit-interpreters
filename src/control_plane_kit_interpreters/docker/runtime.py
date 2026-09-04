@@ -510,6 +510,7 @@ class DockerRuntimeInterpreter:
             self.authorized_secret_resolver,
             self.image_pull_credentials,
         )
+        self._admit_start_node_image(material, auth_config)
         runtime_id = material.runtime_id
         network_name = _network_name(request, runtime_id)
         runtime_labels = _runtime_labels(request, runtime_id)
@@ -528,7 +529,6 @@ class DockerRuntimeInterpreter:
                 material,
                 container_name,
                 labels,
-                auth_config,
                 secrets,
                 authority_delivery,
             )
@@ -548,7 +548,6 @@ class DockerRuntimeInterpreter:
                 material,
                 container_name,
                 labels,
-                auth_config,
                 secrets,
                 authority_delivery,
             )
@@ -848,7 +847,6 @@ class DockerRuntimeInterpreter:
         material: RuntimeProductMaterial,
         container_name: str,
         labels: Mapping[str, str],
-        auth_config: DockerRegistryAuthConfig | None,
         secrets: ResolvedSecretDeliveries,
         authority_delivery: _AuthorityDeliveryMaterial,
     ) -> None:
@@ -857,10 +855,6 @@ class DockerRuntimeInterpreter:
             material,
             labels,
             secrets,
-        )
-        self.client.pull_image(
-            material.product.image.execution_reference,
-            auth_config=auth_config,
         )
         self.client.run_container(
             name=container_name,
