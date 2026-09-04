@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import socket
@@ -89,6 +89,7 @@ from control_plane_kit_core.verification import (
 )
 
 from control_plane_kit_interpreters.docker import DockerRuntimeInterpreter, DockerSdkClient
+from control_plane_kit_interpreters.docker.runtime import _resource_name
 from control_plane_kit_interpreters.docker.sdk import DockerSdkHttpProbeResult
 from control_plane_kit_interpreters.secrets import (
     ImagePullCredentialDenied,
@@ -119,6 +120,70 @@ class RuntimeHttpProbeResult:
 
 
 class DockerRuntimeInterpreterTests(unittest.TestCase):
+    def test_long_workspace_preserves_distinct_node_names_and_exact_reuse(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(
+                client=fake_client,
+                docker_module=FakeDockerModule(fake_client),
+            )
+        )
+        names = []
+        for node_id in ("hello-086f197e4a13", "hello-b49b98b66962"):
+            with self.subTest(node_id=node_id):
+                request = _request(
+                    StartNode(NodeTarget(node_id)),
+                    products=(replace(_material(_product()), node_id=node_id),),
+                )
+                request = replace(
+                    request,
+                    source=replace(
+                        request.source,
+                        workspace_id="cpk-convergence-cpk-public-convergence-j01gyrlh",
+                    ),
+                )
+                started = interpreter.execute(request)
+                self.assertIs(started.kind, EffectResultKind.SUCCEEDED)
+                name = started.evidence["container"]
+                names.append(name)
+                self.assertLessEqual(len(name), 63)
+                self.assertEqual(
+                    fake_client.containers.resources[name].attrs["Config"]["Labels"][
+                        "org.openj92.cpk.node"
+                    ],
+                    node_id,
+                )
+                count = len(_workload_container_records(fake_client))
+                replayed = interpreter.execute(request)
+                self.assertIs(replayed.kind, EffectResultKind.SUCCEEDED)
+                self.assertEqual(replayed.evidence["container"], name)
+                self.assertEqual(len(_workload_container_records(fake_client)), count)
+        self.assertEqual(len(set(names)), 2)
+
+    def test_resource_names_keep_short_spelling_and_bounded_digest_suffix(self) -> None:
+        for kind, parts in (
+            ("net", ("workspace-a", "docker")),
+            ("node", ("workspace-a", "api")),
+            ("vol", ("workspace-a", "api", "data")),
+        ):
+            with self.subTest(kind=kind):
+                digest = hashlib.sha256(
+                    ("\0".join((kind, *parts)) + "\0").encode("utf-8")
+                ).hexdigest()[:12]
+                self.assertEqual(
+                    _resource_name(kind, *parts),
+                    f"cpk-{kind}-{'-'.join(parts)}-{digest}",
+                )
+                long_parts = ("workspace-" * 8, *parts[1:])
+                digest = hashlib.sha256(
+                    ("\0".join((kind, *long_parts)) + "\0").encode("utf-8")
+                ).hexdigest()[:12]
+                name = _resource_name(kind, *long_parts)
+                self.assertLessEqual(len(name), 63)
+                self.assertRegex(name, r"\A[a-zA-Z0-9][a-zA-Z0-9_.-]*[a-f0-9]\Z")
+                self.assertTrue(name.endswith(f"-{digest}"))
+                self.assertEqual(_resource_name(kind, *long_parts), name)
+
     def test_start_runtime_creates_owned_network_without_product_material(self) -> None:
         fake_client = FakeDockerClient()
         interpreter = DockerRuntimeInterpreter(
