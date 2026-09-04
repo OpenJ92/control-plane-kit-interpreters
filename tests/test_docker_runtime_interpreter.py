@@ -512,10 +512,10 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         first = interpreter.execute(_request(StartNode(NodeTarget("api"))))
         existing = fake_client.containers.resources[str(first.evidence["container"])]
 
-        def fail_pull(image: str, **kwargs: object) -> None:
-            raise RuntimeError("registry response carried sensitive material")
+        def fail_run(**kwargs: object) -> None:
+            raise RuntimeError("container response carried sensitive material")
 
-        fake_client.images.pull = fail_pull
+        interpreter.client.run_container = fail_run
         result = interpreter.execute(
             _request(
                 ReconcileNode(NodeTarget("api")),
@@ -539,6 +539,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertEqual(result.failure.code, "docker.effect-uncertain")
         self.assertEqual(result.failure.message, "RuntimeError")
         self.assertTrue(existing.force_removed)
+        self.assertNotIn("container response carried sensitive material", repr(result))
 
     def test_start_node_passes_socket_derived_environment_to_container(self) -> None:
         fake_client = FakeDockerClient()
@@ -635,6 +636,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         )
         first = interpreter.execute(_request(StartNode(NodeTarget("api"))))
         existing = fake_client.containers.resources[str(first.evidence["container"])]
+        prior_pulls = list(fake_client.images.pulled)
 
         result = interpreter.execute(
             _request(
@@ -657,6 +659,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
         self.assertEqual(result.evidence["action"], "recreated")
         self.assertTrue(existing.force_removed)
+        self.assertEqual(fake_client.images.pulled, prior_pulls)
         self.assertEqual(len(_workload_container_records(fake_client)), 2)
         self.assertEqual(
             _workload_container_records(fake_client)[-1]["environment"],
@@ -665,6 +668,111 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                 "UPSTREAM_URL": "http://replacement:8080",
             },
         )
+
+    def test_reconcile_rejects_image_admission_before_owned_resource_mutation(self) -> None:
+        for case in ("wrong-cached-digest", "pull-unavailable", "wrong-pulled-digest"):
+            with self.subTest(case=case):
+                fake_client = FakeDockerClient()
+                interpreter = DockerRuntimeInterpreter(DockerSdkClient(
+                    client=fake_client, docker_module=FakeDockerModule(fake_client),
+                ))
+                first = interpreter.execute(_request(StartNode(NodeTarget("api"))))
+                self.assertIs(first.kind, EffectResultKind.SUCCEEDED)
+                existing = fake_client.containers.resources[str(first.evidence["container"])]
+                reference = _product().image.execution_reference
+                image = fake_client.images.resources[reference]
+                original_pull = fake_client.images.pull
+
+                def wrong_pull(image_reference: str, **kwargs: object) -> None:
+                    original_pull(image_reference, **kwargs)
+                    fake_client.images.resources[image_reference].attrs["RepoDigests"] = []
+
+                if case == "wrong-cached-digest":
+                    image.attrs["RepoDigests"] = []
+                    pull = Mock(wraps=original_pull)
+                else:
+                    del fake_client.images.resources[reference]
+                    pull = Mock(side_effect=(
+                        RuntimeError("private registry response")
+                        if case == "pull-unavailable" else wrong_pull
+                    ))
+                fake_client.images.pull = pull
+                before = [list(manager.created) for manager in (
+                    fake_client.networks, fake_client.volumes, fake_client.containers,
+                )]
+                result = interpreter.execute(_request(
+                    ReconcileNode(NodeTarget("api")),
+                    products=(_material(_product(), public_environment=(
+                        PublicStaticEnvironmentBinding("PORT", "9090"),
+                    )),),
+                ))
+
+                self.assertIs(result.kind, (
+                    EffectResultKind.UNCERTAIN if case == "pull-unavailable"
+                    else EffectResultKind.FAILED
+                ))
+                self.assertEqual(result.failure.code, (
+                    "docker.effect-uncertain" if case == "pull-unavailable"
+                    else "docker.image-reference-conflict"
+                ))
+                self.assertFalse(existing.force_removed)
+                self.assertEqual(before, [manager.created for manager in (
+                    fake_client.networks, fake_client.volumes, fake_client.containers,
+                )])
+                self.assertEqual(pull.call_count, 0 if case == "wrong-cached-digest" else 1)
+                self.assertNotIn("private registry response", repr(result))
+
+    def test_reconcile_missing_image_uses_one_permitted_pull(self) -> None:
+        fake_client = FakeDockerClient()
+        interpreter = DockerRuntimeInterpreter(DockerSdkClient(
+            client=fake_client, docker_module=FakeDockerModule(fake_client),
+        ))
+        first = interpreter.execute(_request(StartNode(NodeTarget("api"))))
+        self.assertIs(first.kind, EffectResultKind.SUCCEEDED)
+        reference = _product().image.execution_reference
+        del fake_client.images.resources[reference]
+        prior_pulls = len(fake_client.images.pulled)
+
+        result = interpreter.execute(_request(
+            ReconcileNode(NodeTarget("api")),
+            products=(_material(_product(), public_environment=(
+                PublicStaticEnvironmentBinding("PORT", "9090"),
+            )),),
+        ))
+
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(result.evidence["action"], "recreated")
+        self.assertEqual(fake_client.images.pulled[prior_pulls:], [{"image": reference}])
+
+    def test_reconcile_requires_pull_authority_before_cached_image_access(self) -> None:
+        fake_client = FakeDockerClient()
+        reference = SecretReference("secret://registry/ghcr/runtime-fixture")
+        resolver = FakeImagePullCredentialResolver(ImagePullCredentialMissing(reference))
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(client=fake_client, docker_module=FakeDockerModule(fake_client)),
+            image_pull_credentials=resolver,
+        )
+        first = interpreter.execute(_request(StartNode(NodeTarget("api"))))
+        self.assertIs(first.kind, EffectResultKind.SUCCEEDED)
+        existing = fake_client.containers.resources[str(first.evidence["container"])]
+        before = [list(manager.created) for manager in (
+            fake_client.networks, fake_client.volumes, fake_client.containers,
+        )]
+        with patch.object(fake_client.images, "get", wraps=fake_client.images.get) as inspect_image:
+            result = interpreter.execute(_request(
+                ReconcileNode(NodeTarget("api")),
+                products=(_material(_product(), pull_authority=ImagePullAuthority(
+                    "ghcr.io", "openj92/runtime-fixture", reference,
+                )),),
+            ))
+        self.assertIs(result.kind, EffectResultKind.FAILED)
+        self.assertEqual(result.failure.code, "docker.image-pull-credential-missing")
+        self.assertEqual(resolver.requests, [reference.reference_id])
+        inspect_image.assert_not_called()
+        self.assertFalse(existing.force_removed)
+        self.assertEqual(before, [manager.created for manager in (
+            fake_client.networks, fake_client.volumes, fake_client.containers,
+        )])
 
     def test_reconcile_node_recreates_owned_container_when_public_environment_changes(
         self,
