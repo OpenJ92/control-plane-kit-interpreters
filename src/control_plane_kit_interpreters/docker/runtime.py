@@ -865,10 +865,12 @@ class DockerRuntimeInterpreter:
             ) from None
         labels = _node_labels(request, material)
         container = self.client.inspect_container(_container_name(request, material.node_id))
+        replacing = (container is not None and isinstance(request.operation, ReconcileNode)
+                     and not _fingerprint_matches(container.labels, labels))
         if container is not None:
             _require_node_owner(container.labels, labels, "container")
-            if (container.image_id != admitted_image.image_id
-                    or container.configured_user != admitted_image.configured_user):
+            if (not replacing and (container.image_id != admitted_image.image_id
+                    or container.configured_user != admitted_image.configured_user)):
                 raise _DockerInterpreterPreconditionError(
                     "docker.secret-recipient-conflict",
                     "existing container does not match the admitted secret recipient",
@@ -886,12 +888,12 @@ class DockerRuntimeInterpreter:
                     f"{_LABEL_PREFIX}.secret.reference": secret.reference.reference_id,
                 }, "secret volume")
                 self._require_secret_file(volume_name, secret, owner_uid)
-            elif container is not None:
+            elif container is not None and not replacing:
                 raise _DockerInterpreterPreconditionError(
                     "docker.secret-material-conflict",
                     "existing container secret material is missing",
                 )
-            if container is not None:
+            if container is not None and not replacing:
                 expected = DockerSdkSecretMount(secret.target_path, volume_name)
                 if container.readonly_secret_mounts.count(expected) != 1:
                     raise _DockerInterpreterPreconditionError(

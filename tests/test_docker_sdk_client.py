@@ -442,6 +442,7 @@ class DockerSdkClientTests(unittest.TestCase):
                 "inspect_image",
                 "inspect_network",
                 "inspect_volume",
+                "inspect_secret_file",
                 "materialize_configuration_artifact",
                 "materialize_secret_file",
                 "pull_image",
@@ -1163,6 +1164,7 @@ assert "docker" not in sys.modules
                 private_addresses={"cpk-net": "172.18.0.2"},
                 image_id="sha256:" + "b" * 64,
                 network_names=("cpk-net",),
+                configured_user="",
             ),
         )
 

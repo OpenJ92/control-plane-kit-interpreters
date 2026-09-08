@@ -1111,11 +1111,13 @@ def _secret_file_inspection(chunks: Any) -> DockerSdkSecretFileInspection:
     # in errors. This boundary supports at most 16 MiB of archived material.
     maximum_archive_bytes = 16 * 1024 * 1024
     archive = BytesIO()
+    # A lazy provider stream can fail after a prefix. That is an incomplete
+    # observation, not established malformed material; preserve uncertainty.
+    for chunk in chunks:
+        if not isinstance(chunk, bytes) or archive.tell() + len(chunk) > maximum_archive_bytes:
+            raise DockerSdkSecretFileEvidenceError("secret file inspection evidence is invalid")
+        archive.write(chunk)
     try:
-        for chunk in chunks:
-            if not isinstance(chunk, bytes) or archive.tell() + len(chunk) > maximum_archive_bytes:
-                raise ValueError("archive bound")
-            archive.write(chunk)
         archive.seek(0)
         with tarfile.open(fileobj=archive, mode="r:") as tar:
             members = tar.getmembers()
