@@ -88,7 +88,7 @@ class FakeImage:
     ) -> None:
         self.tags = tags
         self.id = image_id
-        self.attrs = {"RepoDigests": list(repo_digests)}
+        self.attrs = {"RepoDigests": list(repo_digests), "Config": {"User": ""}}
 
 
 class FakeResource:
@@ -106,7 +106,7 @@ class FakeResource:
         self.name = name
         self.image = FakeImage([image], image_id=image_id) if image else None
         self.attrs = {
-            "Config": {"Labels": labels or {}},
+            "Config": {"Labels": labels or {}, "User": ""},
             "State": {"Running": running},
             "NetworkSettings": {
                 "Ports": published_ports or {},
@@ -205,6 +205,7 @@ def malform_container_state(resource: FakeResource, case: str) -> None:
 class FakeManager:
     def __init__(self) -> None:
         self.resources: dict[str, FakeResource] = {}
+        self.image_resources: dict[str, FakeImage] = {}
         self.created: list[dict[str, object]] = []
         self.created_containers: list[FakeResource] = []
         self.volume_archives: dict[str, dict[str, bytes]] = {}
@@ -236,6 +237,18 @@ class FakeManager:
             running=False,
             private_addresses={str(network): ""} if network is not None else {},
         )
+        resource.attrs["HostConfig"] = {"Mounts": list(kwargs.get("mounts", []))}
+        selected_image = self.image_resources.get(image)
+        if selected_image is None:
+            selected_image = next((item for item in self.image_resources.values() if item.id == image), None)
+        if selected_image is not None:
+            resource.image = FakeImage([image], image_id=selected_image.id)
+            resource.attrs["Config"]["User"] = selected_image.attrs.get("Config", {}).get("User")
+        resource.attrs["Mounts"] = [
+            {"Type": mount.get("Type"), "Name": mount.get("Source"),
+             "Destination": mount.get("Target"), "RW": not mount.get("ReadOnly", False)}
+            for mount in kwargs.get("mounts", [])
+        ]
         if self.next_container_log_output is not None:
             resource.log_output = self.next_container_log_output
             self.next_container_log_output = None
@@ -263,6 +276,7 @@ class FakeDockerClient:
         self.volumes = FakeManager()
         self.images = FakeManager()
         self.containers = FakeManager()
+        self.containers.image_resources = self.images.resources
         self.containers.create = self.containers.create_container
         self.close_calls = 0
 
@@ -349,6 +363,67 @@ class ProbeOpener:
 
 
 class DockerSdkClientTests(unittest.TestCase):
+    def test_protected_file_recipient_uses_explicit_numeric_image_user(self) -> None:
+        for configured_user, expected in (("", 0), ("0", 0), ("10006", 10006), ("2147483647", 2147483647)):
+            with self.subTest(configured_user=configured_user):
+                raw = FakeDockerClient()
+                observed = FakeImage([], repo_digests=("fixture@sha256:" + "a" * 64,))
+                observed.attrs["Config"]["User"] = configured_user
+                raw.images.resources["fixture"] = observed
+                inspected = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw)).inspect_image("fixture")
+                self.assertEqual(getattr(inspected, "configured_user", None), configured_user)
+                self.assertTrue(callable(getattr(inspected, "secret_file_owner_uid", None)),
+                                "missing protected-file recipient admission")
+                self.assertEqual(inspected.secret_file_owner_uid(), expected)
+
+    def test_protected_file_recipient_rejects_unsupported_or_missing_evidence(self) -> None:
+        for config in (None, {}, {"User": None}, {"User": 0}, {"User": "secrets"},
+                       {"User": "00"}, {"User": "+1"}, {"User": " 1"},
+                       {"User": "10006:10006"}, {"User": "2147483648"}, {"User": "١"}):
+            with self.subTest(config=config):
+                raw = FakeDockerClient()
+                observed = FakeImage([])
+                observed.attrs["Config"] = config
+                raw.images.resources["fixture"] = observed
+                inspected = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw)).inspect_image("fixture")
+                method = getattr(inspected, "secret_file_owner_uid", None)
+                self.assertIsNotNone(method, "missing protected-file recipient admission")
+                with self.assertRaisesRegex(ValueError, "secret file.*user"):
+                    method()
+                self.assertEqual(raw.containers.created, [])
+
+    def test_secret_archive_and_observation_preserve_owner_mode_and_content(self) -> None:
+        raw = FakeDockerClient()
+        sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+        value = SecretValue("owner-only-fixture")
+        self.assertIn("owner_uid", inspect.signature(sdk.materialize_secret_file).parameters,
+                      "missing recipient-aware materialization contract")
+        sdk.materialize_secret_file("owned", value, SecretFileMode.OWNER_READ_ONLY, owner_uid=10006)
+        evidence = sdk.inspect_secret_file("owned")
+        self.assertEqual(evidence.uid, 10006)
+        self.assertEqual(evidence.mode, 0o400)
+        self.assertTrue(evidence.regular_file)
+        self.assertEqual(evidence.content_digest, hashlib.sha256(value.reveal().encode()).hexdigest())
+        self.assertNotIn(value.reveal(), repr(evidence))
+        self.assertTrue(all(item.force_removed for item in raw.containers.created_containers))
+        self.assertEqual(raw.containers.created[-1]["volumes"]["owned"]["mode"], "ro")
+
+    def test_secret_observation_rejects_links_without_following(self) -> None:
+        raw = FakeDockerClient()
+        sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+        content = BytesIO()
+        with tarfile.open(fileobj=content, mode="w") as archive:
+            member = tarfile.TarInfo("content")
+            member.type = tarfile.SYMTYPE
+            member.linkname = "/unrelated"
+            archive.addfile(member)
+        raw.containers.volume_archives["owned"] = {"/artifact": content.getvalue()}
+        method = getattr(sdk, "inspect_secret_file", None)
+        self.assertIsNotNone(method, "missing protected-file observation")
+        with self.assertRaisesRegex(RuntimeError, "secret file"):
+            method("owned")
+        self.assertTrue(all(item.force_removed for item in raw.containers.created_containers))
+
     def test_client_surface_matches_operations_realization_boundary(self) -> None:
         self.assertEqual(
             {
@@ -367,6 +442,7 @@ class DockerSdkClientTests(unittest.TestCase):
                 "inspect_image",
                 "inspect_network",
                 "inspect_volume",
+                "inspect_secret_file",
                 "materialize_configuration_artifact",
                 "materialize_secret_file",
                 "pull_image",
@@ -1088,6 +1164,7 @@ assert "docker" not in sys.modules
                 private_addresses={"cpk-net": "172.18.0.2"},
                 image_id="sha256:" + "b" * 64,
                 network_names=("cpk-net",),
+                configured_user="",
             ),
         )
 

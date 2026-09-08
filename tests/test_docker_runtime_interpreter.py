@@ -4,6 +4,8 @@ from dataclasses import dataclass, replace
 import hashlib
 import json
 import socket
+from io import BytesIO
+import tarfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -100,6 +102,7 @@ from control_plane_kit_interpreters.secrets import (
 from test_docker_sdk_client import (
     FakeDockerClient,
     FakeDockerModule,
+    FakeImage,
     FakeResource,
     OVERSIZED_HELPER_RECORD,
     REJECTED_HELPER_RECORD,
@@ -120,6 +123,185 @@ class RuntimeHttpProbeResult:
 
 
 class DockerRuntimeInterpreterTests(unittest.TestCase):
+    def test_reconcile_replaces_stale_image_with_same_secret_reader(self) -> None:
+        raw = FakeDockerClient()
+        old = _product_with_file_secret_delivery()
+        desired = replace(old, image=replace(old.image, digest="sha256:" + "d" * 64))
+        for product, image_id in ((old, "sha256:" + "b" * 64), (desired, "sha256:" + "c" * 64)):
+            image = FakeImage([], image_id=image_id, repo_digests=(product.image.execution_reference,))
+            image.attrs["Config"]["User"] = "10006"
+            raw.images.resources[product.image.execution_reference] = image
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw)),
+            secret_resolver=FakeSecretResolver(raw, SecretResolved(
+                SecretReference("secret://local/api-token"), SecretValue("fixture"))))
+        self.assertIs(interpreter.execute(_request(StartNode(NodeTarget("api")),
+                      products=(_material(old),))).kind, EffectResultKind.SUCCEEDED)
+        prior = raw.containers.resources[_workload_container_record(raw)["name"]]
+        before = {name: dict(archive) for name, archive in raw.containers.volume_archives.items()}
+        volume_count = len(raw.volumes.created)
+        result = interpreter.execute(_request(ReconcileNode(NodeTarget("api")), products=(_material(desired),)))
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertTrue(prior.removed)
+        self.assertEqual(raw.containers.volume_archives, before)
+        self.assertEqual(len(raw.volumes.created), volume_count)
+        replacement = raw.containers.resources[prior.name]
+        self.assertEqual(replacement.image.id, "sha256:" + "c" * 64)
+        self.assertEqual(replacement.attrs["Config"]["User"], "10006")
+
+    def test_secret_observation_transport_interruption_remains_uncertain(self) -> None:
+        for interrupted, expected in ((True, EffectResultKind.UNCERTAIN), (False, EffectResultKind.FAILED)):
+            with self.subTest(interrupted=interrupted):
+                raw = FakeDockerClient()
+                product = _product_with_file_secret_delivery()
+                interpreter = DockerRuntimeInterpreter(
+                    DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw)),
+                    secret_resolver=FakeSecretResolver(raw, SecretResolved(
+                        SecretReference("secret://local/api-token"), SecretValue("fixture"))))
+                request = _request(StartNode(NodeTarget("api")), products=(_material(product),))
+                self.assertIs(interpreter.execute(request).kind, EffectResultKind.SUCCEEDED)
+                target = raw.containers.resources[_workload_container_record(raw)["name"]]
+                target.attrs["State"]["Running"] = False
+                target.started = False
+
+                def archive_stream():
+                    yield b"incomplete archive prefix"
+                    if interrupted:
+                        raise OSError("fixture transport interrupted")
+
+                def get_archive(resource, path):
+                    return archive_stream(), {}
+
+                with patch.object(FakeResource, "get_archive", get_archive):
+                    result = interpreter.execute(request)
+                self.assertIs(result.kind, expected)
+                self.assertFalse(target.started)
+                self.assertFalse(target.removed)
+                self.assertTrue(all(helper.force_removed for helper in raw.containers.created_containers
+                                    if helper is not target))
+
+    def test_numeric_file_reader_propagates_through_start_and_reuse(self) -> None:
+        raw = FakeDockerClient()
+        product = _product_with_file_secret_delivery()
+        reference = product.image.execution_reference
+        image = FakeImage([], repo_digests=(reference,))
+        image.attrs["Config"]["User"] = "10006"
+        raw.images.resources[reference] = image
+        resolver = FakeSecretResolver(raw, SecretResolved(
+            SecretReference("secret://local/api-token"), SecretValue("fixture")))
+        sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+        interpreter = DockerRuntimeInterpreter(sdk, secret_resolver=resolver)
+        for effect in (StartNode(NodeTarget("api")), StartNode(NodeTarget("api")), ReconcileNode(NodeTarget("api"))):
+            result = interpreter.execute(_request(effect, products=(_material(product),)))
+            self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+            record = _workload_container_record(raw)
+            self.assertNotIn("user", record)
+            self.assertIn(record["image"], (reference, image.id))
+            volume = next(item["name"] for item in raw.volumes.created
+                          if item["labels"].get("org.openj92.cpk.volume.kind") == "secret-file")
+            with tarfile.open(fileobj=BytesIO(raw.containers.volume_archives[volume]["/artifact"]), mode="r") as archive:
+                content = archive.getmember("content")
+                self.assertEqual(content.uid, 10006)
+                self.assertEqual(content.mode, 0o400)
+            target = raw.containers.resources[record["name"]]
+            target.attrs["State"]["Running"] = False
+        self.assertEqual(len(_workload_container_records(raw)), 1)
+
+    def test_named_user_environment_only_delivery_is_unchanged(self) -> None:
+        raw = FakeDockerClient()
+        product = _product_with_secret_delivery()
+        reference = product.image.execution_reference
+        image = FakeImage([], repo_digests=(reference,))
+        image.attrs["Config"]["User"] = "application"
+        raw.images.resources[reference] = image
+        interpreter = DockerRuntimeInterpreter(
+            DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw)),
+            secret_resolver=FakeSecretResolver(raw, SecretResolved(
+                SecretReference("secret://local/api-token"), SecretValue("fixture"))))
+        result = interpreter.execute(_request(StartNode(NodeTarget("api")), products=(_material(product),)))
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(_workload_container_record(raw)["environment"]["API_TOKEN"], "fixture")
+
+    def test_unsupported_file_reader_fails_before_any_material_mutation(self) -> None:
+        for effect in (StartNode(NodeTarget("api")), ReconcileNode(NodeTarget("api"))):
+            for user in ("secrets", "01", "1:1", None):
+                with self.subTest(effect=type(effect).__name__, user=user):
+                    raw = FakeDockerClient()
+                    product = _product_with_file_secret_delivery()
+                    reference = product.image.execution_reference
+                    image = FakeImage([], repo_digests=(reference,))
+                    image.attrs["Config"]["User"] = user
+                    raw.images.resources[reference] = image
+                    resolver = FakeSecretResolver(raw, SecretResolved(
+                        SecretReference("secret://local/api-token"), SecretValue("fixture")))
+                    interpreter = DockerRuntimeInterpreter(
+                        DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw)),
+                        secret_resolver=resolver)
+                    result = interpreter.execute(_request(effect, products=(_material(product),)))
+                    self.assertIs(result.kind, EffectResultKind.FAILED)
+                    self.assertEqual(raw.networks.created, [])
+                    self.assertEqual(raw.volumes.created, [])
+                    self.assertEqual(raw.containers.created, [])
+
+    def test_reused_file_material_requires_owner_mode_content_and_readonly_mount(self) -> None:
+        for effect in (StartNode(NodeTarget("api")), ReconcileNode(NodeTarget("api"))):
+            for defect in ("uid", "mode", "content", "type", "missing", "mount", "mount-source", "mount-target", "subpath", "user", "image"):
+                with self.subTest(effect=type(effect).__name__, defect=defect):
+                    raw = FakeDockerClient()
+                    product = _product_with_file_secret_delivery()
+                    resolver = FakeSecretResolver(raw, SecretResolved(
+                        SecretReference("secret://local/api-token"), SecretValue("fixture")))
+                    interpreter = DockerRuntimeInterpreter(
+                        DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw)),
+                        secret_resolver=resolver)
+                    request = _request(StartNode(NodeTarget("api")), products=(_material(product),))
+                    self.assertIs(interpreter.execute(request).kind, EffectResultKind.SUCCEEDED)
+                    record = _workload_container_record(raw)
+                    target = raw.containers.resources[record["name"]]
+                    target.attrs["State"]["Running"] = False
+                    target.started = False
+                    volume = next(item["name"] for item in raw.volumes.created
+                                  if item["labels"].get("org.openj92.cpk.volume.kind") == "secret-file")
+                    actual_mount = next(mount for mount in target.attrs["Mounts"]
+                                        if mount["Name"] == volume and mount["Destination"] == "/run/secrets/api-token")
+                    configured_mount = next(mount for mount in target.attrs["HostConfig"]["Mounts"]
+                                            if mount["Source"] == volume and mount["Target"] == "/run/secrets/api-token")
+                    if defect in ("uid", "mode", "content", "type"):
+                        output = BytesIO()
+                        with tarfile.open(fileobj=output, mode="w") as archive:
+                            content = b"different" if defect == "content" else b"fixture"
+                            member = tarfile.TarInfo("content")
+                            member.size = len(content)
+                            member.uid = 7 if defect == "uid" else 0
+                            member.mode = 0o444 if defect == "mode" else 0o400
+                            if defect == "type":
+                                member.type = tarfile.SYMTYPE
+                                member.linkname = "/unrelated"
+                            archive.addfile(member, BytesIO(content))
+                        raw.containers.volume_archives[volume]["/artifact"] = output.getvalue()
+                    elif defect == "missing":
+                        raw.containers.volume_archives[volume].clear()
+                    elif defect == "mount":
+                        actual_mount["RW"] = True
+                    elif defect == "mount-source":
+                        actual_mount["Name"] = "unrelated-volume"
+                    elif defect == "mount-target":
+                        actual_mount["Destination"] = "/unrelated"
+                    elif defect == "subpath":
+                        configured_mount["VolumeOptions"]["Subpath"] = "unrelated"
+                    elif defect == "user":
+                        target.attrs["Config"]["User"] = "10006"
+                    else:
+                        target.image.id = "sha256:" + "c" * 64
+                    before = dict(raw.containers.volume_archives[volume])
+                    volume_count = len(raw.volumes.created)
+                    result = interpreter.execute(_request(effect, products=(_material(product),)))
+                    self.assertIs(result.kind, EffectResultKind.FAILED)
+                    self.assertFalse(target.started)
+                    self.assertFalse(target.removed)
+                    self.assertEqual(raw.containers.volume_archives[volume], before)
+                    self.assertEqual(len(raw.volumes.created), volume_count)
+
     def test_long_workspace_preserves_distinct_node_names_and_exact_reuse(self) -> None:
         fake_client = FakeDockerClient()
         interpreter = DockerRuntimeInterpreter(

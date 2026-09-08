@@ -61,6 +61,7 @@ from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkConfigurationMount,
     DockerSdkPortBinding,
     DockerSdkSecretMount,
+    DockerSdkSecretFileEvidenceError,
     runtime_endpoint_observations,
     verify_published_ports,
 )
@@ -360,6 +361,7 @@ class DockerRuntimeInterpreter:
             self.image_pull_credentials,
         )
         admitted_image = self._admit_start_node_image(material, auth_config)
+        owner_uid = self._preflight_secret_files(request, material, secrets, admitted_image)
         runtime_id = material.runtime_id
         network_name = _network_name(request, runtime_id)
         runtime_labels = _runtime_labels(request, runtime_id)
@@ -392,6 +394,7 @@ class DockerRuntimeInterpreter:
                     material,
                     labels,
                     secrets,
+                    owner_uid=owner_uid,
                 ),
             )
             _start_node_provider_call(
@@ -510,7 +513,8 @@ class DockerRuntimeInterpreter:
             self.authorized_secret_resolver,
             self.image_pull_credentials,
         )
-        self._admit_start_node_image(material, auth_config)
+        admitted_image = self._admit_start_node_image(material, auth_config)
+        owner_uid = self._preflight_secret_files(request, material, secrets, admitted_image)
         runtime_id = material.runtime_id
         network_name = _network_name(request, runtime_id)
         runtime_labels = _runtime_labels(request, runtime_id)
@@ -531,6 +535,7 @@ class DockerRuntimeInterpreter:
                 labels,
                 secrets,
                 authority_delivery,
+                owner_uid=owner_uid,
             )
             action = "created"
         elif _fingerprint_matches(inspection.labels, labels):
@@ -550,6 +555,7 @@ class DockerRuntimeInterpreter:
                 labels,
                 secrets,
                 authority_delivery,
+                owner_uid=owner_uid,
             )
             action = "recreated"
 
@@ -841,6 +847,79 @@ class DockerRuntimeInterpreter:
             _require_owned(inspection.labels, labels, "container")
         return inspection
 
+    def _preflight_secret_files(
+        self,
+        request: RuntimeEffectRequest,
+        material: RuntimeProductMaterial,
+        secrets: ResolvedSecretDeliveries,
+        admitted_image: DockerSdkImageInspection,
+    ) -> int:
+        if not secrets.files:
+            return 0
+        try:
+            owner_uid = admitted_image.secret_file_owner_uid()
+        except ValueError:
+            raise _DockerInterpreterPreconditionError(
+                "docker.secret-recipient-unsupported",
+                "secret file requires a supported numeric image user",
+            ) from None
+        labels = _node_labels(request, material)
+        container = self.client.inspect_container(_container_name(request, material.node_id))
+        replacing = (container is not None and isinstance(request.operation, ReconcileNode)
+                     and not _fingerprint_matches(container.labels, labels))
+        if container is not None:
+            _require_node_owner(container.labels, labels, "container")
+            if (not replacing and (container.image_id != admitted_image.image_id
+                    or container.configured_user != admitted_image.configured_user)):
+                raise _DockerInterpreterPreconditionError(
+                    "docker.secret-recipient-conflict",
+                    "existing container does not match the admitted secret recipient",
+                )
+        # Inspect all existing secret resources before any configuration or
+        # retained-data preparation. Observation helpers are readonly effects.
+        for secret in secrets.files:
+            volume_name = _secret_volume_name(request, material.node_id, secret)
+            volume = self.client.inspect_volume(volume_name)
+            if volume is not None:
+                _require_node_owner(volume.labels, {
+                    **labels,
+                    f"{_LABEL_PREFIX}.volume.kind": "secret-file",
+                    f"{_LABEL_PREFIX}.secret.target": secret.target_path,
+                    f"{_LABEL_PREFIX}.secret.reference": secret.reference.reference_id,
+                }, "secret volume")
+                self._require_secret_file(volume_name, secret, owner_uid)
+            elif container is not None and not replacing:
+                raise _DockerInterpreterPreconditionError(
+                    "docker.secret-material-conflict",
+                    "existing container secret material is missing",
+                )
+            if container is not None and not replacing:
+                expected = DockerSdkSecretMount(secret.target_path, volume_name)
+                if container.readonly_secret_mounts.count(expected) != 1:
+                    raise _DockerInterpreterPreconditionError(
+                        "docker.secret-mount-conflict",
+                        "existing container secret mount does not match the approved delivery",
+                    )
+        return owner_uid
+
+    def _require_secret_file(
+        self, volume_name: str, secret: SecretFileRuntimeMaterial, owner_uid: int,
+    ) -> None:
+        try:
+            observed = self.client.inspect_secret_file(volume_name)
+        except DockerSdkSecretFileEvidenceError:
+            raise _DockerInterpreterPreconditionError(
+                "docker.secret-material-conflict",
+                "owned secret file evidence is invalid",
+            ) from None
+        if (observed is None or not observed.regular_file or observed.uid != owner_uid
+                or observed.mode != int(secret.file_mode.value, 8)
+                or observed.content_digest != _secret_value_digest(secret)):
+            raise _DockerInterpreterPreconditionError(
+                "docker.secret-material-conflict",
+                "owned secret file does not match approved material and recipient",
+            )
+
     def _create_node_container(
         self,
         request: RuntimeEffectRequest,
@@ -849,12 +928,15 @@ class DockerRuntimeInterpreter:
         labels: Mapping[str, str],
         secrets: ResolvedSecretDeliveries,
         authority_delivery: _AuthorityDeliveryMaterial,
+        *,
+        owner_uid: int,
     ) -> None:
         create_material = self._prepare_node_container(
             request,
             material,
             labels,
             secrets,
+            owner_uid=owner_uid,
         )
         self.client.run_container(
             name=container_name,
@@ -877,6 +959,8 @@ class DockerRuntimeInterpreter:
         material: RuntimeProductMaterial,
         labels: Mapping[str, str],
         secrets: ResolvedSecretDeliveries,
+        *,
+        owner_uid: int = 0,
     ) -> _NodeContainerCreateMaterial:
         contract = material.product.runtime_contract
         retained_volumes = {
@@ -936,28 +1020,17 @@ class DockerRuntimeInterpreter:
                 f"{_LABEL_PREFIX}.secret.reference": secret.reference.reference_id,
             }
             inspection = self.client.inspect_volume(volume_name)
-            expected_digest = _secret_value_digest(secret)
             if inspection is None:
                 self.client.create_volume(name=volume_name, labels=volume_labels)
                 self.client.materialize_secret_file(
                     volume_name,
                     secret.value,
                     secret.file_mode,
+                    owner_uid=owner_uid,
                 )
             else:
                 _require_node_owner(inspection.labels, volume_labels, "secret volume")
-                digest = self.client.secret_file_digest(volume_name)
-                if digest is None:
-                    self.client.materialize_secret_file(
-                        volume_name,
-                        secret.value,
-                        secret.file_mode,
-                    )
-                elif digest != expected_digest:
-                    raise _DockerInterpreterPreconditionError(
-                        "docker.secret-digest-conflict",
-                        "owned secret volume has unexpected digest",
-                    )
+            self._require_secret_file(volume_name, secret, owner_uid)
             secret_mounts.append(DockerSdkSecretMount(secret.target_path, volume_name))
 
         return _NodeContainerCreateMaterial(

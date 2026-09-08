@@ -18,6 +18,10 @@ RUN python -m pip install --upgrade pip \
 
 CMD ["python", "-c", "import control_plane_kit_interpreters; print('control-plane-kit-interpreters ready')"]
 
+FROM package AS secret-reader-test
+
+USER 10006
+
 FROM package AS test
 
 COPY tests ./tests
