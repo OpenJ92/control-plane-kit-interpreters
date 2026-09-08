@@ -25,6 +25,7 @@ def main() -> None:
     sdk = DockerSdkClient(client=client, configuration_helper_image=helper_image)
     resources = []
     helper_ids = []
+    absent_ids = set()
     original_helper = sdk._create_configuration_helper
 
     def tracked_helper(*args, **kwargs):
@@ -102,22 +103,24 @@ def main() -> None:
                 try:
                     manager.get(identity)
                 except docker.errors.NotFound:
-                    pass
+                    absent_ids.add((type(manager).__name__, identity))
                 else:
                     cleanup_failed = True
             except docker.errors.NotFound:
-                pass
+                absent_ids.add((type(manager).__name__, identity))
             except Exception:
                 cleanup_failed = True
         for identity in helper_ids:
             try:
                 client.containers.get(identity)
             except docker.errors.NotFound:
-                pass
+                absent_ids.add((type(client.containers).__name__, identity))
             else:
                 cleanup_failed = True
         client.close()
-        if cleanup_failed:
+        expected_absent = {(type(manager).__name__, identity) for manager, identity in resources}
+        expected_absent |= {(type(client.containers).__name__, identity) for identity in helper_ids}
+        if cleanup_failed or absent_ids != expected_absent:
             raise RuntimeError("local secret fixture cleanup incomplete")
     print(json.dumps({"status": "passed", "numeric_reader": True,
                       "unrelated_uid_denied": True, "readonly": True, "residue": "absent"}))
