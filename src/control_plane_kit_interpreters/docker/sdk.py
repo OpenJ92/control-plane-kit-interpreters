@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import os
+import re
 from io import BytesIO
 from importlib import import_module
 from ipaddress import ip_address
@@ -107,16 +108,37 @@ class DockerSdkResourceInspection:
     private_addresses: Mapping[str, str] = field(default_factory=dict)
     image_id: str | None = None
     network_names: tuple[str, ...] = ()
+    configured_user: str | None = None
+    readonly_secret_mounts: tuple["DockerSdkSecretMount", ...] = ()
 
 
 @dataclass(frozen=True)
 class DockerSdkImageInspection:
     image_id: str
     repo_digests: tuple[str, ...]
+    configured_user: str | None = None
 
     def __post_init__(self) -> None:
         if not _is_canonical_sha256_image_id(self.image_id):
             raise ValueError("Docker image ID must be canonical lowercase sha256")
+
+    def secret_file_owner_uid(self) -> int:
+        return _secret_file_owner_uid(self.configured_user)
+
+
+@dataclass(frozen=True, repr=False)
+class DockerSdkSecretFileInspection:
+    content_digest: str
+    uid: int
+    mode: int
+    regular_file: bool
+
+    def __repr__(self) -> str:
+        return "DockerSdkSecretFileInspection(<redacted>)"
+
+
+class DockerSdkSecretFileEvidenceError(RuntimeError):
+    """The provider returned an archive that cannot prove protected material."""
 
 
 @dataclass(frozen=True, order=True)
@@ -412,6 +434,7 @@ class DockerSdkClient:
         return DockerSdkImageInspection(
             image_id=image_id,
             repo_digests=tuple(sorted(repo_digests)),
+            configured_user=_configured_user(attrs),
         )
 
     def inspect_container(self, name: str) -> DockerSdkResourceInspection | None:
@@ -603,11 +626,15 @@ class DockerSdkClient:
         volume_name: str,
         value: SecretValue,
         file_mode: SecretFileMode,
+        *,
+        owner_uid: int = 0,
     ) -> None:
         if not isinstance(value, SecretValue):
             raise TypeError("secret file materialization requires SecretValue")
         if not isinstance(file_mode, SecretFileMode):
             raise TypeError("secret file materialization requires SecretFileMode")
+        if type(owner_uid) is not int or not 0 <= owner_uid <= 2147483647:
+            raise ValueError("secret file owner UID is invalid")
         helper = self._create_configuration_helper(
             volume_name,
             readonly=False,
@@ -616,14 +643,30 @@ class DockerSdkClient:
             helper.start()
             helper.put_archive(
                 "/artifact",
-                _secret_archive(value, file_mode),
+                _secret_archive(value, file_mode, owner_uid=owner_uid),
             )
-            result = helper.exec_run(
-                ["chmod", file_mode.value, "/artifact/content"]
-            )
-            exit_code = _exit_code(result)
-            if exit_code != 0:
-                raise RuntimeError("secret helper chmod failed")
+            # Preserve the root path. Nonroot ownership/mode come from the archive;
+            # a capability-dropped root helper cannot chmod another UID's file.
+            if owner_uid == 0:
+                result = helper.exec_run(
+                    ["chmod", file_mode.value, "/artifact/content"]
+                )
+                if _exit_code(result) != 0:
+                    raise RuntimeError("secret helper chmod failed")
+        finally:
+            helper.remove(force=True)
+
+    def inspect_secret_file(self, volume_name: str) -> DockerSdkSecretFileInspection | None:
+        helper = self._create_configuration_helper(volume_name, readonly=True)
+        try:
+            helper.start()
+            try:
+                chunks, _metadata = helper.get_archive("/artifact/content")
+            except Exception as error:
+                if self._is_not_found(error):
+                    return None
+                raise
+            return _secret_file_inspection(chunks)
         finally:
             helper.remove(force=True)
 
@@ -798,6 +841,8 @@ class DockerSdkClient:
             network_names=(
                 self._network_names(resource) if include_runtime_identity else ()
             ),
+            configured_user=_configured_user(getattr(resource, "attrs", None)),
+            readonly_secret_mounts=_readonly_secret_mounts(getattr(resource, "attrs", None)),
         )
 
     def _labels(self, resource: Any) -> Mapping[str, str]:
@@ -1006,15 +1051,86 @@ def _artifact_archive(artifact: ConfigurationArtifact) -> bytes:
     return archive.getvalue()
 
 
-def _secret_archive(value: SecretValue, file_mode: SecretFileMode) -> bytes:
+def _secret_archive(value: SecretValue, file_mode: SecretFileMode, *, owner_uid: int = 0) -> bytes:
     encoded = value.reveal().encode("utf-8")
     info = tarfile.TarInfo("content")
     info.size = len(encoded)
     info.mode = int(file_mode.value, 8)
+    info.uid = owner_uid
     archive = BytesIO()
     with tarfile.open(fileobj=archive, mode="w") as tar:
         tar.addfile(info, BytesIO(encoded))
     return archive.getvalue()
+
+
+def _configured_user(attrs: Any) -> str | None:
+    config = attrs.get("Config") if isinstance(attrs, Mapping) else None
+    user = config.get("User") if isinstance(config, Mapping) else None
+    return user if isinstance(user, str) else None
+
+
+def _secret_file_owner_uid(user: str | None) -> int:
+    if user == "":
+        return 0
+    if (not isinstance(user, str) or len(user) > 10
+            or re.fullmatch(r"0|[1-9][0-9]*", user) is None
+            or int(user) > 2147483647):
+        raise ValueError("secret file requires a supported numeric image user")
+    return int(user)
+
+
+def _readonly_secret_mounts(attrs: Any) -> tuple[DockerSdkSecretMount, ...]:
+    if not isinstance(attrs, Mapping):
+        return ()
+    host = attrs.get("HostConfig")
+    configured = host.get("Mounts") if isinstance(host, Mapping) else None
+    observed = attrs.get("Mounts")
+    if not isinstance(configured, list) or not isinstance(observed, list):
+        return ()
+    result = []
+    for mount in configured:
+        if not isinstance(mount, Mapping):
+            continue
+        options = mount.get("VolumeOptions")
+        if (mount.get("Type") != "volume" or mount.get("ReadOnly") is not True
+                or not isinstance(options, Mapping) or options.get("Subpath") != "content"):
+            continue
+        source, target = mount.get("Source"), mount.get("Target")
+        if not isinstance(source, str) or not isinstance(target, str):
+            continue
+        matches = [item for item in observed if isinstance(item, Mapping)
+                   and item.get("Destination") == target]
+        if (len(matches) == 1 and matches[0].get("Type") == "volume"
+                and matches[0].get("Name") == source and matches[0].get("RW") is False):
+            result.append(DockerSdkSecretMount(target, source))
+    return tuple(result)
+
+
+def _secret_file_inspection(chunks: Any) -> DockerSdkSecretFileInspection:
+    # Bound untrusted archive metadata and content together; never expose either
+    # in errors. This boundary supports at most 16 MiB of archived material.
+    maximum_archive_bytes = 16 * 1024 * 1024
+    archive = BytesIO()
+    try:
+        for chunk in chunks:
+            if not isinstance(chunk, bytes) or archive.tell() + len(chunk) > maximum_archive_bytes:
+                raise ValueError("archive bound")
+            archive.write(chunk)
+        archive.seek(0)
+        with tarfile.open(fileobj=archive, mode="r:") as tar:
+            members = tar.getmembers()
+            if (len(members) != 1 or members[0].name != "content" or not members[0].isfile()
+                    or members[0].sparse is not None
+                    or not 0 <= members[0].size <= maximum_archive_bytes):
+                raise ValueError("archive type")
+            member = members[0]
+            content = tar.extractfile(member)
+            if content is None:
+                raise ValueError("archive content")
+            digest = hashlib.sha256(content.read()).hexdigest()
+            return DockerSdkSecretFileInspection(digest, member.uid, member.mode, True)
+    except Exception:
+        raise DockerSdkSecretFileEvidenceError("secret file inspection evidence is invalid") from None
 
 
 def _endpoint_url(protocol: Protocol, host: str, port: int) -> str:
