@@ -1,121 +1,126 @@
-"""Live Docker proof for SDK-backed read-only secret files."""
+"""Owning-gate local Docker witness; not published-product acceptance."""
 
 from __future__ import annotations
 
-import hashlib
 import json
+import hashlib
+import os
 from uuid import uuid4
 
 from control_plane_kit_core.secrets import SecretFileMode, SecretValue
-
-from control_plane_kit_interpreters.docker import (
-    DockerSdkClient,
-    DockerSdkSecretMount,
-)
-
-
-SECRET_TEXT = "live-secret-content-not-in-output"
+from control_plane_kit_interpreters.docker import DockerSdkClient, DockerSdkSecretMount
 
 
 def main() -> None:
-    suffix = uuid4().hex[:12]
-    network_name = f"cpk-live-secret-{suffix}"
-    volume_name = f"cpk-live-secret-{suffix}"
-    container_name = f"cpk-live-secret-{suffix}"
-    target_path = "/run/secrets/api-token"
-    labels = {
-        "control-plane-kit.live-proof": "secret-delivery",
-        "control-plane-kit.disposable": "true",
-    }
-    secret = SecretValue(SECRET_TEXT)
-    expected_digest = hashlib.sha256(SECRET_TEXT.encode("utf-8")).hexdigest()
-    sdk = DockerSdkClient()
+    import docker
 
+    client = docker.from_env()
+    if client.info().get("ID") != os.environ["CPK_SECRET_ENGINE_ID"]:
+        client.close()
+        raise RuntimeError("local secret fixture engine mismatch")
+    run_id = os.environ["CPK_SECRET_TEST_RUN"]
+    labels = {"org.openj92.cpk.test-run": run_id}
+    image_id = os.environ["CPK_SECRET_READER_IMAGE"]
+    helper_image = os.environ["CPK_SECRET_HELPER_IMAGE"]
+    sdk = DockerSdkClient(client=client, configuration_helper_image=helper_image)
+    resources = []
+    helper_ids = []
+    original_helper = sdk._create_configuration_helper
+
+    def tracked_helper(*args, **kwargs):
+        helper = original_helper(*args, **kwargs)
+        helper_ids.append(helper.id)
+        return helper
+
+    sdk._create_configuration_helper = tracked_helper
+    secret = SecretValue("numeric-reader-disposable-test-material")
+    token = uuid4().hex
+    target = "/run/secrets/cpk-fixture"
+    cleanup_failed = False
     try:
-        sdk.pull_image(sdk.configuration_helper_image)
-        sdk.create_network(name=network_name, labels=labels)
-        sdk.create_volume(name=volume_name, labels=labels)
-        sdk.materialize_secret_file(
-            volume_name,
-            secret,
-            SecretFileMode.OWNER_READ_ONLY,
+        inspected = sdk.inspect_image(image_id)
+        assert inspected is not None and inspected.image_id == image_id
+        assert inspected.secret_file_owner_uid() == 10006
+        assert client.images.get(image_id).labels.get("org.openj92.cpk.test-run") == run_id
+        network = client.networks.create(f"cpk-secret-net-{token}", labels=labels)
+        resources.append((client.networks, network.id))
+        volume = client.volumes.create(name=f"cpk-secret-volume-{token}", labels=labels)
+        resources.append((client.volumes, volume.name))
+        sdk.materialize_secret_file(volume.name, secret, SecretFileMode.OWNER_READ_ONLY,
+                                    owner_uid=inspected.secret_file_owner_uid())
+        evidence = sdk.inspect_secret_file(volume.name)
+        assert evidence.uid == 10006 and evidence.mode == 0o400 and evidence.regular_file
+        mount = DockerSdkSecretMount(target, volume.name)
+        read_script = (
+            "import os, pathlib, hashlib\n"
+            "assert os.getuid() == 10006\n"
+            f"p=pathlib.Path({target!r})\n"
+            f"assert hashlib.sha256(p.read_bytes()).hexdigest() == {hashlib.sha256(secret.reveal().encode()).hexdigest()!r}\n"
+            "try: p.write_bytes(b'x')\n"
+            "except OSError: pass\n"
+            "else: raise SystemExit(4)\n"
         )
-        digest = sdk.secret_file_digest(volume_name)
-        if digest != expected_digest:
-            raise AssertionError("secret digest did not match runtime value")
-        sdk.run_container(
-            name=container_name,
-            image=sdk.configuration_helper_image,
-            network=network_name,
-            aliases=(container_name,),
-            environment={},
-            labels=labels,
-            volumes={},
-            command=(
-                "python",
-                "-B",
-                "-c",
-                _read_only_assertion_script(target_path, expected_digest),
-            ),
-            secret_mounts=(
-                DockerSdkSecretMount(target_path, volume_name),
-            ),
+        deny_script = (
+            "import os, pathlib\n"
+            "assert os.getuid() == 10007\n"
+            f"p=pathlib.Path({target!r})\n"
+            "try: p.read_bytes()\n"
+            "except PermissionError: pass\n"
+            "else: raise SystemExit(5)\n"
         )
-        container = sdk.client.containers.get(container_name)
-        result = container.wait(timeout=30)
-        status_code = result.get("StatusCode")
-        if status_code != 0:
-            logs = container.logs(stdout=True, stderr=True).decode(
-                "utf-8",
-                errors="replace",
-            )
-            if SECRET_TEXT in logs:
-                raise AssertionError("secret content leaked into container logs")
-            raise AssertionError(f"secret container exited {status_code}: {logs}")
+        for suffix, script, user in (("reader", read_script, None), ("other", deny_script, "10007")):
+            kwargs = {} if user is None else {"user": user}
+            container = client.containers.create(
+                inspected.image_id, name=f"cpk-secret-{suffix}-{token}",
+                labels=labels, command=["python", "-B", "-c", script],
+                mounts=[dict(mount.docker_mount())], network=network.id,
+                read_only=True, cap_drop=["ALL"], security_opt=["no-new-privileges"],
+                **kwargs)
+            resources.append((client.containers, container.id))
+            container.start()
+            result = container.wait(timeout=30)
+            logs = container.logs(stdout=True, stderr=True, tail=30)
+            assert secret.reveal().encode() not in logs, "material leaked"
+            assert result.get("StatusCode") == 0, "numeric reader access law failed"
+            container.reload()
+            assert container.attrs["Image"] == inspected.image_id
+            assert container.attrs["Config"]["User"] == (user or "10006")
+            assert container.attrs["Mounts"][0]["RW"] is False
     finally:
-        _cleanup(sdk, container_name, network_name, volume_name)
-
-    print(
-        json.dumps(
-            {
-                "status": "passed",
-                "secret_digest": expected_digest,
-                "read_only_mount": True,
-            },
-            sort_keys=True,
-        )
-    )
-
-
-def _read_only_assertion_script(target_path: str, expected_digest: str) -> str:
-    return (
-        "from pathlib import Path\n"
-        "import hashlib, sys\n"
-        f"target = Path({target_path!r})\n"
-        "content = target.read_bytes()\n"
-        f"if hashlib.sha256(content).hexdigest() != {expected_digest!r}:\n"
-        "    raise SystemExit(2)\n"
-        "try:\n"
-        "    target.write_text('mutated', encoding='utf-8')\n"
-        "except OSError:\n"
-        "    raise SystemExit(0)\n"
-        "raise SystemExit(3)\n"
-    )
-
-
-def _cleanup(
-    sdk: DockerSdkClient,
-    container_name: str,
-    network_name: str,
-    volume_name: str,
-) -> None:
-    for inspect, action, name in (
-        (sdk.inspect_container, sdk.remove_container, container_name),
-        (sdk.inspect_network, sdk.remove_network, network_name),
-        (sdk.inspect_volume, sdk.remove_volume, volume_name),
-    ):
-        if inspect(name) is not None:
-            action(name)
+        for manager, identity in reversed(resources):
+            try:
+                resource = manager.get(identity)
+                resource.reload()
+                observed_labels = resource.attrs.get("Labels") or resource.attrs.get("Config", {}).get("Labels", {})
+                if observed_labels.get("org.openj92.cpk.test-run") != run_id:
+                    cleanup_failed = True
+                    continue
+                if isinstance(resource, docker.models.containers.Container):
+                    resource.remove(force=True)
+                else:
+                    resource.remove()
+                try:
+                    manager.get(identity)
+                except docker.errors.NotFound:
+                    pass
+                else:
+                    cleanup_failed = True
+            except docker.errors.NotFound:
+                pass
+            except Exception:
+                cleanup_failed = True
+        for identity in helper_ids:
+            try:
+                client.containers.get(identity)
+            except docker.errors.NotFound:
+                pass
+            else:
+                cleanup_failed = True
+        client.close()
+        if cleanup_failed:
+            raise RuntimeError("local secret fixture cleanup incomplete")
+    print(json.dumps({"status": "passed", "numeric_reader": True,
+                      "unrelated_uid_denied": True, "readonly": True, "residue": "absent"}))
 
 
 if __name__ == "__main__":
