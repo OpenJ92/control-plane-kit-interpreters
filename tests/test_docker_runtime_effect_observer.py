@@ -42,7 +42,7 @@ from control_plane_kit_interpreters.docker.sdk import (
     DockerTlsClientConfig,
 )
 from test_docker_start_node_phase_total import (
-    HELLO_IMAGE_ID, HELLO_REFERENCE, _hello_request,
+    HELLO_IMAGE_ID, HELLO_REFERENCE, _hello_request, _official_request,
 )
 from test_docker_runtime_interpreter import (
     _grant, _local_runtime_authority, _material, _product_with_secret_delivery,
@@ -266,6 +266,31 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                 if not container:
                     client.container = None
                 self.assertEqual(self.observe(request, client), expected)
+
+    def test_official_hub_familiar_pin_confirms_start_and_reconcile_without_mutation(self):
+        for operation in (StartNode, ReconcileNode):
+            request = replace(_official_request(), operation=operation(NodeTarget("hello")))
+            digest = request.products[0].product.image.digest
+            for spelling in ("postgres", "library/postgres", "docker.io/postgres", "docker.io/library/postgres"):
+                with self.subTest(operation=operation, spelling=spelling):
+                    client = _ReadClient(request)
+                    client.image = replace(client.image, repo_digests=(spelling + "@" + digest,))
+                    self.assertEqual(self.observe(request, client), "succeeded")
+                    self.assertEqual(client.calls[-1], ("inspect_image", request.products[0].product.image.execution_reference))
+
+    def test_official_hub_pin_mismatch_cannot_confirm_node(self):
+        request = _official_request()
+        digest = request.products[0].product.image.digest
+        for references in (
+            (), (digest,), ("postgres:latest",), ("postgres@sha256:" + "f" * 64,),
+            ("redis@" + digest,), ("docker.io/foreign/postgres@" + digest,),
+            ("ghcr.io/library/postgres@" + digest,), ("registry-1.docker.io/library/postgres@" + digest,),
+            ("index.docker.io/library/postgres@" + digest,), ("postgres@" + digest + "-suffix",),
+        ):
+            with self.subTest(references=references):
+                client = _ReadClient(request)
+                client.image = replace(client.image, repo_digests=references)
+                self.assertEqual(self.observe(request, client), "indeterminate")
 
     def test_every_ownership_label_and_exact_coordinate_is_required(self):
         request = _hello_request()

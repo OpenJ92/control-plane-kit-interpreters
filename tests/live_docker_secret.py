@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from control_plane_kit_core.secrets import SecretFileMode, SecretValue
 from control_plane_kit_interpreters.docker import DockerSdkClient, DockerSdkSecretMount
+import control_plane_kit_interpreters.docker.sdk as docker_sdk
 
 
 def main() -> None:
@@ -39,6 +40,19 @@ def main() -> None:
     target = "/run/secrets/cpk-fixture"
     cleanup_failed = False
     try:
+        # The owning gate already requires this official policy image. Inspect
+        # its original RepoDigests; never pull or manufacture a familiar alias.
+        policy = client.images.get("python:3.14-slim")
+        raw_digests = policy.attrs.get("RepoDigests", ())
+        prefixes = ("python@", "library/python@", "docker.io/python@", "docker.io/library/python@")
+        observed = next((ref for prefix in prefixes for ref in raw_digests if ref.startswith(prefix)), None)
+        assert observed is not None
+        canonical = "docker.io/library/python@" + observed.split("@", 1)[1]
+        policy_inspected = sdk.inspect_image(canonical)
+        assert policy_inspected is not None and policy_inspected.image_id == policy.id
+        assert set(policy_inspected.repo_digests) == set(raw_digests)
+        assert docker_sdk.matches_image_reference(canonical, policy_inspected.repo_digests)
+        familiar_observed = observed != canonical
         inspected = sdk.inspect_image(image_id)
         assert inspected is not None and inspected.image_id == image_id
         assert inspected.configured_user == "10006:10008"
@@ -126,7 +140,8 @@ def main() -> None:
         if cleanup_failed or absent_ids != expected_absent:
             raise RuntimeError("local secret fixture cleanup incomplete")
     print(json.dumps({"status": "passed", "numeric_reader": True, "numeric_group_preserved": True,
-                      "unrelated_uid_denied": True, "readonly": True, "residue": "absent"}))
+                      "unrelated_uid_denied": True, "readonly": True, "residue": "absent",
+                      "canonical_image_resolution": True, "familiar_repo_digest_observed": familiar_observed}))
 
 
 if __name__ == "__main__":
