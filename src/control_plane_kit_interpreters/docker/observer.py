@@ -55,6 +55,7 @@ from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkResourceInspection,
     DockerTlsClientConfig,
     _is_canonical_sha256_image_id,
+    matches_image_reference,
 )
 from control_plane_kit_interpreters.secrets import secret_resolution_grant_for
 
@@ -314,7 +315,7 @@ def _inspect(request: RuntimeEffectRequest, client: DockerSdkClient) -> _Postcon
     image = client.inspect_image(reference)
     if (
         not isinstance(image, DockerSdkImageInspection)
-        or reference not in image.repo_digests
+        or not matches_image_reference(reference, image.repo_digests)
         or not _is_canonical_sha256_image_id(container.image_id)
     ):
         return _Postcondition.UNESTABLISHED

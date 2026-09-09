@@ -70,6 +70,18 @@ Private-only networking is the default. Host publication remains explicit and
 continues to use the lower-level `DockerSdkPortBinding`/published-port proof
 surface.
 
+Image admission and node observation share the SDK's pure
+`matches_image_reference(expected, repo_digests)` comparison. It validates the
+canonical expected reference with Core's `OciImageReference` and preserves the
+exact registry, repository and full SHA256 digest. For Docker Hub official
+images only, `docker.io/library/name`, `docker.io/name`, `library/name` and
+`name` are equivalent repository spellings. Raw provider `RepoDigests` remain
+unchanged; tags, image IDs, foreign repositories and undocumented registry
+aliases cannot substitute for the immutable pin. See Docker's
+[reference normalization](https://github.com/distribution/reference/blob/main/normalize.go).
+The owning local Docker witness inspects its existing official Python policy
+image and reports whether familiar provider spelling was actually observed.
+
 Secret-bearing products currently fail closed unless secret values have been
 resolved by a future authority boundary. That is intentional: secret references
 may be durable graph data, but secret values are not part of

@@ -62,6 +62,7 @@ from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkPortBinding,
     DockerSdkSecretMount,
     DockerSdkSecretFileEvidenceError,
+    matches_image_reference,
     runtime_endpoint_observations,
     verify_published_ports,
 )
@@ -491,7 +492,7 @@ class DockerRuntimeInterpreter:
                 _StartNodePhase.IMAGE_AVAILABILITY,
                 lambda: self.client.inspect_image(reference),
             )
-        if inspection is None or reference not in inspection.repo_digests:
+        if inspection is None or not matches_image_reference(reference, inspection.repo_digests):
             raise _DockerInterpreterPreconditionError(
                 "docker.image-reference-conflict",
                 "Docker image does not match the declared immutable reference",
