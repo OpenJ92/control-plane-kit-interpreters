@@ -364,7 +364,10 @@ class ProbeOpener:
 
 class DockerSdkClientTests(unittest.TestCase):
     def test_protected_file_recipient_uses_explicit_numeric_image_user(self) -> None:
-        for configured_user, expected in (("", 0), ("0", 0), ("10006", 10006), ("2147483647", 2147483647)):
+        for configured_user, expected in (("", 0), ("0", 0), ("10006", 10006), ("2147483647", 2147483647),
+                                          ("10006:10006", 10006), ("65532:65532", 65532),
+                                          ("10006:10008", 10006), ("0:0", 0),
+                                          ("2147483647:2147483647", 2147483647)):
             with self.subTest(configured_user=configured_user):
                 raw = FakeDockerClient()
                 observed = FakeImage([], repo_digests=("fixture@sha256:" + "a" * 64,))
@@ -379,7 +382,10 @@ class DockerSdkClientTests(unittest.TestCase):
     def test_protected_file_recipient_rejects_unsupported_or_missing_evidence(self) -> None:
         for config in (None, {}, {"User": None}, {"User": 0}, {"User": "secrets"},
                        {"User": "00"}, {"User": "+1"}, {"User": " 1"},
-                       {"User": "10006:10006"}, {"User": "2147483648"}, {"User": "١"}):
+                       {"User": "2147483648"}, {"User": "١"},
+                       *({"User": value} for value in ("1:", ":1", "1:2:3", "1:group", "user:1",
+                           "1:01", "01:1", "1:+1", "1:-1", "1: 1", "1:١",
+                           "1:2147483648", "2147483648:1"))):
             with self.subTest(config=config):
                 raw = FakeDockerClient()
                 observed = FakeImage([])
