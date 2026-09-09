@@ -741,8 +741,8 @@ def _hello_request(
     )
 
 
-def _official_request() -> RuntimeEffectRequest:
-    request = _hello_request()
+def _official_request(request: RuntimeEffectRequest | None = None) -> RuntimeEffectRequest:
+    request = _hello_request() if request is None else request
     material = request.products[0]
     product = replace(material.product, image=replace(material.product.image,
         registry="docker.io", repository="library/postgres"))

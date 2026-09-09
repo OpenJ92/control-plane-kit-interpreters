@@ -269,7 +269,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
 
     def test_official_hub_familiar_pin_confirms_start_and_reconcile_without_mutation(self):
         for operation in (StartNode, ReconcileNode):
-            request = replace(_official_request(), operation=operation(NodeTarget("hello")))
+            request = _official_request(_plain_node_request(operation)) if operation is ReconcileNode else _official_request()
             digest = request.products[0].product.image.digest
             for spelling in ("postgres", "library/postgres", "docker.io/postgres", "docker.io/library/postgres"):
                 with self.subTest(operation=operation, spelling=spelling):
