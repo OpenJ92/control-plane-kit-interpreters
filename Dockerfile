@@ -20,7 +20,7 @@ CMD ["python", "-c", "import control_plane_kit_interpreters; print('control-plan
 
 FROM package AS secret-reader-test
 
-USER 10006
+USER 10006:10008
 
 FROM package AS test
 

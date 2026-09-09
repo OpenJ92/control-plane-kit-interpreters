@@ -41,6 +41,7 @@ def main() -> None:
     try:
         inspected = sdk.inspect_image(image_id)
         assert inspected is not None and inspected.image_id == image_id
+        assert inspected.configured_user == "10006:10008"
         assert inspected.secret_file_owner_uid() == 10006
         assert client.images.get(image_id).labels.get("org.openj92.cpk.test-run") == run_id
         network = client.networks.create(f"cpk-secret-net-{token}", labels=labels)
@@ -55,6 +56,7 @@ def main() -> None:
         read_script = (
             "import os, pathlib, hashlib\n"
             "assert os.getuid() == 10006\n"
+            "assert os.getgid() == 10008\n"
             f"p=pathlib.Path({target!r})\n"
             f"assert hashlib.sha256(p.read_bytes()).hexdigest() == {hashlib.sha256(secret.reveal().encode()).hexdigest()!r}\n"
             "try: p.write_bytes(b'x')\n"
@@ -64,12 +66,13 @@ def main() -> None:
         deny_script = (
             "import os, pathlib\n"
             "assert os.getuid() == 10007\n"
+            "assert os.getgid() == 10008\n"
             f"p=pathlib.Path({target!r})\n"
             "try: p.read_bytes()\n"
             "except PermissionError: pass\n"
             "else: raise SystemExit(5)\n"
         )
-        for suffix, script, user in (("reader", read_script, None), ("other", deny_script, "10007")):
+        for suffix, script, user in (("reader", read_script, None), ("other", deny_script, "10007:10008")):
             kwargs = {} if user is None else {"user": user}
             container = client.containers.create(
                 inspected.image_id, name=f"cpk-secret-{suffix}-{token}",
@@ -85,7 +88,7 @@ def main() -> None:
             assert result.get("StatusCode") == 0, "numeric reader access law failed"
             container.reload()
             assert container.attrs["Image"] == inspected.image_id
-            assert container.attrs["Config"]["User"] == (user or "10006")
+            assert container.attrs["Config"]["User"] == (user or inspected.configured_user)
             assert container.attrs["Mounts"][0]["RW"] is False
     finally:
         for manager, identity in reversed(resources):
@@ -122,7 +125,7 @@ def main() -> None:
         expected_absent |= {(type(client.containers).__name__, identity) for identity in helper_ids}
         if cleanup_failed or absent_ids != expected_absent:
             raise RuntimeError("local secret fixture cleanup incomplete")
-    print(json.dumps({"status": "passed", "numeric_reader": True,
+    print(json.dumps({"status": "passed", "numeric_reader": True, "numeric_group_preserved": True,
                       "unrelated_uid_denied": True, "readonly": True, "residue": "absent"}))
 
 

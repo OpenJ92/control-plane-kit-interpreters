@@ -1072,11 +1072,15 @@ def _configured_user(attrs: Any) -> str | None:
 def _secret_file_owner_uid(user: str | None) -> int:
     if user == "":
         return 0
-    if (not isinstance(user, str) or len(user) > 10
-            or re.fullmatch(r"0|[1-9][0-9]*", user) is None
-            or int(user) > 2147483647):
+    if not isinstance(user, str) or len(user) > 21:
         raise ValueError("secret file requires a supported numeric image user")
-    return int(user)
+    components = user.split(":")
+    if (len(components) not in (1, 2)
+            or any(re.fullmatch(r"0|[1-9][0-9]*", component) is None
+                   or len(component) > 10 or int(component) > 2147483647
+                   for component in components)):
+        raise ValueError("secret file requires a supported numeric image user")
+    return int(components[0])
 
 
 def _readonly_secret_mounts(attrs: Any) -> tuple[DockerSdkSecretMount, ...]:

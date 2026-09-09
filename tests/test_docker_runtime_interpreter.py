@@ -181,11 +181,16 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                                     if helper is not target))
 
     def test_numeric_file_reader_propagates_through_start_and_reuse(self) -> None:
+        for user, uid in (("10006", 10006), ("1:1", 1), ("10006:10008", 10006)):
+            with self.subTest(user=user):
+                self._assert_numeric_reader_start_and_reuse(user, uid)
+
+    def _assert_numeric_reader_start_and_reuse(self, user: str, uid: int) -> None:
         raw = FakeDockerClient()
         product = _product_with_file_secret_delivery()
         reference = product.image.execution_reference
         image = FakeImage([], repo_digests=(reference,))
-        image.attrs["Config"]["User"] = "10006"
+        image.attrs["Config"]["User"] = user
         raw.images.resources[reference] = image
         resolver = FakeSecretResolver(raw, SecretResolved(
             SecretReference("secret://local/api-token"), SecretValue("fixture")))
@@ -201,9 +206,10 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                           if item["labels"].get("org.openj92.cpk.volume.kind") == "secret-file")
             with tarfile.open(fileobj=BytesIO(raw.containers.volume_archives[volume]["/artifact"]), mode="r") as archive:
                 content = archive.getmember("content")
-                self.assertEqual(content.uid, 10006)
+                self.assertEqual(content.uid, uid)
                 self.assertEqual(content.mode, 0o400)
             target = raw.containers.resources[record["name"]]
+            self.assertEqual(target.attrs["Config"]["User"], user)
             target.attrs["State"]["Running"] = False
         self.assertEqual(len(_workload_container_records(raw)), 1)
 
@@ -224,7 +230,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
 
     def test_unsupported_file_reader_fails_before_any_material_mutation(self) -> None:
         for effect in (StartNode(NodeTarget("api")), ReconcileNode(NodeTarget("api"))):
-            for user in ("secrets", "01", "1:1", None):
+            for user in ("secrets", "01", "1:group", None):
                 with self.subTest(effect=type(effect).__name__, user=user):
                     raw = FakeDockerClient()
                     product = _product_with_file_secret_delivery()
