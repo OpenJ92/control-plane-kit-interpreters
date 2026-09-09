@@ -17,6 +17,8 @@ import time
 import unittest
 from unittest.mock import patch
 
+import control_plane_kit_interpreters.docker.sdk as docker_sdk
+
 from control_plane_kit_core.configuration import (
     ConfigurationArtifact,
     ConfigurationFileMode,
@@ -363,6 +365,20 @@ class ProbeOpener:
 
 
 class DockerSdkClientTests(unittest.TestCase):
+    def test_immutable_reference_comparison_rejects_malformed_expected_values(self):
+        matches = getattr(docker_sdk, "matches_image_reference", None)
+        self.assertTrue(callable(matches), "missing shared immutable-reference comparison")
+        digest = "sha256:" + "a" * 64
+        for expected in ("postgres:latest", digest, "postgres@sha256:bad", "postgres@" + digest.upper(),
+                         "https://docker.io/library/postgres@" + digest, "docker.io/library/postgres:latest@" + digest,
+                         "docker.io//postgres@" + digest, "docker.io/../postgres@" + digest,
+                         "docker.io/library/postgres@" + digest + "\n"):
+            with self.subTest(expected=expected):
+                self.assertFalse(matches(expected, (expected,)))
+        canonical = "ghcr.io/openj92/example@" + digest
+        self.assertTrue(matches(canonical, (canonical,)))
+        self.assertFalse(matches(canonical, ("openj92/example@" + digest,)))
+
     def test_protected_file_recipient_uses_explicit_numeric_image_user(self) -> None:
         for configured_user, expected in (("", 0), ("0", 0), ("10006", 10006), ("2147483647", 2147483647),
                                           ("10006:10006", 10006), ("65532:65532", 65532),

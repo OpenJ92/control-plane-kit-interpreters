@@ -10,7 +10,7 @@ from control_plane_kit_core.configuration import (
 )
 from control_plane_kit_core.operations.execution import EffectResultKind
 from control_plane_kit_core.operations.run_identity import RunId
-from control_plane_kit_core.planning import ActivityId, NodeTarget, StartNode
+from control_plane_kit_core.planning import ActivityId, NodeTarget, ReconcileNode, StartNode
 from control_plane_kit_core.products import (
     ProductDescriptorCodec,
     ProductDescriptorDigest,
@@ -302,6 +302,37 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
         self.assertFalse(client.container_created)
         self.assertIs(result.kind, EffectResultKind.FAILED)
         self.assertEqual(result.failure.code, "docker.image-reference-conflict")
+
+    def test_official_hub_familiar_pin_is_admitted_before_start_or_reconcile(self) -> None:
+        request = _official_request()
+        digest = request.products[0].product.image.digest
+        for operation in (StartNode, ReconcileNode):
+            for spelling in ("postgres", "library/postgres", "docker.io/postgres", "docker.io/library/postgres"):
+                with self.subTest(operation=operation, spelling=spelling):
+                    client = _PhaseClient(cached_repo_digests=(spelling + "@" + digest,))
+                    current = replace(request, operation=operation(NodeTarget("hello")))
+                    result = DockerRuntimeInterpreter(client).execute(current)
+                    self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+                    self.assertEqual(client.pull_calls, [])
+                    self.assertEqual(client.image_inspect_references, [request.products[0].product.image.execution_reference])
+
+    def test_official_hub_pin_mismatch_never_provisions(self) -> None:
+        request = _official_request()
+        digest = request.products[0].product.image.digest
+        for references in (
+            (), (digest,), ("postgres:latest",), ("postgres@sha256:" + "f" * 64,),
+            ("redis@" + digest,), ("docker.io/foreign/postgres@" + digest,),
+            ("ghcr.io/library/postgres@" + digest,), ("registry-1.docker.io/library/postgres@" + digest,),
+            ("index.docker.io/library/postgres@" + digest,), ("postgres@" + digest + "-suffix",),
+        ):
+            with self.subTest(references=references):
+                client = _PhaseClient(cached_repo_digests=references)
+                result = DockerRuntimeInterpreter(client).execute(request)
+                self.assertIs(result.kind, EffectResultKind.FAILED)
+                self.assertEqual(result.failure.code, "docker.image-reference-conflict")
+                self.assertEqual(client.calls, ["image-inspect"])
+                self.assertEqual(client.volume_names, [])
+                self.assertFalse(client.container_created)
 
     def test_post_pull_identity_must_resolve_same_exact_repo_digest(self) -> None:
         client = _PhaseClient(
@@ -708,6 +739,16 @@ def _hello_request(
             ),
         ),
     )
+
+
+def _official_request(request: RuntimeEffectRequest | None = None) -> RuntimeEffectRequest:
+    request = _hello_request() if request is None else request
+    material = request.products[0]
+    product = replace(material.product, image=replace(material.product.image,
+        registry="docker.io", repository="library/postgres"))
+    document = ProductDescriptorCodec().encode_document(product)
+    return replace(request, products=(replace(material, product=product,
+        reference=ProductReference(product.identity, ProductDescriptorDigest(document.content_digest))),))
 
 
 def _configuration_artifact() -> ConfigurationArtifact:

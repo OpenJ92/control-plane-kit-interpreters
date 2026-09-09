@@ -15,6 +15,7 @@ from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 from control_plane_kit_core.configuration import ConfigurationArtifact
+from control_plane_kit_core.products import OciImageReference, OciImageReferenceError
 from control_plane_kit_core.probe_intents import (
     EndpointContext,
     LiteralEndpointMaterial,
@@ -31,6 +32,31 @@ def _is_canonical_sha256_image_id(value: object) -> bool:
     return len(digest) == 64 and all(
         character in "0123456789abcdef" for character in digest
     )
+
+
+def matches_image_reference(expected: str, repo_digests: tuple[str, ...]) -> bool:
+    """Match a canonical immutable pin against raw Docker repository digests.
+
+    Only Docker Hub official-library familiar spellings are equivalent. The
+    registry, repository and full digest remain mandatory identity components.
+    """
+    if not isinstance(expected, str):
+        return False
+    name, separator, digest = expected.partition("@")
+    registry, slash, repository = name.partition("/")
+    if not separator or not slash:
+        return False
+    try:
+        image = OciImageReference(registry=registry, repository=repository, digest=digest)
+    except OciImageReferenceError:
+        return False
+    permitted = {expected}
+    if image.registry == "docker.io" and image.repository.startswith("library/"):
+        official = image.repository.removeprefix("library/")
+        if "/" not in official:
+            permitted.update(f"{prefix}{official}@{image.digest}"
+                             for prefix in ("", "library/", "docker.io/"))
+    return any(isinstance(reference, str) and reference in permitted for reference in repo_digests)
 
 
 @dataclass(frozen=True, repr=False)
