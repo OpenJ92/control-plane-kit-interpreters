@@ -1151,7 +1151,7 @@ class DockerObservationGrantContractTests(unittest.TestCase):
                     _grant_for(request, reference, intent) for reference, intent in uses
                 ))
                 self.assertEqual(request.descriptor()["authority_deliveries"], [])
-                with self.assertRaisesRegex(RuntimeEffectContractError, "^runtime observation grant is not admitted$"):
+                with self.assertRaisesRegex(RuntimeEffectContractError, "^connection grant is not admitted$"):
                     RuntimeEffectObservationRequest(request)
                 observation = RuntimeEffectObservationRequest(request, connection_admission=_connection_admission())
                 self.assertIs(observation.runtime_request, request)
