@@ -104,11 +104,19 @@ endpoint observations.
 Provisional empirical Desktop compatibility (#137) is centralized in
 `docker.authority.docker_authority_conformance`, shared by execution and
 observation. Exact canonical and empty-authority behavior remain the default and
-do not fetch Desktop facts. The candidate exception requires the fixed reviewed
-proxy representation, independently configured canonical bind intent, exact
-target/writability/groups, active local transport, and same-client provider facts
+do not fetch Desktop facts. The candidate exception requires canonical approved
+and requested source, the fixed reviewed proxy configured source, and that same
+fixed proxy actual source. It also requires exact target/writability/groups,
+active local transport, and same-client provider facts
 Docker Desktop / linux / Engine29.7.2 / API1.55. Unknown or conflicting facts never
 qualify. It does not accept other versions or discover aliases from observations.
+
+This revised relation replaces the earlier configured-canonical/actual-proxy
+positive arm. Actual Servers qualification contradicted that assumption: its
+private evidence reported the fixed proxy spelling in both configured and actual
+source, and the old predicate rejected it. Earlier fake positive tests did not
+establish empirical support. The revised tests keep that mixed-source arm negative;
+they do not accumulate source permutations or change canonical default behavior.
 
 SDK `configured_bind_mounts` is separate from raw actual `bind_mounts`. Omitted
 configured ReadOnly remains distinguishable from explicit null/malformed evidence;

@@ -24,7 +24,8 @@ class DockerAuthorityConformance(Enum):
 
 _SOCKET = "/var/run/docker.sock"
 _CANONICAL = (DockerSdkBindMount(_SOCKET, _SOCKET, False),)
-_DESKTOP_OBSERVED = (DockerSdkBindMount("/run/host-services/docker.proxy.sock", _SOCKET, False),)
+_DESKTOP_PROXY = "/run/host-services/docker.proxy.sock"
+_DESKTOP_OBSERVED = (DockerSdkBindMount(_DESKTOP_PROXY, _SOCKET, False),)
 _DESKTOP_PROVIDER = DockerAuthorityProviderFacts("Docker Desktop", "linux", "29.7.2", "1.55")
 
 
@@ -37,6 +38,9 @@ def docker_authority_conformance(
 ) -> DockerAuthorityConformance:
     """Compare exact facts, consulting Desktop metadata only for its fixed case.
 
+    The Desktop relation requires canonical requested source, fixed proxy
+    configured source and the same fixed proxy actual source. It does not retain
+    the unqualified configured-canonical/actual-proxy permutation.
     Configured ReadOnly omission is interpreted as false only for the qualified
     API1.55 tuple. Explicit null stays unknown in the SDK projection. Actual RW
     never comes from configured intent. No facts survive between evaluations.
@@ -58,7 +62,7 @@ def docker_authority_conformance(
     mount = configured[0]
     if not isinstance(mount, DockerSdkConfiguredBindMount):
         return DockerAuthorityConformance.UNKNOWN
-    if (mount.source_path != _SOCKET or mount.target_path != _SOCKET
+    if (mount.source_path != _DESKTOP_PROXY or mount.target_path != _SOCKET
             or not (mount.read_only is False or mount.read_only is None)):
         return DockerAuthorityConformance.CONFLICT
     try:
