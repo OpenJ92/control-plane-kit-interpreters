@@ -64,8 +64,9 @@ StopNode            -> stop only the owned container
 RemoveNodeResource  -> remove only the owned container
 ```
 
-Ownership is label/fingerprint based. Existing Docker resources are inspected
-before mutation; unowned or mismatched resources fail before pull/create/remove.
+Docker labels and fingerprints correlate resources with a current authorized
+request; they do not establish historical approval or permit adoption. Existing
+containers are inspected before image pulls or runtime mutation.
 Private-only networking is the default. Host publication remains explicit and
 continues to use the lower-level `DockerSdkPortBinding`/published-port proof
 surface.
@@ -81,6 +82,39 @@ aliases cannot substitute for the immutable pin. See Docker's
 [reference normalization](https://github.com/distribution/reference/blob/main/normalize.go).
 The owning local Docker witness inspects its existing official Python policy
 image and reports whether familiar provider spelling was actually observed.
+
+Process authority belongs to the exact node declaration. Start/Reconcile consume
+the selected tuple only when it equals that node's material declaration; a Docker
+provider connection gives sibling workloads no socket mount or supplementary
+group. Local socket delivery requires the active SDK Unix transport to use the
+exact declared fixed socket path. A lazy client may make its ordinary version
+read to establish that transport. Remote providers cannot use an ambient socket
+GID to deliver local socket access, and reject that combination before TLS
+credential resolution. This transport check does not prove physical host or
+proxy provenance.
+
+SDK container inspections expose `bind_mounts` and `supplementary_groups`:
+`None` means unknown and `()` means known empty. Missing/malformed evidence and
+non-bind occupancy of the socket destination cannot establish absence. Start,
+unchanged Reconcile and read-only observation require exact actual evidence,
+including absence on siblings. Unexpected authority is never repaired or
+credited. A final missing or nonconforming container cannot produce successful
+endpoint observations.
+
+For an existing node with nonempty desired authority, a changed fingerprint is
+unsupported before mutation because the request has no trustworthy prior
+declaration. This includes image, environment and desired-graph changes. An
+unchanged Reconcile may correlate a different recorded plan while preserving
+all other identity/image/network/authority checks; Start retains exact plan
+identity. Approved Stop/Remove select no process authority and retain the
+material declaration for identification. A same-coordinate Stop preserves its
+fingerprint, but observation across changed plan/graph identities remains a
+conflict; this is not a historical-resource adoption mechanism.
+
+Remote observation uses the private Core connection admission independently of
+process delivery. It checks provider credential references and all three exact
+TLS grants before resolving any, reads without mutation, and closes its client
+once. Product and image-pull secrets are not resolved for observation.
 
 Secret-bearing products currently fail closed unless secret values have been
 resolved by a future authority boundary. That is intentional: secret references

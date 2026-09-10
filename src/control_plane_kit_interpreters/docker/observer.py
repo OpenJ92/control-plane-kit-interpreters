@@ -33,6 +33,7 @@ from control_plane_kit_core.runtime_effects import (
     RuntimeEffectKind,
     RuntimeEffectRequest,
 )
+from control_plane_kit_core.runtime_authority import RuntimeAuthorityAccessDeliveryKind
 from control_plane_kit_core.secrets import (
     AuthorizedSecretResolver,
     SecretReference,
@@ -43,11 +44,14 @@ from control_plane_kit_core.secrets import (
 from control_plane_kit_core.types import RuntimeKind
 
 from control_plane_kit_interpreters.docker.runtime import (
-    _cpk_ownership_labels,
+    _authority_delivery_material,
     _container_name,
     _network_name,
     _node_labels,
+    _node_correlation_labels,
     _runtime_labels,
+    _DockerInterpreterPreconditionError,
+    _DockerInterpreterUnsupportedAuthorityError,
 )
 from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkClient,
@@ -151,7 +155,7 @@ class DockerRuntimeEffectObserver:
             return _result(request, admission)
 
         try:
-            binding = self._client_binding(runtime_request, authority)
+            binding = self._client_binding(request, authority)
         except Exception as error:
             if (
                 not isinstance(error, SecretResolutionError)
@@ -186,9 +190,10 @@ class DockerRuntimeEffectObserver:
 
     def _client_binding(
         self,
-        request: RuntimeEffectRequest,
+        observation: RuntimeEffectObservationRequest,
         authority: object | None,
     ) -> tuple[DockerSdkClient, bool] | _Postcondition:
+        request = observation.runtime_request
         if authority is None:
             if request.authority_ref is not None:
                 return _Postcondition.UNESTABLISHED
@@ -202,6 +207,8 @@ class DockerRuntimeEffectObserver:
             return self.client, False
         if authority_kind != "remote-docker-tls":
             return _Postcondition.UNSUPPORTED
+        if request.authority_deliveries:
+            return _Postcondition.UNSUPPORTED
 
         material = getattr(authority, "authority", None)
         endpoint = getattr(material, "endpoint", None)
@@ -213,6 +220,11 @@ class DockerRuntimeEffectObserver:
             return _Postcondition.UNESTABLISHED
         references = tuple(getattr(material, name, None) for name, _ in _TLS_USES)
         if not all(type(reference) is SecretReference for reference in references):
+            return _Postcondition.UNESTABLISHED
+        admission = observation.connection_admission
+        if admission is None or references != tuple(
+            getattr(admission, name) for name, _ in _TLS_USES
+        ):
             return _Postcondition.UNESTABLISHED
 
         # Admit all three exact grants before consuming any connection secret.
@@ -254,7 +266,10 @@ def _admit(request: RuntimeEffectRequest) -> _Postcondition | None:
             contract.configuration_artifacts
             or contract.secret_deliveries
             or contract.retained_data_mounts
-            or request.authority_deliveries
+            or any(
+                delivery.delivery_kind is not RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT
+                for delivery in request.authority_deliveries
+            )
             or (operation_type is ReconcileNode and contract.verification.checks)
         ):
             return _Postcondition.UNSUPPORTED
@@ -263,6 +278,14 @@ def _admit(request: RuntimeEffectRequest) -> _Postcondition | None:
 
 def _inspect(request: RuntimeEffectRequest, client: DockerSdkClient) -> _Postcondition:
     operation_type = type(request.operation)
+    authority_delivery = None
+    if operation_type in (StartNode, ReconcileNode):
+        try:
+            authority_delivery = _authority_delivery_material(request, client)
+        except _DockerInterpreterUnsupportedAuthorityError:
+            return _Postcondition.UNSUPPORTED
+        except _DockerInterpreterPreconditionError:
+            return _Postcondition.UNESTABLISHED
     if operation_type in _RUNTIME_READS:
         runtime_id = request.operation.target.runtime_id
         name = _network_name(request, runtime_id)
@@ -296,6 +319,7 @@ def _inspect(request: RuntimeEffectRequest, client: DockerSdkClient) -> _Postcon
         container_name,
         _node_labels(request, material),
         cpk_labels_only=True,
+        allow_prior_plan=operation_type is ReconcileNode,
     )
     if ownership is not None:
         return ownership
@@ -310,6 +334,13 @@ def _inspect(request: RuntimeEffectRequest, client: DockerSdkClient) -> _Postcon
         )
     if network is None or not container.running:
         return _Postcondition.UNESTABLISHED
+    mounts = getattr(container, "bind_mounts", None)
+    groups = getattr(container, "supplementary_groups", None)
+    if type(mounts) is not tuple or type(groups) is not tuple:
+        return _Postcondition.UNESTABLISHED
+    assert authority_delivery is not None
+    if mounts != authority_delivery.mounts or groups != authority_delivery.supplementary_groups:
+        return _Postcondition.CONFLICT
 
     reference = material.product.image.execution_reference
     image = client.inspect_image(reference)
@@ -333,6 +364,7 @@ def _ownership(
     labels: Mapping[str, str],
     *,
     cpk_labels_only: bool = False,
+    allow_prior_plan: bool = False,
 ) -> _Postcondition | None:
     if (
         not isinstance(inspection, DockerSdkResourceInspection)
@@ -342,8 +374,12 @@ def _ownership(
     observed_labels = dict(inspection.labels)
     expected_labels = dict(labels)
     if cpk_labels_only:
-        observed_labels = _cpk_ownership_labels(observed_labels)
-        expected_labels = _cpk_ownership_labels(expected_labels)
+        observed_labels = _node_correlation_labels(
+            observed_labels, allow_prior_plan=allow_prior_plan,
+        )
+        expected_labels = _node_correlation_labels(
+            expected_labels, allow_prior_plan=allow_prior_plan,
+        )
     if inspection.name != name or observed_labels != expected_labels:
         return _Postcondition.CONFLICT
     return None
