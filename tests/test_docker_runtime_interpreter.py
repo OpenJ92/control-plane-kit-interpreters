@@ -2070,12 +2070,17 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
             with self.subTest(operation=operation_type.__name__):
                 raw = FakeDockerClient()
                 sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
-                original_start = sdk.start_container
-                def start_with_drift(name):
-                    original_start(name)
-                    raw.containers.resources[name].attrs["HostConfig"]["GroupAdd"] = ["unexpected"]
-                with patch.object(sdk, "start_container", side_effect=start_with_drift):
+                original_start = FakeResource.start
+                injected = []
+                def start_with_drift(resource):
+                    original_start(resource)
+                    if resource.attrs["Config"]["Labels"].get("org.openj92.cpk.kind") == "container":
+                        resource.attrs["HostConfig"]["GroupAdd"] = ["unexpected"]
+                        injected.append(resource.name)
+                with patch.object(FakeResource, "start", start_with_drift):
                     result = DockerRuntimeInterpreter(sdk).execute(_request(operation_type(NodeTarget("api"))))
+                self.assertEqual(len(injected), 1)
+                self.assertEqual(raw.containers.resources[injected[0]].attrs["HostConfig"]["GroupAdd"], ["unexpected"])
                 self.assertIs(result.kind, EffectResultKind.FAILED)
                 self.assertEqual(result.observations, ())
 

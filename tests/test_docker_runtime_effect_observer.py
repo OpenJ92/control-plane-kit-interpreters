@@ -944,7 +944,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                         request = _plain_node_request(operation_type)
                         sdk, raw, calls, _ = _sdk_state_fixture(request, status, case=case)
                         result = docker_interpreters.DockerRuntimeInterpreter(sdk).execute(request)
-                        expected = ["image", "network", "container"] if operation_type is StartNode else ["container"]
+                        expected = ["container"]
                         with self.subTest(boundary="no-later-operation"):
                             self.assertEqual([phase for phase, _ in calls], expected)
                         with self.subTest(boundary="no-mutation"):

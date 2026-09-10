@@ -564,6 +564,7 @@ class DockerSdkClientTests(unittest.TestCase):
                 "secret_file_digest",
                 "start_container",
                 "stop_container",
+                "uses_local_socket",
             },
         )
 
