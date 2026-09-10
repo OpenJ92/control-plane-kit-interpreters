@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 import hashlib
 import json
 import os
@@ -11,7 +12,7 @@ from ipaddress import ip_address
 from pathlib import Path
 import tarfile
 import tempfile
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from uuid import uuid4
 
 from control_plane_kit_core.configuration import ConfigurationArtifact
@@ -23,6 +24,79 @@ from control_plane_kit_core.probe_intents import (
 )
 from control_plane_kit_core.secrets import SecretFileMode, SecretValue
 from control_plane_kit_core.types import Protocol, Transport
+
+
+class _ContainerCreateSuboperation(Enum):
+    INSPECTION = "container-inspection"
+    REQUEST = "request-construction"
+    ENDPOINT = "endpoint-construction"
+    CREATE = "sdk-create"
+    UNKNOWN = "unknown"
+
+
+class _DockerFailureCategory(Enum):
+    TIMEOUT = "timeout"
+    TRANSPORT = "transport"
+    API = "provider-api"
+    MATERIAL = "invalid-request-material"
+    UNEXPECTED = "unexpected"
+
+
+def _docker_failure_category(
+    error: Exception, suboperation: _ContainerCreateSuboperation,
+) -> _DockerFailureCategory:
+    timeout_types: tuple[type[Exception], ...] = (TimeoutError,)
+    transport_types: tuple[type[Exception], ...] = (ConnectionError,)
+    api_types: tuple[type[Exception], ...] = ()
+    material_types: tuple[type[Exception], ...] = (TypeError, ValueError)
+    # Keep the package root usable without the optional Docker dependencies.
+    try:
+        from requests.exceptions import ConnectionError as RequestConnectionError
+        from requests.exceptions import Timeout as RequestTimeout
+        from docker.errors import APIError, InvalidArgument
+    except ImportError:
+        pass
+    else:
+        timeout_types += (RequestTimeout,)
+        transport_types += (RequestConnectionError,)
+        api_types = (APIError,)
+        material_types += (InvalidArgument,)
+    # ConnectTimeout is both Timeout and ConnectionError: precedence is a law.
+    if isinstance(error, timeout_types):
+        return _DockerFailureCategory.TIMEOUT
+    if isinstance(error, transport_types):
+        return _DockerFailureCategory.TRANSPORT
+    if isinstance(error, api_types):
+        return _DockerFailureCategory.API
+    if (
+        suboperation in (_ContainerCreateSuboperation.REQUEST, _ContainerCreateSuboperation.ENDPOINT)
+        and type(error) in material_types
+    ):
+        return _DockerFailureCategory.MATERIAL
+    return _DockerFailureCategory.UNEXPECTED
+
+
+class _DockerContainerCreateError(RuntimeError):
+    def __init__(
+        self, suboperation: _ContainerCreateSuboperation, category: _DockerFailureCategory,
+    ) -> None:
+        if (type(suboperation) is not _ContainerCreateSuboperation
+                or type(category) is not _DockerFailureCategory):
+            raise TypeError("Docker creation diagnostic is invalid")
+        super().__init__("Docker container creation is uncertain")
+        self.suboperation = suboperation
+        self.category = category
+
+
+def _container_create_call(
+    suboperation: _ContainerCreateSuboperation, operation: Callable[[], Any],
+) -> Any:
+    try:
+        return operation()
+    except Exception as error:
+        raise _DockerContainerCreateError(
+            suboperation, _docker_failure_category(error, suboperation),
+        ) from error
 
 
 def _is_canonical_sha256_image_id(value: object) -> bool:
@@ -554,24 +628,31 @@ class DockerSdkClient:
         network: str,
         aliases: Sequence[str],
     ) -> None:
-        kwargs = self._container_create_kwargs(
-            name=name,
-            environment=environment,
-            labels=labels,
-            volumes=volumes,
-            command=command,
-            configuration_mounts=configuration_mounts,
-            secret_mounts=secret_mounts,
-            bind_mounts=bind_mounts,
-            supplementary_groups=supplementary_groups,
-            port_bindings=port_bindings,
+        kwargs = _container_create_call(
+            _ContainerCreateSuboperation.REQUEST,
+            lambda: self._container_create_kwargs(
+                name=name,
+                environment=environment,
+                labels=labels,
+                volumes=volumes,
+                command=command,
+                configuration_mounts=configuration_mounts,
+                secret_mounts=secret_mounts,
+                bind_mounts=bind_mounts,
+                supplementary_groups=supplementary_groups,
+                port_bindings=port_bindings,
+            ),
         )
-        endpoint_config = self._client().api.create_endpoint_config(
-            aliases=list(aliases),
+        endpoint_config = _container_create_call(
+            _ContainerCreateSuboperation.ENDPOINT,
+            lambda: self._client().api.create_endpoint_config(aliases=list(aliases)),
         )
         kwargs["network"] = network
         kwargs["networking_config"] = {network: endpoint_config}
-        self._client().containers.create(image, **kwargs)
+        _container_create_call(
+            _ContainerCreateSuboperation.CREATE,
+            lambda: self._client().containers.create(image, **kwargs),
+        )
 
     def run_container(
         self,

@@ -151,6 +151,38 @@ resolved by a future authority boundary. That is intentional: secret references
 may be durable graph data, but secret values are not part of
 `RuntimeEffectRequest`.
 
+### StartNode creation diagnostics
+
+An uncertain `StartNode` at the existing `container-create` phase retains the
+`docker.effect-uncertain` code and fixed message. Its failure details also contain
+two finite diagnostic labels, for example:
+
+```json
+{"phase":"container-create","suboperation":"sdk-create","category":"timeout"}
+```
+
+Suboperations are `container-inspection`, `request-construction`,
+`endpoint-construction`, `sdk-create`, and `unknown`. The `sdk-create` boundary
+covers the whole high-level Docker SDK call, including response handling or
+follow-up inspection. A container may already exist when that call fails.
+
+Categories are `timeout`, `transport`, `provider-api`, `invalid-request-material`,
+and `unexpected`. Known timeout types take precedence over connection types;
+construction-only validation types are classified only at the two construction
+boundaries. Unknown wrappers stay unknown. These labels contain no provider
+messages, response bodies/statuses, exception names, arguments, addresses or
+credentials. Local validation classification does not establish caller fault.
+
+Existing preconditions and other phases retain their semantics. Direct SDK
+inspection and observer behavior are unchanged; no failure handler retries,
+starts, removes or compensates a resource. These diagnostics do not prove effect
+absence, successful deployment or safe retry. Operations retains the complete
+original outcome through its existing store; this adds no public diagnostic API.
+
+New diagnostics require the updated interpreter in the deployed server image.
+Updating host/driver tooling cannot instrument a previously published image or
+reconstruct the underlying error of an earlier attempt.
+
 ## Docker SDK Client
 
 `control_plane_kit_interpreters.docker.DockerSdkClient` is the first concrete

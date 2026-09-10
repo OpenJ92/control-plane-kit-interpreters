@@ -1001,7 +1001,11 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                             self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
                             self.assertEqual(result.observations, ())
                             if operation_type is StartNode:
-                                self.assertEqual(dict(result.failure.details), {"phase": "container-create"})
+                                self.assertEqual(dict(result.failure.details), {
+                                    "phase": "container-create",
+                                    "suboperation": "container-inspection",
+                                    "category": "unexpected",
+                                })
 
     def test_execute_known_start_state_preserves_success_and_private_endpoints(self):
         for running in (True, False):

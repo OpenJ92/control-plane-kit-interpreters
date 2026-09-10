@@ -22,6 +22,7 @@ cloudflare = [
 ]
 docker = [
   "docker>=7.1",
+  "requests>=2.26.0",
   "httpx>=0.28",
   "psycopg[binary]>=3.2",
 ]
@@ -42,6 +43,7 @@ gateway = [
 test = [
   "control-plane-kit-secrets[test] @ https://github.com/OpenJ92/control-plane-kit-secrets/archive/96e86dc3248d578780d64d5d7fc5d6359631d1d6.zip",
   "docker>=7.1",
+  "requests>=2.26.0",
   "dnspython>=2.7,<3",
   "httpx>=0.28",
   "PyJWT[crypto]>=2.10,<3",

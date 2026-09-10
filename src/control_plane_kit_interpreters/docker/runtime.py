@@ -60,6 +60,10 @@ from control_plane_kit_interpreters.docker.authority import (
     docker_authority_conformance,
 )
 from control_plane_kit_interpreters.docker.sdk import (
+    _ContainerCreateSuboperation,
+    _DockerContainerCreateError,
+    _DockerFailureCategory,
+    _docker_failure_category,
     DockerRegistryAuthConfig,
     DockerSdkBindMount,
     DockerSdkClient,
@@ -133,9 +137,15 @@ class _NodeContainerCreateMaterial:
 
 
 class _DockerStartNodeUncertainError(RuntimeError):
-    def __init__(self, phase: _StartNodePhase) -> None:
+    def __init__(
+        self, phase: _StartNodePhase,
+        suboperation: _ContainerCreateSuboperation = _ContainerCreateSuboperation.UNKNOWN,
+        category: _DockerFailureCategory = _DockerFailureCategory.UNEXPECTED,
+    ) -> None:
         super().__init__(phase.value)
         self.phase = phase
+        self.suboperation = suboperation
+        self.category = category
 
 
 _T = TypeVar("_T")
@@ -144,12 +154,25 @@ _T = TypeVar("_T")
 def _start_node_provider_call(
     phase: _StartNodePhase,
     operation: Callable[[], _T],
+    *,
+    suboperation: _ContainerCreateSuboperation | None = None,
 ) -> _T:
     try:
         return operation()
     except _DockerInterpreterPreconditionError:
         raise
     except Exception as error:
+        if phase is _StartNodePhase.CONTAINER_CREATE:
+            if suboperation is not None:
+                raise _DockerStartNodeUncertainError(
+                    phase, suboperation, _docker_failure_category(error, suboperation),
+                ) from error
+            if (type(error) is _DockerContainerCreateError
+                    and type(error.suboperation) is _ContainerCreateSuboperation
+                    and type(error.category) is _DockerFailureCategory):
+                raise _DockerStartNodeUncertainError(
+                    phase, error.suboperation, error.category,
+                ) from error
         raise _DockerStartNodeUncertainError(phase) from error
 
 
@@ -205,12 +228,15 @@ class DockerRuntimeInterpreter:
         except _DockerInterpreterPreconditionError as error:
             return _failed(request, error.code, str(error))
         except _DockerStartNodeUncertainError as error:
+            details = {"phase": error.phase.value}
+            if error.phase is _StartNodePhase.CONTAINER_CREATE:
+                details.update(suboperation=error.suboperation.value, category=error.category.value)
             return RuntimeEffectResult.uncertain(
                 request.effect_id,
                 RuntimeEffectFailure(
                     "docker.effect-uncertain",
                     "Docker runtime effect is uncertain",
-                    details={"phase": error.phase.value},
+                    details=details,
                 ),
             )
         except Exception as error:
@@ -369,6 +395,7 @@ class DockerRuntimeInterpreter:
         inspection = _start_node_provider_call(
             _StartNodePhase.CONTAINER_CREATE,
             lambda: self.client.inspect_container(container_name),
+            suboperation=_ContainerCreateSuboperation.INSPECTION,
         )
         if inspection is not None:
             _require_node_container_correlation(inspection, labels, network_name)

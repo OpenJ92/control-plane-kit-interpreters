@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from contextlib import ExitStack
 import hashlib
 import json
 import socket
@@ -10,6 +11,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 import httpx
+from docker.errors import APIError, InvalidArgument
+from requests.exceptions import ConnectTimeout, ReadTimeout, SSLError
 
 from control_plane_kit_core.algebra import BlockSockets, ProviderSocket
 from control_plane_kit_core.configuration import (
@@ -123,6 +126,89 @@ class RuntimeHttpProbeResult:
 
 
 class DockerRuntimeInterpreterTests(unittest.TestCase):
+    def test_start_node_create_diagnostics_preserve_boundary_category_and_stop(self) -> None:
+        hostile = "credential=fixture-secret https://private.invalid /private/socket"
+        class PrivateProviderException(Exception):
+            pass
+
+        cases = (
+            ("container-inspection", TimeoutError(hostile), "timeout"),
+            ("container-inspection", ConnectTimeout(hostile), "timeout"),
+            ("request-construction", TypeError(hostile), "invalid-request-material"),
+            ("request-construction", ValueError(hostile), "invalid-request-material"),
+            ("request-construction", InvalidArgument(hostile), "invalid-request-material"),
+            ("endpoint-construction", InvalidArgument(hostile), "invalid-request-material"),
+            ("endpoint-construction", ConnectTimeout(hostile), "timeout"),
+            ("sdk-create", ReadTimeout(hostile), "timeout"),
+            ("sdk-create", SSLError(hostile), "transport"),
+            ("sdk-create", APIError(hostile, explanation=hostile), "provider-api"),
+            ("sdk-create", TypeError(hostile), "unexpected"),
+            ("sdk-create", PrivateProviderException(hostile), "unexpected"),
+        )
+        for fail_at, error, category in cases:
+            with self.subTest(boundary=fail_at, category=category, error_type=type(error).__name__):
+                raw = FakeDockerClient()
+                sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+                product = _product()
+                product = replace(product, runtime_contract=replace(
+                    product.runtime_contract, configuration_artifacts=()))
+                calls = []
+                seams = (
+                    ("container-inspection", raw.containers, "get"),
+                    ("request-construction", sdk, "_container_create_kwargs"),
+                    ("endpoint-construction", raw.api, "create_endpoint_config"),
+                    ("sdk-create", raw.containers, "create"),
+                )
+                with ExitStack() as stack:
+                    for boundary, target, name in seams:
+                        original = getattr(target, name)
+                        def call(*args, _boundary=boundary, _original=original, **kwargs):
+                            calls.append(_boundary)
+                            if _boundary == fail_at:
+                                raise error
+                            return _original(*args, **kwargs)
+                        stack.enter_context(patch.object(target, name, side_effect=call))
+                    result = DockerRuntimeInterpreter(sdk).execute(
+                        _request(StartNode(NodeTarget("api")), products=(_material(product),)))
+
+                self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+                self.assertEqual(result.failure.code, "docker.effect-uncertain")
+                self.assertEqual(result.failure.message, "Docker runtime effect is uncertain")
+                self.assertEqual(dict(result.failure.details), {
+                    "phase": "container-create", "suboperation": fail_at, "category": category})
+                self.assertEqual(calls, [entry[0] for entry in seams][:1 +
+                    [entry[0] for entry in seams].index(fail_at)])
+                self.assertEqual(raw.containers.created, [])
+                self.assertEqual(result.observations, ())
+                rendered = repr(result.descriptor())
+                for forbidden in (hostile, "PrivateProviderException", "ConnectTimeout", "APIError"):
+                    self.assertNotIn(forbidden, rendered)
+
+    def test_start_node_create_fault_after_acquisition_stays_uncertain_without_cleanup(self) -> None:
+        raw = FakeDockerClient()
+        sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+        product = _product()
+        product = replace(product, runtime_contract=replace(
+            product.runtime_contract, configuration_artifacts=()))
+        original = raw.containers.create
+        attempts = []
+        def create_then_fail(*args, **kwargs):
+            resource = original(*args, **kwargs)
+            attempts.append(resource)
+            raise ReadTimeout("response inspection carried fixture-secret")
+        with patch.object(raw.containers, "create", side_effect=create_then_fail):
+            result = DockerRuntimeInterpreter(sdk).execute(
+                _request(StartNode(NodeTarget("api")), products=(_material(product),)))
+        self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+        self.assertEqual(dict(result.failure.details), {
+            "phase": "container-create", "suboperation": "sdk-create", "category": "timeout"})
+        self.assertEqual(len(attempts), 1)
+        self.assertFalse(attempts[0].started)
+        self.assertFalse(attempts[0].force_removed)
+        self.assertIn(attempts[0].name, raw.containers.resources)
+        self.assertEqual(result.observations, ())
+        self.assertNotIn("fixture-secret", repr(result.descriptor()))
+
     def test_reconcile_replaces_stale_image_with_same_secret_reader(self) -> None:
         raw = FakeDockerClient()
         old = _product_with_file_secret_delivery()
