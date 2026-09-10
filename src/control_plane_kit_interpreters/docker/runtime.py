@@ -55,6 +55,10 @@ from control_plane_kit_core.verification import (
     VerificationUnsupported,
 )
 
+from control_plane_kit_interpreters.docker.authority import (
+    DockerAuthorityConformance,
+    docker_authority_conformance,
+)
 from control_plane_kit_interpreters.docker.sdk import (
     DockerRegistryAuthConfig,
     DockerSdkBindMount,
@@ -368,7 +372,7 @@ class DockerRuntimeInterpreter:
         )
         if inspection is not None:
             _require_node_container_correlation(inspection, labels, network_name)
-            _require_node_container_authority(inspection, authority_delivery)
+            _require_node_container_authority(inspection, authority_delivery, self.client)
         secrets = _resolve_product_secret_deliveries(
             material,
             request,
@@ -464,7 +468,7 @@ class DockerRuntimeInterpreter:
             network_name=network_name,
             require_running=True,
         )
-        _require_node_container_authority(observed, authority_delivery, final=True)
+        _require_node_container_authority(observed, authority_delivery, self.client, final=True)
         published = observed.published_ports
         private_host = _private_host_for_runtime(request, material, observed)
         port_bindings = _private_provider_ports(material)
@@ -524,7 +528,7 @@ class DockerRuntimeInterpreter:
         if inspection is not None:
             _require_node_owner(inspection.labels, labels, "container")
             _require_node_network(inspection, network_name)
-            _require_node_container_authority(inspection, authority_delivery)
+            _require_node_container_authority(inspection, authority_delivery, self.client)
             if request.authority_deliveries and not _fingerprint_matches(inspection.labels, labels):
                 # There is no pinned prior declaration in this request. Mounts
                 # and labels cannot establish approval for replacing it.
@@ -600,7 +604,7 @@ class DockerRuntimeInterpreter:
             observed, labels=labels, admitted_image=admitted_image,
             network_name=network_name, require_running=True, allow_prior_plan=True,
         )
-        _require_node_container_authority(observed, authority_delivery, final=True)
+        _require_node_container_authority(observed, authority_delivery, self.client, final=True)
         published = observed.published_ports
         private_host = _private_host_for_runtime(request, material, observed)
         observations = runtime_endpoint_observations(
@@ -1567,16 +1571,19 @@ def _require_owned(
 def _require_node_container_authority(
     inspection: DockerSdkResourceInspection,
     delivery: _AuthorityDeliveryMaterial,
+    client: DockerSdkClient,
     *,
     final: bool = False,
 ) -> None:
-    mounts = getattr(inspection, "bind_mounts", None)
-    groups = getattr(inspection, "supplementary_groups", None)
-    if type(mounts) is not tuple or type(groups) is not tuple:
+    conformance = docker_authority_conformance(
+        inspection, expected_mounts=delivery.mounts,
+        expected_groups=delivery.supplementary_groups, client=client,
+    )
+    if conformance is DockerAuthorityConformance.UNKNOWN:
         raise _DockerStartNodeUncertainError(
             _StartNodePhase.FINAL_INSPECT if final else _StartNodePhase.CONTAINER_CREATE
         )
-    if mounts != delivery.mounts or groups != delivery.supplementary_groups:
+    if conformance is DockerAuthorityConformance.CONFLICT:
         if not final:
             raise _DockerInterpreterUnsupportedAuthorityError(
                 "docker.runtime-authority-delivery-conflict"

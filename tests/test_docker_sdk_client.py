@@ -377,6 +377,46 @@ class ProbeOpener:
 
 
 class DockerSdkClientTests(unittest.TestCase):
+    def test_configured_binds_preserve_omission_separately_from_actual_mounts(self):
+        for readonly in ("omitted", False, True, None, "false"):
+            with self.subTest(readonly=readonly):
+                raw = FakeDockerClient()
+                resource = FakeResource("recipient", image="fixture")
+                configured = {"Type": "bind", "Source": "/var/run/docker.sock", "Target": "/var/run/docker.sock"}
+                if readonly != "omitted":
+                    configured["ReadOnly"] = readonly
+                resource.attrs["HostConfig"]["Mounts"] = [configured]
+                resource.attrs["Mounts"] = [{"Type": "bind", "Source": "/run/host-services/docker.proxy.sock",
+                                            "Destination": "/var/run/docker.sock", "RW": True}]
+                raw.containers.resources["recipient"] = resource
+                observed = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw)).inspect_container("recipient")
+                self.assertEqual(observed.bind_mounts[0].source_path, "/run/host-services/docker.proxy.sock")
+                evidence = getattr(observed, "configured_bind_mounts", None)
+                if readonly is None or readonly == "false":
+                    self.assertIsNone(evidence)
+                else:
+                    self.assertIsInstance(evidence, tuple)
+                    self.assertEqual(len(evidence), 1)
+                    self.assertEqual(evidence[0].source_path, "/var/run/docker.sock")
+                    self.assertIs(evidence[0].read_only, None if readonly == "omitted" else readonly)
+                self.assertEqual(resource.attrs["HostConfig"]["Mounts"], [configured])
+
+    def test_provider_facts_are_bounded_fresh_and_from_bound_client(self):
+        raw = FakeDockerClient()
+        calls = []
+        raw.info = lambda: calls.append("info") or {"OperatingSystem": "Docker Desktop", "OSType": "linux", "ignored": "private"}
+        raw.version = lambda: calls.append("version") or {"Version": "29.7.2", "ApiVersion": "1.55"}
+        sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+        inspect_facts = getattr(sdk, "inspect_authority_provider_facts", None)
+        self.assertTrue(callable(inspect_facts))
+        facts = inspect_facts()
+        self.assertEqual((facts.operating_system, facts.os_type, facts.engine_version, facts.api_version),
+                         ("Docker Desktop", "linux", "29.7.2", "1.55"))
+        self.assertNotIn("private", repr(facts))
+        raw.version = lambda: calls.append("version") or {"Version": "x" * 129, "ApiVersion": "1.55"}
+        self.assertIsNone(inspect_facts())
+        self.assertEqual(calls, ["info", "version", "info", "version"])
+
     def test_inspection_reports_actual_bind_and_supplementary_group_evidence(self):
         raw = FakeDockerClient()
         resource = FakeResource("recipient", image="fixture")
@@ -548,6 +588,7 @@ class DockerSdkClientTests(unittest.TestCase):
                 "create_volume",
                 "from_authority",
                 "inspect_container",
+                "inspect_authority_provider_facts",
                 "inspect_image",
                 "inspect_network",
                 "inspect_volume",

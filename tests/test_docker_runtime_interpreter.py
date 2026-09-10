@@ -1921,6 +1921,60 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertEqual(_bind_mounts(_workload_container_record(fake_client)), [])
         self.assertEqual(_workload_container_record(fake_client).get("group_add", []), [])
 
+    def test_desktop_conformance_requires_fixed_provider_and_configured_evidence(self):
+        for operation_type in (StartNode, ReconcileNode):
+            for case, expected in (("qualified", EffectResultKind.SUCCEEDED),
+                                   ("omitted", EffectResultKind.SUCCEEDED),
+                                   ("version", EffectResultKind.FAILED),
+                                   ("unknown", EffectResultKind.UNCERTAIN),
+                                   ("null", EffectResultKind.UNCERTAIN),
+                                   ("configured-canonical", EffectResultKind.FAILED),
+                                   ("configured-foreign", EffectResultKind.FAILED),
+                                   ("foreign", EffectResultKind.FAILED)):
+                with self.subTest(operation=operation_type.__name__, case=case):
+                    raw = FakeDockerClient()
+                    _local_socket_transport(raw)
+                    raw.info = Mock(return_value={"OperatingSystem": "Docker Desktop", "OSType": "linux"})
+                    raw.version = Mock(return_value={"Version": "29.7.3" if case == "version" else "29.7.2", "ApiVersion": "1.55"})
+                    provider_error = "token=cpk137-provider-private-value"
+                    if case == "unknown":
+                        raw.info.side_effect = RuntimeError(provider_error)
+                    create = raw.containers.create
+                    requested_sources = []
+                    def create_with_desktop_mapping(image, **kwargs):
+                        requested_sources.extend(mount["Source"] for mount in kwargs["mounts"]
+                                                 if mount["Type"] == "bind")
+                        resource = create(image, **kwargs)
+                        for mount in resource.attrs["Mounts"]:
+                            if mount["Type"] == "bind":
+                                mount["Source"] = "/foreign" if case == "foreign" else "/run/host-services/docker.proxy.sock"
+                        for mount in resource.attrs["HostConfig"]["Mounts"]:
+                            if mount["Type"] == "bind":
+                                mount["Source"] = (
+                                    "/var/run/docker.sock" if case == "configured-canonical" else
+                                    "/foreign" if case == "configured-foreign" else
+                                    "/run/host-services/docker.proxy.sock")
+                                if case == "omitted":
+                                    del mount["ReadOnly"]
+                                elif case == "null":
+                                    mount["ReadOnly"] = None
+                        return resource
+                    raw.containers.create = create_with_desktop_mapping
+                    delivery = RuntimeAuthorityAccessDelivery(RuntimeAuthorityReference("local-docker"), RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT)
+                    product = _product()
+                    product = replace(product, runtime_contract=replace(product.runtime_contract, configuration_artifacts=()))
+                    request = _request(operation_type(NodeTarget("api")), authority_ref=delivery.authority_ref,
+                                       authority_deliveries=(delivery,), products=(_material(product, runtime_authority_deliveries=(delivery,)),))
+                    with patch("control_plane_kit_interpreters.docker.runtime.os.stat", return_value=type("SocketStat", (), {"st_gid": 987})()):
+                        result = DockerRuntimeInterpreter(DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))).execute(request)
+                    self.assertIs(result.kind, expected)
+                    self.assertEqual(requested_sources, ["/var/run/docker.sock"])
+                    self.assertEqual(raw.containers.created_containers[-1].attrs["Mounts"][0]["Source"],
+                                     "/foreign" if case == "foreign" else "/run/host-services/docker.proxy.sock")
+                    self.assertNotIn(provider_error, repr(result))
+                    if expected is not EffectResultKind.SUCCEEDED:
+                        self.assertEqual(result.observations, ())
+
     def test_same_runtime_materials_deliver_socket_only_to_declared_recipient(self):
         raw = FakeDockerClient()
         _local_socket_transport(raw)

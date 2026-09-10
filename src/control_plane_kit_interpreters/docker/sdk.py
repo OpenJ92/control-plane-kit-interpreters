@@ -138,6 +138,7 @@ class DockerSdkResourceInspection:
     readonly_secret_mounts: tuple["DockerSdkSecretMount", ...] = ()
     bind_mounts: tuple["DockerSdkBindMount", ...] | None = None
     supplementary_groups: tuple[str, ...] | None = None
+    configured_bind_mounts: tuple["DockerSdkConfiguredBindMount", ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -259,6 +260,23 @@ class DockerSdkBindMount:
 
 
 @dataclass(frozen=True)
+class DockerSdkConfiguredBindMount:
+    """Configured intent; None preserves an omitted ReadOnly field, not null."""
+
+    source_path: str
+    target_path: str
+    read_only: bool | None
+
+
+@dataclass(frozen=True)
+class DockerAuthorityProviderFacts:
+    operating_system: str
+    os_type: str
+    engine_version: str
+    api_version: str
+
+
+@dataclass(frozen=True)
 class DockerSdkHttpProbeResult:
     status_code: int | None
     response_size: int
@@ -355,6 +373,23 @@ class DockerSdkClient:
         except InvalidSchema:
             return False
         return isinstance(adapter, UnixHTTPAdapter) and adapter.socket_path == path
+
+    def inspect_authority_provider_facts(self) -> DockerAuthorityProviderFacts | None:
+        """Read compatibility facts from this bound client; never cache or reconnect."""
+        try:
+            client = self._client()
+            info, version = client.info(), client.version()
+            if not isinstance(info, Mapping) or not isinstance(version, Mapping):
+                return None
+            values = (info.get("OperatingSystem"), info.get("OSType"),
+                      version.get("Version"), version.get("ApiVersion"))
+            if any(type(value) is not str or not 0 < len(value) <= 128
+                   or any(ord(char) < 32 for char in value) for value in values):
+                return None
+            return DockerAuthorityProviderFacts(*values)
+        except Exception:
+            # Provider exceptions may contain endpoint or credential details.
+            return None
 
     def _remote_tls_client(
         self,
@@ -901,6 +936,10 @@ class DockerSdkClient:
                 _observed_supplementary_groups(getattr(resource, "attrs", None))
                 if include_runtime_identity else None
             ),
+            configured_bind_mounts=(
+                _configured_bind_mounts(getattr(resource, "attrs", None))
+                if include_runtime_identity else None
+            ),
         )
 
     def _labels(self, resource: Any) -> Mapping[str, str]:
@@ -1139,6 +1178,37 @@ def _secret_file_owner_uid(user: str | None) -> int:
                    for component in components)):
         raise ValueError("secret file requires a supported numeric image user")
     return int(components[0])
+
+
+def _configured_bind_mounts(attrs: object) -> tuple[DockerSdkConfiguredBindMount, ...] | None:
+    host = attrs.get("HostConfig") if isinstance(attrs, Mapping) else None
+    if not isinstance(host, Mapping) or "Mounts" not in host:
+        return None
+    mounts = host["Mounts"]
+    if mounts is None:
+        return ()
+    if type(mounts) is not list or len(mounts) > 64:
+        return None
+    configured = []
+    for mount in mounts:
+        if not isinstance(mount, Mapping):
+            return None
+        kind, target = mount.get("Type"), mount.get("Target")
+        if type(target) is not str or not target.startswith("/") or len(target) > 1024:
+            return None
+        if kind != "bind":
+            if kind not in ("volume", "tmpfs", "image", "cluster") or target == "/var/run/docker.sock":
+                return None
+            continue
+        source = mount.get("Source")
+        if type(source) is not str or not source.startswith("/") or len(source) > 1024:
+            return None
+        if "ReadOnly" in mount and type(mount["ReadOnly"]) is not bool:
+            return None
+        configured.append(DockerSdkConfiguredBindMount(source, target, mount.get("ReadOnly")))
+        if len(configured) > 4:
+            return None
+    return tuple(configured)
 
 
 def _observed_bind_mounts(attrs: object) -> tuple[DockerSdkBindMount, ...] | None:
