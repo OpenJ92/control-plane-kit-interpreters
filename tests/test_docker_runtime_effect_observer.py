@@ -696,6 +696,47 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                 self.assertEqual(remote.calls, [("inspect_container", _container_name(request, request.products[0].node_id))])
                 self.assertEqual(self.assert_observation(result, request), "succeeded")
 
+    def test_desktop_observation_uses_actual_and_configured_sdk_evidence(self):
+        from test_docker_runtime_interpreter import _local_socket_transport
+        for operation_type in (StartNode, ReconcileNode):
+            for case, expected in (("qualified", "succeeded"), ("omitted", "succeeded"),
+                                   ("provider", "conflict"), ("null", "indeterminate"),
+                                   ("configured-source", "conflict"), ("group", "conflict")):
+                with self.subTest(operation=operation_type.__name__, case=case):
+                    request = _declared_socket_request(_plain_node_request(operation_type))
+                    expected_client = _ReadClient(request)
+                    raw = FakeDockerClient()
+                    _local_socket_transport(raw)
+                    raw.info = lambda: {"OperatingSystem": "other" if case == "provider" else "Docker Desktop", "OSType": "linux"}
+                    raw.version = lambda: {"Version": "29.7.2", "ApiVersion": "1.55"}
+                    network = expected_client.network
+                    raw.networks.resources[network.name] = FakeResource(network.name, labels=dict(network.labels))
+                    base = expected_client.container
+                    resource = FakeResource(base.name, image=request.products[0].product.image.execution_reference,
+                                            image_id=HELLO_IMAGE_ID, labels=dict(base.labels),
+                                            private_addresses={network.name: "172.31.0.8"})
+                    resource.attrs["HostConfig"]["GroupAdd"] = ["wrong"] if case == "group" else ["987"]
+                    configured = {"Type": "bind", "Source": "/foreign" if case == "configured-source" else "/var/run/docker.sock",
+                                  "Target": "/var/run/docker.sock", "ReadOnly": False}
+                    if case == "omitted":
+                        del configured["ReadOnly"]
+                    elif case == "null":
+                        configured["ReadOnly"] = None
+                    resource.attrs["HostConfig"]["Mounts"] = [configured]
+                    resource.attrs["Mounts"] = [{"Type": "bind", "Source": "/run/host-services/docker.proxy.sock",
+                                                "Destination": "/var/run/docker.sock", "RW": True}]
+                    raw.containers.resources[base.name] = resource
+                    reference = request.products[0].product.image.execution_reference
+                    raw.images.resources[reference] = FakeImage([reference], image_id=HELLO_IMAGE_ID, repo_digests=(reference,))
+                    sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+                    with patch("control_plane_kit_interpreters.docker.runtime.os.stat", return_value=type("SocketStat", (), {"st_gid": 987})()):
+                        result = self.observer(sdk).observe(RuntimeEffectObservationRequest(request), _local_runtime_authority())
+                    self.assertEqual(self.assert_observation(result, request), expected)
+                    self.assertEqual(raw.containers.created, [])
+                    self.assertEqual(raw.images.pulled, [])
+                    self.assertEqual(raw.networks.created, [])
+                    self.assertEqual(resource.attrs["Mounts"][0]["Source"], "/run/host-services/docker.proxy.sock")
+
     def test_node_observation_requires_exact_known_bind_and_group_evidence(self):
         socket = DockerSdkBindMount("/var/run/docker.sock", "/var/run/docker.sock", False)
         for operation_type in (StartNode, ReconcileNode):
