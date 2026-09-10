@@ -1934,8 +1934,9 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                     _local_socket_transport(raw)
                     raw.info = Mock(return_value={"OperatingSystem": "Docker Desktop", "OSType": "linux"})
                     raw.version = Mock(return_value={"Version": "29.7.3" if case == "version" else "29.7.2", "ApiVersion": "1.55"})
+                    provider_error = "token=cpk137-provider-private-value"
                     if case == "unknown":
-                        raw.info.side_effect = RuntimeError("token=private")
+                        raw.info.side_effect = RuntimeError(provider_error)
                     create = raw.containers.create
                     def create_with_desktop_mapping(image, **kwargs):
                         resource = create(image, **kwargs)
@@ -1960,7 +1961,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                     self.assertIs(result.kind, expected)
                     self.assertEqual(raw.containers.created_containers[-1].attrs["Mounts"][0]["Source"],
                                      "/foreign" if case == "foreign" else "/run/host-services/docker.proxy.sock")
-                    self.assertNotIn("private", repr(result))
+                    self.assertNotIn(provider_error, repr(result))
                     if expected is not EffectResultKind.SUCCEEDED:
                         self.assertEqual(result.observations, ())
 
