@@ -1928,6 +1928,8 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                                    ("version", EffectResultKind.FAILED),
                                    ("unknown", EffectResultKind.UNCERTAIN),
                                    ("null", EffectResultKind.UNCERTAIN),
+                                   ("configured-canonical", EffectResultKind.FAILED),
+                                   ("configured-foreign", EffectResultKind.FAILED),
                                    ("foreign", EffectResultKind.FAILED)):
                 with self.subTest(operation=operation_type.__name__, case=case):
                     raw = FakeDockerClient()
@@ -1938,13 +1940,20 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                     if case == "unknown":
                         raw.info.side_effect = RuntimeError(provider_error)
                     create = raw.containers.create
+                    requested_sources = []
                     def create_with_desktop_mapping(image, **kwargs):
+                        requested_sources.extend(mount["Source"] for mount in kwargs["mounts"]
+                                                 if mount["Type"] == "bind")
                         resource = create(image, **kwargs)
                         for mount in resource.attrs["Mounts"]:
                             if mount["Type"] == "bind":
                                 mount["Source"] = "/foreign" if case == "foreign" else "/run/host-services/docker.proxy.sock"
                         for mount in resource.attrs["HostConfig"]["Mounts"]:
                             if mount["Type"] == "bind":
+                                mount["Source"] = (
+                                    "/var/run/docker.sock" if case == "configured-canonical" else
+                                    "/foreign" if case == "configured-foreign" else
+                                    "/run/host-services/docker.proxy.sock")
                                 if case == "omitted":
                                     del mount["ReadOnly"]
                                 elif case == "null":
@@ -1959,6 +1968,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                     with patch("control_plane_kit_interpreters.docker.runtime.os.stat", return_value=type("SocketStat", (), {"st_gid": 987})()):
                         result = DockerRuntimeInterpreter(DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))).execute(request)
                     self.assertIs(result.kind, expected)
+                    self.assertEqual(requested_sources, ["/var/run/docker.sock"])
                     self.assertEqual(raw.containers.created_containers[-1].attrs["Mounts"][0]["Source"],
                                      "/foreign" if case == "foreign" else "/run/host-services/docker.proxy.sock")
                     self.assertNotIn(provider_error, repr(result))

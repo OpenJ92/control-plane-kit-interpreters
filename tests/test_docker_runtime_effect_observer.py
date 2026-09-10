@@ -701,6 +701,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
         for operation_type in (StartNode, ReconcileNode):
             for case, expected in (("qualified", "succeeded"), ("omitted", "succeeded"),
                                    ("provider", "conflict"), ("null", "indeterminate"),
+                                   ("configured-canonical", "conflict"),
                                    ("configured-source", "conflict"), ("group", "conflict")):
                 with self.subTest(operation=operation_type.__name__, case=case):
                     request = _declared_socket_request(_plain_node_request(operation_type))
@@ -717,7 +718,11 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                                             image_id=HELLO_IMAGE_ID, labels=dict(base.labels),
                                             private_addresses={network.name: "172.31.0.8"})
                     resource.attrs["HostConfig"]["GroupAdd"] = ["wrong"] if case == "group" else ["987"]
-                    configured = {"Type": "bind", "Source": "/foreign" if case == "configured-source" else "/var/run/docker.sock",
+                    configured_source = (
+                        "/foreign" if case == "configured-source" else
+                        "/var/run/docker.sock" if case == "configured-canonical" else
+                        "/run/host-services/docker.proxy.sock")
+                    configured = {"Type": "bind", "Source": configured_source,
                                   "Target": "/var/run/docker.sock", "ReadOnly": False}
                     if case == "omitted":
                         del configured["ReadOnly"]
@@ -737,6 +742,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                     self.assertEqual(raw.images.pulled, [])
                     self.assertEqual(raw.networks.created, [])
                     self.assertEqual(resource.attrs["Mounts"][0]["Source"], "/run/host-services/docker.proxy.sock")
+                    self.assertEqual(resource.attrs["HostConfig"]["Mounts"][0]["Source"], configured_source)
 
     def test_node_observation_requires_exact_known_bind_and_group_evidence(self):
         socket = DockerSdkBindMount("/var/run/docker.sock", "/var/run/docker.sock", False)
