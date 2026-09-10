@@ -480,7 +480,12 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
                 self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
                 self.assertEqual(client.calls, expected_calls)
                 self.assertEqual(result.failure.code, "docker.effect-uncertain")
-                self.assertEqual(result.failure.details, {"phase": phase})
+                expected_details = {"phase": phase}
+                if fail_at == "container-inspect":
+                    expected_details.update(suboperation="container-inspection", category="timeout")
+                elif fail_at == "container-create":
+                    expected_details.update(suboperation="unknown", category="unexpected")
+                self.assertEqual(result.failure.details, expected_details)
                 self.assertEqual(
                     result.failure.message,
                     "Docker runtime effect is uncertain",
@@ -509,7 +514,10 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
 
                 self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
                 self.assertEqual(result.failure.code, "docker.effect-uncertain")
-                self.assertEqual(result.failure.details, {"phase": phase})
+                expected_details = {"phase": phase}
+                if fail_at == "container-inspect":
+                    expected_details.update(suboperation="container-inspection", category="timeout")
+                self.assertEqual(result.failure.details, expected_details)
                 self.assertEqual(
                     result.failure.message,
                     "Docker runtime effect is uncertain",
