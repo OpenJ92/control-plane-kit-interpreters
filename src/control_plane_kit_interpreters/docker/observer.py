@@ -43,6 +43,10 @@ from control_plane_kit_core.secrets import (
 )
 from control_plane_kit_core.types import RuntimeKind
 
+from control_plane_kit_interpreters.docker.authority import (
+    DockerAuthorityConformance,
+    docker_authority_conformance,
+)
 from control_plane_kit_interpreters.docker.runtime import (
     _authority_delivery_material,
     _container_name,
@@ -334,12 +338,14 @@ def _inspect(request: RuntimeEffectRequest, client: DockerSdkClient) -> _Postcon
         )
     if network is None or not container.running:
         return _Postcondition.UNESTABLISHED
-    mounts = getattr(container, "bind_mounts", None)
-    groups = getattr(container, "supplementary_groups", None)
-    if type(mounts) is not tuple or type(groups) is not tuple:
-        return _Postcondition.UNESTABLISHED
     assert authority_delivery is not None
-    if mounts != authority_delivery.mounts or groups != authority_delivery.supplementary_groups:
+    conformance = docker_authority_conformance(
+        container, expected_mounts=authority_delivery.mounts,
+        expected_groups=authority_delivery.supplementary_groups, client=client,
+    )
+    if conformance is DockerAuthorityConformance.UNKNOWN:
+        return _Postcondition.UNESTABLISHED
+    if conformance is DockerAuthorityConformance.CONFLICT:
         return _Postcondition.CONFLICT
 
     reference = material.product.image.execution_reference

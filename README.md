@@ -101,6 +101,28 @@ including absence on siblings. Unexpected authority is never repaired or
 credited. A final missing or nonconforming container cannot produce successful
 endpoint observations.
 
+Provisional empirical Desktop compatibility (#137) is centralized in
+`docker.authority.docker_authority_conformance`, shared by execution and
+observation. Exact canonical and empty-authority behavior remain the default and
+do not fetch Desktop facts. The candidate exception requires the fixed reviewed
+proxy representation, independently configured canonical bind intent, exact
+target/writability/groups, active local transport, and same-client provider facts
+Docker Desktop / linux / Engine29.7.2 / API1.55. Unknown or conflicting facts never
+qualify. It does not accept other versions or discover aliases from observations.
+
+SDK `configured_bind_mounts` is separate from raw actual `bind_mounts`. Omitted
+configured ReadOnly remains distinguishable from explicit null/malformed evidence;
+only the scoped API contract interprets omission as false. Actual source/RW are
+never inferred from configuration. Compatibility reads are fresh, bounded field
+projections of the selected daemon's reports, not authentication or physical-host
+attestation. No provider settings, endpoint, permissions or command policy change.
+
+This candidate is not accepted Desktop support until the exact source/image
+pairing passes the existing Servers-root numeric CPK socket/API/sibling witness
+and independent review. Read reachability does not authorize later mutations or
+bypass provider restrictions. Real Interpreter child-effect composition remains
+separate #163 acceptance; no standalone live qualification fixture is introduced.
+
 For an existing node with nonempty desired authority, a changed fingerprint is
 unsupported before mutation because the request has no trustworthy prior
 declaration. This includes image, environment and desired-graph changes. An
