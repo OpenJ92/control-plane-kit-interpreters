@@ -381,7 +381,7 @@ class DockerSdkClientTests(unittest.TestCase):
         for readonly in ("omitted", False, True, None, "false"):
             with self.subTest(readonly=readonly):
                 raw = FakeDockerClient()
-                resource = FakeResource("recipient")
+                resource = FakeResource("recipient", image="fixture")
                 configured = {"Type": "bind", "Source": "/var/run/docker.sock", "Target": "/var/run/docker.sock"}
                 if readonly != "omitted":
                     configured["ReadOnly"] = readonly

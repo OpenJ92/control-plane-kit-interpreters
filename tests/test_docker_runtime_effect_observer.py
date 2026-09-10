@@ -712,7 +712,8 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                     network = expected_client.network
                     raw.networks.resources[network.name] = FakeResource(network.name, labels=dict(network.labels))
                     base = expected_client.container
-                    resource = FakeResource(base.name, image=request.products[0].product.image.execution_reference,
+                    resource = FakeResource(base.name, running=base.running,
+                                            image=request.products[0].product.image.execution_reference,
                                             image_id=HELLO_IMAGE_ID, labels=dict(base.labels),
                                             private_addresses={network.name: "172.31.0.8"})
                     resource.attrs["HostConfig"]["GroupAdd"] = ["wrong"] if case == "group" else ["987"]
