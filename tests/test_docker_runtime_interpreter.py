@@ -1122,7 +1122,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
             self.assertNotIn("public-A", repr(record["labels"]))
             self.assertNotIn("public-B", repr(record["labels"]))
 
-    def test_reconcile_node_recreates_when_authority_delivery_changes(self) -> None:
+    def test_reconcile_node_rejects_authority_change_without_prior_declaration(self) -> None:
         fake_client = FakeDockerClient()
         interpreter = DockerRuntimeInterpreter(
             DockerSdkClient(
@@ -1135,6 +1135,8 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
             RuntimeAuthorityReference("local-docker"),
             RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT,
         )
+        _local_socket_transport(fake_client)
+        original = fake_client.containers.created_containers[-1]
 
         with patch(
             "control_plane_kit_interpreters.docker.runtime.os.stat",
@@ -1145,13 +1147,13 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                     ReconcileNode(NodeTarget("api")),
                     authority_ref=RuntimeAuthorityReference("local-docker"),
                     authority_deliveries=(delivery,),
+                    products=(_material(_product(), runtime_authority_deliveries=(delivery,)),),
                 )
             )
 
-        self.assertEqual(result.evidence["action"], "recreated")
-        record = _workload_container_records(fake_client)[-1]
-        self.assertEqual(record["group_add"], ["987"])
-        self.assertEqual(len(_bind_mounts(record)), 1)
+        self.assertIs(result.kind, EffectResultKind.UNSUPPORTED)
+        self.assertFalse(original.removed)
+        self.assertEqual(len(_workload_container_records(fake_client)), 1)
 
     def test_existing_owned_container_is_started_without_recreation(self) -> None:
         fake_client = FakeDockerClient()
@@ -1917,9 +1919,209 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
 
         self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
         self.assertEqual(_bind_mounts(_workload_container_record(fake_client)), [])
+        self.assertEqual(_workload_container_record(fake_client).get("group_add", []), [])
+
+    def test_same_runtime_materials_deliver_socket_only_to_declared_recipient(self):
+        raw = FakeDockerClient()
+        _local_socket_transport(raw)
+        interpreter = DockerRuntimeInterpreter(DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw)))
+        reference = RuntimeAuthorityReference("local-docker")
+        delivery = RuntimeAuthorityAccessDelivery(reference, RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT)
+        # Core's maintained material boundary supplies each selected node; provider
+        # registration does not turn the two sibling materials into recipients.
+        materials = tuple(replace(
+            _material(_product()), node_id=name,
+            runtime_authority_deliveries=(delivery,) if name == "controller" else (),
+        ) for name in ("controller", "database", "custody"))
+        with patch("control_plane_kit_interpreters.docker.runtime.os.stat", return_value=type("SocketStat", (), {"st_gid": 987})()):
+            for material in materials:
+                request = _request(StartNode(NodeTarget(material.node_id)), products=(material,),
+                                   authority_ref=reference, authority_deliveries=material.runtime_authority_deliveries)
+                result = interpreter.execute_with_authority(request, _local_runtime_authority())
+                self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        records = _workload_container_records(raw)
+        self.assertEqual(len(records), 3)
+        for material, record in zip(materials, records, strict=True):
+            declared = material.node_id == "controller"
+            self.assertEqual(len(_bind_mounts(record)), 1 if declared else 0)
+            self.assertEqual(record.get("group_add", []), ["987"] if declared else [])
+
+    def test_unsafe_existing_authority_blocks_before_pull_or_runtime_mutation(self):
+        for operation_type in (StartNode, ReconcileNode):
+            for corruption in ("bind", "group", "missing-mounts", "missing-groups", "volume-at-socket"):
+                with self.subTest(operation=operation_type.__name__, corruption=corruption):
+                    raw = FakeDockerClient()
+                    sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+                    interpreter = DockerRuntimeInterpreter(sdk)
+                    request = _request(StartNode(NodeTarget("api")))
+                    self.assertIs(interpreter.execute(request).kind, EffectResultKind.SUCCEEDED)
+                    container = raw.containers.created_containers[-1]
+                    if corruption == "bind":
+                        container.attrs["Mounts"].append({"Type": "bind", "Source": "/var/run/docker.sock", "Destination": "/var/run/docker.sock", "RW": True})
+                    elif corruption == "volume-at-socket":
+                        container.attrs["Mounts"].append({"Type": "volume", "Name": "socket", "Destination": "/var/run/docker.sock", "RW": True})
+                    elif corruption == "group":
+                        container.attrs["HostConfig"]["GroupAdd"] = ["987"]
+                    elif corruption == "missing-mounts":
+                        del container.attrs["Mounts"]
+                    else:
+                        del container.attrs["HostConfig"]["GroupAdd"]
+                    # A cache miss would tempt the old sequence to pull first.
+                    raw.images.resources.clear()
+                    with patch.object(sdk, "pull_image", side_effect=AssertionError("pulled before authority guard")) as pull, patch.object(
+                        sdk, "create_network", side_effect=AssertionError("network before authority guard"),
+                    ) as network, patch.object(sdk, "remove_container") as remove, patch.object(sdk, "start_container") as start:
+                        result = interpreter.execute(replace(request, operation=operation_type(NodeTarget("api"))))
+                    self.assertIs(result.kind, EffectResultKind.UNSUPPORTED if corruption in ("bind", "group") else EffectResultKind.UNCERTAIN)
+                    pull.assert_not_called()
+                    network.assert_not_called()
+                    remove.assert_not_called()
+                    start.assert_not_called()
+                    self.assertEqual(len(_workload_container_records(raw)), 1)
+
+    def test_declared_reconcile_reuses_exact_material_but_rejects_changed_fingerprint(self):
+        for change in ("none", "plan", "graph", "environment", "image"):
+            with self.subTest(change=change):
+                raw = FakeDockerClient()
+                _local_socket_transport(raw)
+                sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+                interpreter = DockerRuntimeInterpreter(sdk)
+                delivery = RuntimeAuthorityAccessDelivery(RuntimeAuthorityReference("local-docker"), RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT)
+                request = _request(StartNode(NodeTarget("api")), authority_ref=delivery.authority_ref,
+                                   authority_deliveries=(delivery,), products=(_material(_product(), runtime_authority_deliveries=(delivery,)),))
+                with patch("control_plane_kit_interpreters.docker.runtime.os.stat", return_value=type("SocketStat", (), {"st_gid": 987})()):
+                    self.assertIs(interpreter.execute(request).kind, EffectResultKind.SUCCEEDED)
+                    desired = replace(request, operation=ReconcileNode(NodeTarget("api")))
+                    if change == "plan":
+                        desired = replace(desired, source=replace(desired.source, plan_id="new-plan"))
+                    elif change == "graph":
+                        desired = replace(desired, source=replace(desired.source, desired_graph_id="new-graph"))
+                    elif change == "environment":
+                        desired = replace(desired, products=(replace(desired.products[0], public_environment=(PublicStaticEnvironmentBinding("VALUE", "new"),)),))
+                    elif change == "image":
+                        material = desired.products[0]
+                        desired = replace(desired, products=(replace(material, product=replace(material.product, image=replace(material.product.image, digest="sha256:" + "c" * 64))),))
+                    with patch.object(sdk, "pull_image") as pull, patch.object(sdk, "remove_container") as remove, patch.object(sdk, "create_container") as create:
+                        result = interpreter.execute(desired)
+                self.assertIs(result.kind, EffectResultKind.SUCCEEDED if change in ("none", "plan") else EffectResultKind.UNSUPPORTED)
+                pull.assert_not_called()
+                remove.assert_not_called()
+                create.assert_not_called()
+
+    def test_remote_selected_socket_rejects_before_tls_resolution_or_factory(self):
+        raw = FakeDockerClient()
+        sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+        delivery = RuntimeAuthorityAccessDelivery(RuntimeAuthorityReference("remote-docker"), RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT)
+        request = _request(StartNode(NodeTarget("api")), authority_ref=delivery.authority_ref,
+                           authority_deliveries=(delivery,), products=(_material(_product(), runtime_authority_deliveries=(delivery,)),))
+        with patch.object(DockerSdkClient, "from_authority") as factory, patch(
+            "control_plane_kit_interpreters.docker.runtime._resolve_runtime_authority_secret",
+            side_effect=AssertionError("resolved before recipient locality"),
+        ) as resolve:
+            result = DockerRuntimeInterpreter(sdk, secret_resolver=object()).execute_with_authority(request, _remote_tls_runtime_authority())
+        self.assertIs(result.kind, EffectResultKind.UNSUPPORTED)
+        resolve.assert_not_called()
+        factory.assert_not_called()
+        self.assertEqual(raw.containers.created, [])
+
+    def test_forged_recipient_material_fails_before_provider_or_secret_io(self):
+        for authority_entry in (False, True):
+            for defect in ("missing", "foreign", "undeclared"):
+                with self.subTest(authority_entry=authority_entry, defect=defect):
+                    raw = FakeDockerClient()
+                    sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+                    delivery = RuntimeAuthorityAccessDelivery(RuntimeAuthorityReference("local-docker"), RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT)
+                    material = _material(_product(), runtime_authority_deliveries=(delivery,))
+                    request = _request(StartNode(NodeTarget("api")), authority_ref=delivery.authority_ref, authority_deliveries=(delivery,), products=(material,))
+                    corrupt = () if defect == "missing" else (replace(material, **(
+                        {"node_id": "foreign"} if defect == "foreign" else {"runtime_authority_deliveries": ()}
+                    )),)
+                    # Simulate a malformed caller crossing the interpreter boundary.
+                    object.__setattr__(request, "products", corrupt)
+                    with patch.object(sdk, "inspect_container") as inspect_container, patch(
+                        "control_plane_kit_interpreters.docker.runtime._client_for_runtime_authority",
+                        side_effect=AssertionError("connected before request validation"),
+                    ) as connect, patch("control_plane_kit_interpreters.docker.runtime.os.stat") as stat:
+                        interpreter = DockerRuntimeInterpreter(sdk)
+                        result = interpreter.execute_with_authority(request, _local_runtime_authority()) if authority_entry else interpreter.execute(request)
+                    self.assertIs(result.kind, EffectResultKind.FAILED)
+                    connect.assert_not_called()
+                    inspect_container.assert_not_called()
+                    stat.assert_not_called()
+                    self.assertEqual(raw.containers.created, [])
+
+    def test_reconcile_matching_fingerprint_does_not_override_foreign_ownership(self):
+        raw = FakeDockerClient()
+        sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+        interpreter = DockerRuntimeInterpreter(sdk)
+        request = _request(StartNode(NodeTarget("api")))
+        self.assertIs(interpreter.execute(request).kind, EffectResultKind.SUCCEEDED)
+        container = raw.containers.created_containers[-1]
+        container.attrs["Config"]["Labels"]["org.openj92.cpk.workspace"] = "foreign"
+        with patch.object(sdk, "start_container") as start, patch.object(sdk, "remove_container") as remove:
+            result = interpreter.execute(replace(request, operation=ReconcileNode(NodeTarget("api"))))
+        self.assertIs(result.kind, EffectResultKind.FAILED)
+        start.assert_not_called()
+        remove.assert_not_called()
+        self.assertEqual(result.observations, ())
+
+    def test_final_authority_drift_cannot_publish_success_observations(self):
+        for operation_type in (StartNode, ReconcileNode):
+            with self.subTest(operation=operation_type.__name__):
+                raw = FakeDockerClient()
+                sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+                original_start = FakeResource.start
+                injected = []
+                def start_with_drift(resource):
+                    original_start(resource)
+                    if resource.attrs["Config"]["Labels"].get("org.openj92.cpk.kind") == "container":
+                        resource.attrs["HostConfig"]["GroupAdd"] = ["unexpected"]
+                        injected.append(resource.name)
+                with patch.object(FakeResource, "start", start_with_drift):
+                    result = DockerRuntimeInterpreter(sdk).execute(_request(operation_type(NodeTarget("api"))))
+                self.assertEqual(len(injected), 1)
+                self.assertEqual(raw.containers.resources[injected[0]].attrs["HostConfig"]["GroupAdd"], ["unexpected"])
+                self.assertIs(result.kind, EffectResultKind.FAILED)
+                self.assertEqual(result.observations, ())
+
+    def test_reconcile_final_inspection_must_exist_and_conform(self):
+        for corruption in ("absent", "image", "network", "stopped"):
+            with self.subTest(corruption=corruption):
+                raw = FakeDockerClient()
+                sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+                original_inspect = sdk.inspect_container
+                reads = 0
+                def inspect_after_create(name):
+                    nonlocal reads
+                    reads += 1
+                    observed = original_inspect(name)
+                    if reads == 1:
+                        return observed
+                    if corruption == "absent":
+                        return None
+                    changes = {"image_id": "sha256:" + "f" * 64} if corruption == "image" else (
+                        {"network_names": ("foreign",)} if corruption == "network" else {"running": False}
+                    )
+                    return replace(observed, **changes)
+                with patch.object(sdk, "inspect_container", side_effect=inspect_after_create):
+                    result = DockerRuntimeInterpreter(sdk).execute(_request(ReconcileNode(NodeTarget("api"))))
+                self.assertIs(result.kind, EffectResultKind.UNCERTAIN if corruption == "absent" else EffectResultKind.FAILED)
+                self.assertEqual(result.observations, ())
+
+    def test_unknown_local_transport_cannot_deliver_or_stat_socket(self):
+        raw = FakeDockerClient()
+        delivery = RuntimeAuthorityAccessDelivery(RuntimeAuthorityReference("local-docker"), RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT)
+        request = _request(StartNode(NodeTarget("api")), authority_ref=delivery.authority_ref,
+                           authority_deliveries=(delivery,), products=(_material(_product(), runtime_authority_deliveries=(delivery,)),))
+        with patch("control_plane_kit_interpreters.docker.runtime.os.stat") as stat:
+            result = DockerRuntimeInterpreter(DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))).execute(request)
+        self.assertIs(result.kind, EffectResultKind.UNSUPPORTED)
+        stat.assert_not_called()
+        self.assertEqual(raw.containers.created, [])
 
     def test_explicit_local_socket_delivery_mounts_socket_at_docker_boundary(self) -> None:
         fake_client = FakeDockerClient()
+        _local_socket_transport(fake_client)
         interpreter = DockerRuntimeInterpreter(
             DockerSdkClient(
                 client=fake_client,
@@ -1940,6 +2142,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                     StartNode(NodeTarget("api")),
                     authority_ref=RuntimeAuthorityReference("local-docker"),
                     authority_deliveries=(delivery,),
+                    products=(_material(_product(), runtime_authority_deliveries=(delivery,)),),
                 ),
                 _local_runtime_authority(),
             )
@@ -1978,6 +2181,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                 StartNode(NodeTarget("api")),
                 authority_ref=RuntimeAuthorityReference("local-docker"),
                 authority_deliveries=(delivery,),
+                products=(_material(_product(), runtime_authority_deliveries=(delivery,)),),
             ),
             _local_runtime_authority(),
         )
@@ -2682,6 +2886,14 @@ class FakeRemoteDockerTlsAuthority:
     client_key: SecretReference
 
 
+def _local_socket_transport(raw, path="/var/run/docker.sock"):
+    from docker.transport import UnixHTTPAdapter
+
+    adapter = UnixHTTPAdapter("http+unix://" + path)
+    raw.api.base_url = "http+docker://localhost"
+    raw.api.get_adapter = lambda url: adapter
+
+
 def _local_runtime_authority() -> FakeRuntimeAuthority:
     return FakeRuntimeAuthority(
         RuntimeKind.DOCKER,
@@ -2800,6 +3012,7 @@ def _material(
     public_environment: tuple[PublicStaticEnvironmentBinding, ...] | None = None,
     socket_environment: tuple[SocketDerivedEnvironmentBinding, ...] = (),
     pull_authority: ImagePullAuthority | None = None,
+    runtime_authority_deliveries: tuple[RuntimeAuthorityAccessDelivery, ...] = (),
 ) -> RuntimeProductMaterial:
     reference = ProductReference(
         product.identity,
@@ -2817,6 +3030,7 @@ def _material(
         ),
         socket_environment=socket_environment,
         pull_authority=pull_authority,
+        runtime_authority_deliveries=runtime_authority_deliveries,
     )
 
 

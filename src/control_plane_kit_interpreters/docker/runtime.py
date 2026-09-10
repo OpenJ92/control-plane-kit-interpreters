@@ -21,7 +21,11 @@ from control_plane_kit_core.planning import (
     WaitForHealthy,
 )
 from control_plane_kit_core.probe_intents import EndpointContext, LiteralEndpointMaterial
-from control_plane_kit_core.runtime_authority import RuntimeAuthorityAccessDeliveryKind
+from control_plane_kit_core.runtime_authority import (
+    RuntimeAuthorityAccessDeliveryKind,
+    RuntimeEffectContractError,
+)
+from control_plane_kit_core.runtime_effect_observation import runtime_effect_intent_for_request
 from control_plane_kit_core.runtime_effects import (
     RuntimeEffectFailure,
     RuntimeEffectKind,
@@ -165,6 +169,7 @@ class DockerRuntimeInterpreter:
             return _unsupported(request, "docker.unsupported-runtime-kind")
 
         try:
+            runtime_effect_intent_for_request(request)
             match request.operation:
                 case StartRuntime():
                     return self._start_runtime(request)
@@ -189,6 +194,8 @@ class DockerRuntimeInterpreter:
                         request,
                         "docker.unsupported-activity-operation",
                     )
+        except RuntimeEffectContractError:
+            return _failed(request, "docker.runtime-request-invalid", "Docker runtime request is invalid")
         except _DockerInterpreterUnsupportedAuthorityError as error:
             return _unsupported(request, error.code)
         except _DockerInterpreterPreconditionError as error:
@@ -223,6 +230,7 @@ class DockerRuntimeInterpreter:
         if request.runtime_kind is not RuntimeKind.DOCKER:
             return _unsupported(request, "docker.unsupported-runtime-kind")
         try:
+            runtime_effect_intent_for_request(request)
             client_binding = _client_for_runtime_authority(
                 self.client,
                 authority,
@@ -230,6 +238,8 @@ class DockerRuntimeInterpreter:
                 self.authorized_secret_resolver,
                 self.secret_resolver,
             )
+        except RuntimeEffectContractError:
+            return _failed(request, "docker.runtime-request-invalid", "Docker runtime request is invalid")
         except _DockerInterpreterUnsupportedAuthorityError as error:
             return _unsupported(request, error.code)
         except _DockerInterpreterPreconditionError as error:
@@ -348,7 +358,17 @@ class DockerRuntimeInterpreter:
 
     def _start_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         material = _single_product(request)
-        authority_delivery = _authority_delivery_material(request)
+        authority_delivery = _authority_delivery_material(request, self.client)
+        container_name = _container_name(request, material.node_id)
+        labels = _node_labels(request, material)
+        network_name = _network_name(request, material.runtime_id)
+        inspection = _start_node_provider_call(
+            _StartNodePhase.CONTAINER_CREATE,
+            lambda: self.client.inspect_container(container_name),
+        )
+        if inspection is not None:
+            _require_node_container_correlation(inspection, labels, network_name)
+            _require_node_container_authority(inspection, authority_delivery)
         secrets = _resolve_product_secret_deliveries(
             material,
             request,
@@ -381,12 +401,6 @@ class DockerRuntimeInterpreter:
         else:
             _require_runtime_owner(network.labels, runtime_labels, "network")
 
-        container_name = _container_name(request, material.node_id)
-        labels = _node_labels(request, material)
-        inspection = _start_node_provider_call(
-            _StartNodePhase.CONTAINER_CREATE,
-            lambda: self.client.inspect_container(container_name),
-        )
         if inspection is None:
             create_material = _start_node_provider_call(
                 _StartNodePhase.CONFIGURATION,
@@ -450,6 +464,7 @@ class DockerRuntimeInterpreter:
             network_name=network_name,
             require_running=True,
         )
+        _require_node_container_authority(observed, authority_delivery, final=True)
         published = observed.published_ports
         private_host = _private_host_for_runtime(request, material, observed)
         port_bindings = _private_provider_ports(material)
@@ -501,7 +516,25 @@ class DockerRuntimeInterpreter:
 
     def _reconcile_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         material = _single_product(request)
-        authority_delivery = _authority_delivery_material(request)
+        authority_delivery = _authority_delivery_material(request, self.client)
+        container_name = _container_name(request, material.node_id)
+        labels = _node_labels(request, material)
+        network_name = _network_name(request, material.runtime_id)
+        inspection = self.client.inspect_container(container_name)
+        if inspection is not None:
+            _require_node_owner(inspection.labels, labels, "container")
+            _require_node_network(inspection, network_name)
+            _require_node_container_authority(inspection, authority_delivery)
+            if request.authority_deliveries and not _fingerprint_matches(inspection.labels, labels):
+                # There is no pinned prior declaration in this request. Mounts
+                # and labels cannot establish approval for replacing it.
+                raise _DockerInterpreterUnsupportedAuthorityError(
+                    "docker.runtime-authority-change-unsupported"
+                )
+            if _fingerprint_matches(inspection.labels, labels):
+                _require_node_container_correlation(
+                    inspection, labels, network_name, allow_prior_plan=True,
+                )
         secrets = _resolve_product_secret_deliveries(
             material,
             request,
@@ -525,9 +558,6 @@ class DockerRuntimeInterpreter:
         else:
             _require_runtime_owner(network.labels, runtime_labels, "network")
 
-        container_name = _container_name(request, material.node_id)
-        labels = _node_labels(request, material)
-        inspection = self.client.inspect_container(container_name)
         if inspection is None:
             self._create_node_container(
                 request,
@@ -540,7 +570,10 @@ class DockerRuntimeInterpreter:
             )
             action = "created"
         elif _fingerprint_matches(inspection.labels, labels):
-            _require_owned(inspection.labels, labels, "container")
+            _require_start_node_container(
+                inspection, labels=labels, admitted_image=admitted_image,
+                network_name=network_name, require_running=False, allow_prior_plan=True,
+            )
             if inspection.running:
                 action = "reused"
             else:
@@ -560,13 +593,16 @@ class DockerRuntimeInterpreter:
             )
             action = "recreated"
 
-        published = ()
         observed = self.client.inspect_container(container_name)
-        private_host = material.node_id
-        if observed is not None:
-            _require_owned(observed.labels, labels, "container")
-            published = observed.published_ports
-            private_host = _private_host_for_runtime(request, material, observed)
+        if observed is None:
+            raise _DockerStartNodeUncertainError(_StartNodePhase.FINAL_INSPECT)
+        _require_start_node_container(
+            observed, labels=labels, admitted_image=admitted_image,
+            network_name=network_name, require_running=True, allow_prior_plan=True,
+        )
+        _require_node_container_authority(observed, authority_delivery, final=True)
+        published = observed.published_ports
+        private_host = _private_host_for_runtime(request, material, observed)
         observations = runtime_endpoint_observations(
             subject_id=material.node_id,
             graph_id=request.source.desired_graph_id,
@@ -1156,6 +1192,10 @@ def _client_for_runtime_authority(
         raise _DockerInterpreterUnsupportedAuthorityError(
             "docker.runtime-authority-kind-unsupported"
         )
+    if request.authority_deliveries:
+        raise _DockerInterpreterUnsupportedAuthorityError(
+            "docker.runtime-authority-delivery-unsupported"
+        )
     material = getattr(authority, "authority", None)
     endpoint = getattr(material, "endpoint", None)
     if not isinstance(endpoint, str) or not endpoint.startswith("tcp://"):
@@ -1205,6 +1245,7 @@ def _client_for_runtime_authority(
 
 def _authority_delivery_material(
     request: RuntimeEffectRequest,
+    client: DockerSdkClient,
 ) -> _AuthorityDeliveryMaterial:
     mounts = []
     supplementary_groups = []
@@ -1213,6 +1254,11 @@ def _authority_delivery_material(
             delivery.delivery_kind
             is RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT
         ):
+            locality = getattr(client, "uses_local_socket", None)
+            if not callable(locality) or not locality(_LOCAL_DOCKER_SOCKET_PATH):
+                raise _DockerInterpreterUnsupportedAuthorityError(
+                    "docker.runtime-authority-delivery-unsupported"
+                )
             mounts.append(
                 DockerSdkBindMount(
                     source_path=_LOCAL_DOCKER_SOCKET_PATH,
@@ -1518,6 +1564,65 @@ def _require_owned(
         )
 
 
+def _require_node_container_authority(
+    inspection: DockerSdkResourceInspection,
+    delivery: _AuthorityDeliveryMaterial,
+    *,
+    final: bool = False,
+) -> None:
+    mounts = getattr(inspection, "bind_mounts", None)
+    groups = getattr(inspection, "supplementary_groups", None)
+    if type(mounts) is not tuple or type(groups) is not tuple:
+        raise _DockerStartNodeUncertainError(
+            _StartNodePhase.FINAL_INSPECT if final else _StartNodePhase.CONTAINER_CREATE
+        )
+    if mounts != delivery.mounts or groups != delivery.supplementary_groups:
+        if not final:
+            raise _DockerInterpreterUnsupportedAuthorityError(
+                "docker.runtime-authority-delivery-conflict"
+            )
+        raise _DockerInterpreterPreconditionError(
+            "docker.container-authority-conflict",
+            "Docker container authority does not match the declared delivery",
+        )
+
+
+def _node_correlation_labels(
+    labels: Mapping[str, str], *, allow_prior_plan: bool = False,
+) -> dict[str, str]:
+    expected = _cpk_ownership_labels(labels)
+    if allow_prior_plan:
+        plan_key = f"{_LABEL_PREFIX}.plan"
+        if isinstance(expected.get(plan_key), str) and expected[plan_key]:
+            expected[plan_key] = "<recorded-plan>"
+    return expected
+
+
+def _require_node_container_correlation(
+    inspection: DockerSdkResourceInspection,
+    labels: Mapping[str, str],
+    network_name: str,
+    *,
+    allow_prior_plan: bool = False,
+) -> None:
+    if _node_correlation_labels(
+        inspection.labels, allow_prior_plan=allow_prior_plan,
+    ) != _node_correlation_labels(labels, allow_prior_plan=allow_prior_plan):
+        raise _DockerInterpreterPreconditionError(
+            "docker.container-ownership-conflict",
+            "Docker container is not owned by this runtime effect",
+        )
+    _require_node_network(inspection, network_name)
+
+
+def _require_node_network(inspection: DockerSdkResourceInspection, network_name: str) -> None:
+    if inspection.network_names != (network_name,):
+        raise _DockerInterpreterPreconditionError(
+            "docker.container-network-conflict",
+            "Docker container network does not match the intended runtime",
+        )
+
+
 def _require_start_node_container(
     inspection: DockerSdkResourceInspection,
     *,
@@ -1525,21 +1630,15 @@ def _require_start_node_container(
     admitted_image: DockerSdkImageInspection,
     network_name: str,
     require_running: bool,
+    allow_prior_plan: bool = False,
 ) -> None:
-    if _cpk_ownership_labels(inspection.labels) != _cpk_ownership_labels(labels):
-        raise _DockerInterpreterPreconditionError(
-            "docker.container-ownership-conflict",
-            "Docker container is not owned by this runtime effect",
-        )
+    _require_node_container_correlation(
+        inspection, labels, network_name, allow_prior_plan=allow_prior_plan,
+    )
     if inspection.image_id != admitted_image.image_id:
         raise _DockerInterpreterPreconditionError(
             "docker.container-image-conflict",
             "Docker container image does not match the admitted image",
-        )
-    if inspection.network_names != (network_name,):
-        raise _DockerInterpreterPreconditionError(
-            "docker.container-network-conflict",
-            "Docker container network does not match the intended runtime",
         )
     if require_running and not inspection.running:
         raise _DockerInterpreterPreconditionError(
@@ -1624,7 +1723,7 @@ def _node_fingerprint(
         repr(product.runtime_contract.descriptor()),
         _canonical_descriptors(material.public_environment),
         _canonical_descriptors(material.socket_environment),
-        _canonical_descriptors(request.authority_deliveries),
+        _canonical_descriptors(material.runtime_authority_deliveries),
         repr(tuple(artifact.content_digest for artifact in contract.configuration_artifacts)),
         repr(tuple(mount.resource_id for mount in contract.retained_data_mounts)),
     )

@@ -20,10 +20,12 @@ from control_plane_kit_core.runtime_effect_observation import (
     RuntimeEffectObservationRequest, RuntimeEffectObservedAbsent,
     RuntimeEffectObservedConflict, RuntimeEffectObservedIndeterminate,
     RuntimeEffectObservedSucceeded, RuntimeEffectObserverUnsupported,
-    runtime_effect_observation_fingerprint,
+    runtime_effect_observation_fingerprint, runtime_effect_intent_for_request,
+    runtime_effect_intent_fingerprint,
 )
 from control_plane_kit_core.runtime_effects import EffectResultKind, ImagePullAuthority
 from control_plane_kit_core.runtime_authority import (
+    RemoteDockerTlsConnectionAdmission,
     RuntimeAuthorityAccessDelivery, RuntimeAuthorityAccessDeliveryKind,
     RuntimeAuthorityDeliverySecretReference, RuntimeAuthorityReference,
     RuntimeEffectContractError,
@@ -38,7 +40,7 @@ from control_plane_kit_interpreters.docker.runtime import (
     _container_name, _network_name, _node_labels, _runtime_labels, _volume_name,
 )
 from control_plane_kit_interpreters.docker.sdk import (
-    DockerSdkClient, DockerSdkImageInspection, DockerSdkResourceInspection,
+    DockerSdkBindMount, DockerSdkClient, DockerSdkImageInspection, DockerSdkResourceInspection,
     DockerTlsClientConfig,
 )
 from test_docker_start_node_phase_total import (
@@ -101,10 +103,6 @@ def _remote_request(request=None):
     reference = RuntimeAuthorityReference("remote-docker")
     request = replace(
         request, authority_ref=reference,
-        authority_deliveries=(RuntimeAuthorityAccessDelivery(
-            reference, RuntimeAuthorityAccessDeliveryKind.REMOTE_DOCKER_TLS_SECRET_FILES,
-            tuple(RuntimeAuthorityDeliverySecretReference(label, secret) for label, secret, _ in uses),
-        ),),
         secret_resolution_grants=tuple(_grant_for(request, secret, intent) for _, secret, intent in uses),
     )
     ordered_grants = tuple(
@@ -112,6 +110,31 @@ def _remote_request(request=None):
         for _, _, intent in uses
     )
     return request, authority, ordered_grants
+
+
+def _declared_socket_request(request, *, reference=None):
+    reference = reference or RuntimeAuthorityReference("local-docker")
+    delivery = RuntimeAuthorityAccessDelivery(
+        reference, RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT,
+    )
+    return replace(request, authority_ref=reference, authority_deliveries=(delivery,), products=(replace(
+        request.products[0], runtime_authority_deliveries=(delivery,),
+    ),))
+
+
+def _connection_admission():
+    material = _remote_tls_runtime_authority().authority
+    return RemoteDockerTlsConnectionAdmission(
+        RuntimeAuthorityReference("remote-docker"), material.ca_certificate,
+        material.client_certificate, material.client_key,
+    )
+
+
+def _with_authority_evidence(inspection, *, mounts=(), groups=()):
+    # Test provider evidence is explicit even before the SDK grows these fields.
+    object.__setattr__(inspection, "bind_mounts", mounts)
+    object.__setattr__(inspection, "supplementary_groups", groups)
+    return inspection
 
 
 class _ReadClient:
@@ -122,6 +145,7 @@ class _ReadClient:
         self.mutations = []
         self.fault = fault
         self.close_calls = 0
+        self.local_socket = False
         self.request = request
         material = request.products[0] if request.products else None
         runtime_id = request.operation.target.runtime_id if material is None else material.runtime_id
@@ -140,7 +164,11 @@ class _ReadClient:
             image_id=HELLO_IMAGE_ID, network_names=(network,),
             private_addresses={network: "172.31.0.8"},
         )
+        _with_authority_evidence(self.container)
         self.image = DockerSdkImageInspection(HELLO_IMAGE_ID, (material.product.image.execution_reference,))
+
+    def uses_local_socket(self, path):
+        return self.local_socket and path == "/var/run/docker.sock"
 
     def _read(self, operation, coordinate):
         self.calls.append((operation, coordinate))
@@ -206,7 +234,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
         result_type, postcondition, failure = _RESULTS[kind]
         self.assertIs(type(result), result_type)
         self.assertEqual(result.effect_id, request.effect_id)
-        self.assertEqual(result.request_fingerprint, RuntimeEffectObservationRequest(request).request_fingerprint)
+        self.assertEqual(result.request_fingerprint, runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(request)))
         self.assertEqual(len(runtime_effect_observation_fingerprint(result)), 64)
         self.assertEqual(result.observations, ())
         descriptor = result.descriptor()
@@ -215,7 +243,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
         }
         self.assertEqual(descriptor, {
             "kind": kind, "effect_id": request.effect_id,
-            "request_fingerprint": RuntimeEffectObservationRequest(request).request_fingerprint,
+            "request_fingerprint": runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(request)),
             "evidence": {"operation": _OPERATIONS[type(request.operation)], "postcondition": postcondition},
             "failure": expected_failure, "observations": [],
         })
@@ -545,7 +573,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                 ambient, remote = _ReadClient(request), _ReadClient(request, fault=fault)
                 resolver = _Resolver()
                 with patch.object(DockerSdkClient, "from_authority", return_value=remote) as factory:
-                    result = self.observer(ambient, authorized_secret_resolver=resolver).observe(RuntimeEffectObservationRequest(request), authority)
+                    result = self.observer(ambient, authorized_secret_resolver=resolver).observe(RuntimeEffectObservationRequest(request, connection_admission=_connection_admission()), authority)
                 self.assertEqual(ambient.calls, [])
                 self.assertEqual(ambient.close_calls, 0)
                 self.assertEqual(remote.close_calls, 1)
@@ -582,7 +610,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                     with patch.object(DockerSdkClient, "from_authority", return_value=remote):
                         with patch.object(remote, "inspect_network", side_effect=error):
                             with self.assertRaises(error_type) as caught:
-                                observer.observe(RuntimeEffectObservationRequest(request), authority)
+                                observer.observe(RuntimeEffectObservationRequest(request, connection_admission=_connection_admission()), authority)
                     self.assertIs(caught.exception, error)
                     self.assertIsNone(error.__cause__)
                     self.assertIsNone(error.__context__)
@@ -596,7 +624,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
             with self.subTest(authority=supplied is not None):
                 ambient = _ReadClient(request)
                 with patch.object(DockerSdkClient, "from_authority") as factory:
-                    result = self.observer(ambient).observe(RuntimeEffectObservationRequest(request), supplied)
+                    result = self.observer(ambient).observe(RuntimeEffectObservationRequest(request, connection_admission=_connection_admission()), supplied)
                 self.assertEqual(ambient.calls, [])
                 self.assertEqual(ambient.mutations, [])
                 factory.assert_not_called()
@@ -609,7 +637,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                 request = replace(request, secret_resolution_grants=tuple(grant for grant in grants if grant is not grants[missing]))
                 ambient, resolver = _ReadClient(request), _Resolver()
                 with patch.object(DockerSdkClient, "from_authority") as factory:
-                    result = self.observer(ambient, authorized_secret_resolver=resolver).observe(RuntimeEffectObservationRequest(request), authority)
+                    result = self.observer(ambient, authorized_secret_resolver=resolver).observe(RuntimeEffectObservationRequest(request, connection_admission=_connection_admission()), authority)
                 self.assertEqual(resolver.calls, [])
                 self.assertEqual(ambient.calls, [])
                 self.assertEqual(ambient.mutations, [])
@@ -623,7 +651,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                 mismatched = replace(authority, authority=replace(authority.authority, **{field: SecretReference("secret://foreign/tls")}))
                 ambient, resolver = _ReadClient(request), _Resolver()
                 with patch.object(DockerSdkClient, "from_authority") as factory:
-                    result = self.observer(ambient, authorized_secret_resolver=resolver).observe(RuntimeEffectObservationRequest(request), mismatched)
+                    result = self.observer(ambient, authorized_secret_resolver=resolver).observe(RuntimeEffectObservationRequest(request, connection_admission=_connection_admission()), mismatched)
                 self.assertEqual(resolver.calls, [])
                 self.assertEqual(ambient.calls, [])
                 self.assertEqual(ambient.mutations, [])
@@ -636,7 +664,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                 request, authority, grants = _remote_request()
                 ambient, resolver = _ReadClient(request), _Resolver(missing=grants[index])
                 with patch.object(DockerSdkClient, "from_authority") as factory:
-                    result = self.observer(ambient, authorized_secret_resolver=resolver).observe(RuntimeEffectObservationRequest(request), authority)
+                    result = self.observer(ambient, authorized_secret_resolver=resolver).observe(RuntimeEffectObservationRequest(request, connection_admission=_connection_admission()), authority)
                 self.assertEqual(resolver.calls, list(grants[:index + 1]))
                 self.assertEqual(ambient.calls, [])
                 self.assertEqual(ambient.mutations, [])
@@ -659,7 +687,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                 ambient, remote, resolver = _ReadClient(request), _ReadClient(request), _Resolver()
                 remote.container = replace(remote.container, running=False)
                 with patch.object(DockerSdkClient, "from_authority", return_value=remote):
-                    result = self.observer(ambient, authorized_secret_resolver=resolver).observe(RuntimeEffectObservationRequest(request), authority)
+                    result = self.observer(ambient, authorized_secret_resolver=resolver).observe(RuntimeEffectObservationRequest(request, connection_admission=_connection_admission()), authority)
                 self.assertEqual(resolver.calls, list(grants))
                 self.assertFalse(any(grant in resolver.calls for grant in extras))
                 self.assertEqual(ambient.calls, [])
@@ -668,46 +696,109 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                 self.assertEqual(remote.calls, [("inspect_container", _container_name(request, request.products[0].node_id))])
                 self.assertEqual(self.assert_observation(result, request), "succeeded")
 
-    def test_node_realization_cannot_confirm_unobservable_authority_delivery(self):
+    def test_node_observation_requires_exact_known_bind_and_group_evidence(self):
+        socket = DockerSdkBindMount("/var/run/docker.sock", "/var/run/docker.sock", False)
         for operation_type in (StartNode, ReconcileNode):
-            for delivery in ("none", "local", "remote"):
-                with self.subTest(operation=operation_type.__name__, delivery=delivery):
-                    request = _plain_node_request(operation_type)
-                    contract = request.products[0].product.runtime_contract
-                    self.assertEqual(contract.configuration_artifacts, ())
-                    self.assertEqual(contract.secret_deliveries, ())
-                    self.assertEqual(contract.retained_data_mounts, ())
-                    self.assertEqual(contract.verification.checks, ())
-                    self.assertEqual(request.authority_deliveries, ())
-                    self.assertEqual(request.secret_resolution_grants, ())
-                    if delivery == "remote":
-                        request, authority, _ = _remote_request(request)
-                    else:
-                        reference = RuntimeAuthorityReference("local-docker")
-                        request = replace(
-                            request, authority_ref=reference,
-                            authority_deliveries=() if delivery == "none" else (RuntimeAuthorityAccessDelivery(
-                                reference, RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT,
-                            ),),
-                        )
-                        authority = _local_runtime_authority()
-                    self.assertEqual(len(request.authority_deliveries), 0 if delivery == "none" else 1)
-                    client, resolver = _ReadClient(request), _Resolver()
-                    before = repr((client.network, client.container, client.image, client.volumes))
-                    with patch.object(DockerSdkClient, "from_authority") as factory:
-                        result = self.observer(client, authorized_secret_resolver=resolver).observe(RuntimeEffectObservationRequest(request), authority)
-                    expected_reads = [] if delivery != "none" else [
-                        ("inspect_network", _network_name(request, "docker")),
-                        ("inspect_container", _container_name(request, "api")),
-                        ("inspect_image", request.products[0].product.image.execution_reference),
-                    ]
-                    self.assertEqual(client.calls, expected_reads)
-                    self.assertEqual(client.mutations, [])
-                    self.assertEqual(client.close_calls, 0)
-                    self.assertEqual(before, repr((client.network, client.container, client.image, client.volumes)))
-                    self.assertEqual(resolver.calls, [])
-                    factory.assert_not_called()
-                    self.assertEqual(self.assert_observation(result, request), "succeeded" if delivery == "none" else "observer-unsupported")
+            for declared in (False, True):
+                request = _plain_node_request(operation_type)
+                if declared:
+                    request = _declared_socket_request(request)
+                expected_mounts, expected_groups = ((socket,), ("987",)) if declared else ((), ())
+                cases = (
+                    (expected_mounts, expected_groups, "succeeded"),
+                    (None, expected_groups, "indeterminate"),
+                    (expected_mounts, None, "indeterminate"),
+                    ((socket, socket), expected_groups, "conflict"),
+                    (expected_mounts, ("unexpected",), "conflict"),
+                    ((DockerSdkBindMount("/foreign", "/var/run/docker.sock", False),), expected_groups, "conflict"),
+                    ((DockerSdkBindMount("/var/run/docker.sock", "/elsewhere", False),), expected_groups, "conflict"),
+                    ((DockerSdkBindMount("/var/run/docker.sock", "/var/run/docker.sock", True),), expected_groups, "conflict"),
+                )
+                for mounts, groups, expected in cases:
+                    with self.subTest(operation=operation_type.__name__, declared=declared, mounts=mounts, groups=groups):
+                        client = _ReadClient(request)
+                        client.local_socket = declared
+                        _with_authority_evidence(client.container, mounts=mounts, groups=groups)
+                        with patch("control_plane_kit_interpreters.docker.runtime.os.stat", return_value=type("SocketStat", (), {"st_gid": 987})()):
+                            result = self.observer(client).observe(RuntimeEffectObservationRequest(request), _local_runtime_authority())
+                        self.assertEqual(self.assert_observation(result, request), expected)
+                        self.assertEqual(client.mutations, [])
+                        self.assertEqual(client.close_calls, 0)
+
+    def test_remote_connection_without_process_delivery_never_stats_ambient_socket(self):
+        for operation_type in (StartNode, ReconcileNode):
+            request, authority, grants = _remote_request(_plain_node_request(operation_type))
+            ambient, remote, resolver = _ReadClient(request), _ReadClient(request), _Resolver()
+            with patch.object(DockerSdkClient, "from_authority", return_value=remote), patch(
+                "control_plane_kit_interpreters.docker.runtime.os.stat", side_effect=AssertionError("ambient socket inspected"),
+            ):
+                result = self.observer(ambient, authorized_secret_resolver=resolver).observe(
+                    RuntimeEffectObservationRequest(request, connection_admission=_connection_admission()), authority,
+                )
+            self.assertEqual(self.assert_observation(result, request), "succeeded")
+            self.assertEqual(request.authority_deliveries, ())
+            self.assertEqual(resolver.calls, list(grants))
+            self.assertEqual(ambient.calls, [])
+            self.assertEqual(remote.close_calls, 1)
+            self.assertEqual(remote.mutations, [])
+
+    def test_remote_selected_socket_rejects_before_connection_or_resolution(self):
+        request, authority, _ = _remote_request(_plain_node_request(StartNode))
+        request = _declared_socket_request(request, reference=request.authority_ref)
+        client, resolver = _ReadClient(request), _Resolver()
+        with patch.object(DockerSdkClient, "from_authority") as factory, patch(
+            "control_plane_kit_interpreters.docker.runtime.os.stat", side_effect=AssertionError("ambient socket inspected"),
+        ):
+            result = self.observer(client, authorized_secret_resolver=resolver).observe(
+                RuntimeEffectObservationRequest(request, connection_admission=_connection_admission()), authority,
+            )
+        self.assertEqual(self.assert_observation(result, request), "observer-unsupported")
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(client.calls, [])
+        factory.assert_not_called()
+
+    def test_remote_process_tls_delivery_remains_unsupported(self):
+        request, authority, _ = _remote_request(_plain_node_request(StartNode))
+        delivery = RuntimeAuthorityAccessDelivery(
+            request.authority_ref, RuntimeAuthorityAccessDeliveryKind.REMOTE_DOCKER_TLS_SECRET_FILES,
+            (RuntimeAuthorityDeliverySecretReference("client-key", authority.authority.client_key),),
+        )
+        request = replace(request, authority_deliveries=(delivery,), products=(replace(
+            request.products[0], runtime_authority_deliveries=(delivery,),
+        ),))
+        client, resolver = _ReadClient(request), _Resolver()
+        with patch.object(DockerSdkClient, "from_authority") as factory:
+            result = self.observer(client, authorized_secret_resolver=resolver).observe(
+                RuntimeEffectObservationRequest(request, connection_admission=_connection_admission()), authority,
+            )
+        self.assertEqual(self.assert_observation(result, request), "observer-unsupported")
+        self.assertEqual(client.calls, [])
+        self.assertEqual(resolver.calls, [])
+        factory.assert_not_called()
+
+    def test_reconcile_allows_prior_plan_but_start_retains_exact_plan_identity(self):
+        for operation_type, expected in ((StartNode, "conflict"), (ReconcileNode, "succeeded")):
+            request = _plain_node_request(operation_type)
+            client = _ReadClient(request)
+            labels = dict(client.container.labels)
+            labels["org.openj92.cpk.plan"] = "prior-plan"
+            client.container = _with_authority_evidence(replace(client.container, labels=labels))
+            self.assertEqual(self.observe(request, client), expected)
+
+    def test_retained_declaration_preserves_same_coordinate_stop_identity_only(self):
+        start = _declared_socket_request(_plain_node_request(StartNode))
+        stop = replace(start, operation=StopNode(NodeTarget("api")), authority_deliveries=())
+        self.assertEqual(_node_labels(start, start.products[0]), _node_labels(stop, stop.products[0]))
+        client = _ReadClient(start)
+        client.container = replace(client.container, running=False)
+        with patch("control_plane_kit_interpreters.docker.runtime.os.stat", side_effect=AssertionError("teardown delivered authority")):
+            result = self.observer(client).observe(RuntimeEffectObservationRequest(stop), _local_runtime_authority())
+            self.assertEqual(self.assert_observation(result, stop), "succeeded")
+        for source in (replace(stop.source, plan_id="later-plan"), replace(stop.source, desired_graph_id="empty-graph")):
+            changed = replace(stop, source=source)
+            result = self.observer(client).observe(RuntimeEffectObservationRequest(changed), _local_runtime_authority())
+            self.assertEqual(self.assert_observation(result, changed), "conflict")
+        self.assertEqual(client.mutations, [])
 
     def test_node_target_and_single_product_are_admitted_before_reads(self):
         template = _request(StartNode(NodeTarget("api")))
@@ -853,7 +944,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                         request = _plain_node_request(operation_type)
                         sdk, raw, calls, _ = _sdk_state_fixture(request, status, case=case)
                         result = docker_interpreters.DockerRuntimeInterpreter(sdk).execute(request)
-                        expected = ["image", "network", "container"] if operation_type is StartNode else ["container"]
+                        expected = ["container"]
                         with self.subTest(boundary="no-later-operation"):
                             self.assertEqual([phase for phase, _ in calls], expected)
                         with self.subTest(boundary="no-mutation"):
@@ -889,7 +980,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                 request, authority, grants = _remote_request()
                 ambient, resolver = _ReadClient(request), _Resolver()
                 with patch.object(DockerSdkClient, "from_authority", side_effect=_provider_fault(fault)) as factory:
-                    result = self.observer(ambient, authorized_secret_resolver=resolver).observe(RuntimeEffectObservationRequest(request), authority)
+                    result = self.observer(ambient, authorized_secret_resolver=resolver).observe(RuntimeEffectObservationRequest(request, connection_admission=_connection_admission()), authority)
                 self.assertEqual(factory.call_count, 1)
                 self.assertEqual(resolver.calls, list(grants))
                 self.assertEqual(ambient.calls, [])
@@ -904,7 +995,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
         observer = self.observer(ambient, authorized_secret_resolver=resolver)
         with patch.object(DockerSdkClient, "from_authority", side_effect=error):
             with self.assertRaises(AssertionError) as caught:
-                observer.observe(RuntimeEffectObservationRequest(request), authority)
+                observer.observe(RuntimeEffectObservationRequest(request, connection_admission=_connection_admission()), authority)
         self.assertIs(caught.exception, error)
         self.assertIsNone(error.__cause__)
         self.assertIsNone(error.__context__)
@@ -1041,7 +1132,7 @@ def _corrupt(inspection, corruption):
 
 
 class DockerObservationGrantContractTests(unittest.TestCase):
-    def test_current_core_cannot_admit_ordinary_remote_node_tls_grants_without_workload_delivery(self):
+    def test_connection_carrier_admits_remote_grants_without_workload_delivery(self):
         authority = _remote_tls_runtime_authority().authority
         uses = (
             (authority.ca_certificate, SecretUseIntent.DOCKER_REMOTE_TLS_CA_CERTIFICATE),
@@ -1060,12 +1151,15 @@ class DockerObservationGrantContractTests(unittest.TestCase):
                     _grant_for(request, reference, intent) for reference, intent in uses
                 ))
                 self.assertEqual(request.descriptor()["authority_deliveries"], [])
-                with self.assertRaisesRegex(RuntimeEffectContractError, "^runtime observation grant is not admitted$"):
+                with self.assertRaisesRegex(RuntimeEffectContractError, "^connection grant is not admitted$"):
                     RuntimeEffectObservationRequest(request)
+                observation = RuntimeEffectObservationRequest(request, connection_admission=_connection_admission())
+                self.assertIs(observation.runtime_request, request)
+                self.assertEqual(request.authority_deliveries, ())
 
     def test_current_core_accepts_exact_grants_and_string_run_correlation(self):
         request, _, grants = _remote_request()
-        observation = RuntimeEffectObservationRequest(request)
+        observation = RuntimeEffectObservationRequest(request, connection_admission=_connection_admission())
         self.assertIs(observation.runtime_request, request)
         self.assertEqual({grant.run_id for grant in grants}, {request.source.run_id.value})
         self.assertTrue(all(type(grant.run_id) is str for grant in grants))
@@ -1085,7 +1179,7 @@ class DockerObservationGrantContractTests(unittest.TestCase):
                     with self.assertRaises(RuntimeEffectContractError):
                         changed = list(grants)
                         changed[index] = replace(changed[index], **{field: value})
-                        RuntimeEffectObservationRequest(replace(request, secret_resolution_grants=tuple(changed)))
+                        RuntimeEffectObservationRequest(replace(request, secret_resolution_grants=tuple(changed)), connection_admission=_connection_admission())
 
     def test_sdk_malformed_rows_reach_the_existing_exact_sdk_boundary(self):
         for corruption in ("network-ports", "container-image", "container-networks", "container-address", "image-id", "image-digests"):

@@ -136,6 +136,8 @@ class DockerSdkResourceInspection:
     network_names: tuple[str, ...] = ()
     configured_user: str | None = None
     readonly_secret_mounts: tuple["DockerSdkSecretMount", ...] = ()
+    bind_mounts: tuple["DockerSdkBindMount", ...] | None = None
+    supplementary_groups: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -331,6 +333,28 @@ class DockerSdkClient:
         if self.client is None:
             self.client = self._connect()
         return self.client
+
+    def uses_local_socket(self, path: str) -> bool:
+        """Prove the active SDK transport/path, not daemon-host provenance.
+
+        Lazy clients may perform their ordinary configured version read here.
+        Never replace the configured endpoint to manufacture local evidence.
+        """
+        if self.tls_config is not None:
+            return False
+        api = getattr(self._client(), "api", None)
+        base_url = getattr(api, "base_url", None)
+        get_adapter = getattr(api, "get_adapter", None)
+        if not isinstance(base_url, str) or not callable(get_adapter):
+            return False
+        from docker.transport import UnixHTTPAdapter
+        from requests.exceptions import InvalidSchema
+
+        try:
+            adapter = get_adapter(base_url)
+        except InvalidSchema:
+            return False
+        return isinstance(adapter, UnixHTTPAdapter) and adapter.socket_path == path
 
     def _remote_tls_client(
         self,
@@ -869,6 +893,14 @@ class DockerSdkClient:
             ),
             configured_user=_configured_user(getattr(resource, "attrs", None)),
             readonly_secret_mounts=_readonly_secret_mounts(getattr(resource, "attrs", None)),
+            bind_mounts=(
+                _observed_bind_mounts(getattr(resource, "attrs", None))
+                if include_runtime_identity else None
+            ),
+            supplementary_groups=(
+                _observed_supplementary_groups(getattr(resource, "attrs", None))
+                if include_runtime_identity else None
+            ),
         )
 
     def _labels(self, resource: Any) -> Mapping[str, str]:
@@ -1107,6 +1139,50 @@ def _secret_file_owner_uid(user: str | None) -> int:
                    for component in components)):
         raise ValueError("secret file requires a supported numeric image user")
     return int(components[0])
+
+
+def _observed_bind_mounts(attrs: object) -> tuple[DockerSdkBindMount, ...] | None:
+    if not isinstance(attrs, Mapping) or "Mounts" not in attrs:
+        return None
+    mounts = attrs["Mounts"]
+    # Docker serializes an explicit nil slice as null; absence is unknown.
+    if mounts is None:
+        return ()
+    if type(mounts) is not list:
+        return None
+    observed = []
+    for mount in mounts:
+        if not isinstance(mount, Mapping):
+            return None
+        kind, target = mount.get("Type"), mount.get("Destination")
+        if not isinstance(target, str) or not target.startswith("/"):
+            return None
+        if kind != "bind":
+            if kind not in ("volume", "tmpfs", "image", "cluster"):
+                return None
+            if target == "/var/run/docker.sock":
+                return None
+            continue
+        source, writable = mount.get("Source"), mount.get("RW")
+        if type(writable) is not bool:
+            return None
+        try:
+            observed.append(DockerSdkBindMount(source, target, not writable))
+        except (TypeError, ValueError):
+            return None
+    return tuple(observed)
+
+
+def _observed_supplementary_groups(attrs: object) -> tuple[str, ...] | None:
+    config = attrs.get("HostConfig") if isinstance(attrs, Mapping) else None
+    if not isinstance(config, Mapping) or "GroupAdd" not in config:
+        return None
+    groups = config["GroupAdd"]
+    if groups is None:
+        return ()
+    if type(groups) is not list or any(type(group) is not str or not group for group in groups):
+        return None
+    return tuple(groups)
 
 
 def _readonly_secret_mounts(attrs: Any) -> tuple[DockerSdkSecretMount, ...]:

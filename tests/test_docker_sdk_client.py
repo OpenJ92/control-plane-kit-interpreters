@@ -109,6 +109,8 @@ class FakeResource:
         self.image = FakeImage([image], image_id=image_id) if image else None
         self.attrs = {
             "Config": {"Labels": labels or {}, "User": ""},
+            "HostConfig": {"GroupAdd": None},
+            "Mounts": [],
             "State": {"Running": running},
             "NetworkSettings": {
                 "Ports": published_ports or {},
@@ -239,7 +241,10 @@ class FakeManager:
             running=False,
             private_addresses={str(network): ""} if network is not None else {},
         )
-        resource.attrs["HostConfig"] = {"Mounts": list(kwargs.get("mounts", []))}
+        resource.attrs["HostConfig"] = {
+            "Mounts": list(kwargs.get("mounts", [])),
+            "GroupAdd": kwargs.get("group_add"),
+        }
         selected_image = self.image_resources.get(image)
         if selected_image is None:
             selected_image = next((item for item in self.image_resources.values() if item.id == image), None)
@@ -248,6 +253,7 @@ class FakeManager:
             resource.attrs["Config"]["User"] = selected_image.attrs.get("Config", {}).get("User")
         resource.attrs["Mounts"] = [
             {"Type": mount.get("Type"), "Name": mount.get("Source"),
+             "Source": mount.get("Source"),
              "Destination": mount.get("Target"), "RW": not mount.get("ReadOnly", False)}
             for mount in kwargs.get("mounts", [])
         ]
@@ -289,6 +295,12 @@ class FakeDockerClient:
 class FakeDockerApi:
     def create_endpoint_config(self, *, aliases: list[str]) -> dict[str, object]:
         return {"Aliases": aliases}
+
+
+def _known_empty_authority(inspection):
+    object.__setattr__(inspection, "bind_mounts", ())
+    object.__setattr__(inspection, "supplementary_groups", ())
+    return inspection
 
 
 class ProbeHttpHandler(BaseHTTPRequestHandler):
@@ -365,6 +377,81 @@ class ProbeOpener:
 
 
 class DockerSdkClientTests(unittest.TestCase):
+    def test_inspection_reports_actual_bind_and_supplementary_group_evidence(self):
+        raw = FakeDockerClient()
+        resource = FakeResource("recipient", image="fixture")
+        resource.attrs["Mounts"] = [
+            {"Type": "bind", "Source": "/var/run/docker.sock",
+             "Destination": "/var/run/docker.sock", "RW": True},
+            {"Type": "bind", "Source": "/unexpected", "Destination": "/extra", "RW": False},
+        ]
+        resource.attrs["HostConfig"]["GroupAdd"] = ["987", "extra", "987"]
+        raw.containers.resources["recipient"] = resource
+        sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+        observed = sdk.inspect_container("recipient")
+        self.assertEqual(getattr(observed, "bind_mounts", None), (
+            DockerSdkBindMount("/var/run/docker.sock", "/var/run/docker.sock", False),
+            DockerSdkBindMount("/unexpected", "/extra", True),
+        ))
+        self.assertEqual(getattr(observed, "supplementary_groups", None), ("987", "extra", "987"))
+        self.assertEqual(resource.attrs["HostConfig"]["GroupAdd"], ["987", "extra", "987"])
+        self.assertEqual(raw.containers.created, [])
+
+    def test_authority_inspection_distinguishes_known_empty_from_unknown(self):
+        for mounts in (None, []):
+            for groups in (None, []):
+                with self.subTest(mounts=mounts, groups=groups):
+                    raw = FakeDockerClient()
+                    resource = FakeResource("sibling", image="fixture")
+                    resource.attrs["Mounts"] = mounts
+                    resource.attrs["HostConfig"]["GroupAdd"] = groups
+                    raw.containers.resources["sibling"] = resource
+                    observed = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw)).inspect_container("sibling")
+                    self.assertEqual(getattr(observed, "bind_mounts", None), ())
+                    self.assertEqual(getattr(observed, "supplementary_groups", None), ())
+
+        cases = (
+            ("Mounts", "missing"), ("Mounts", {}), ("Mounts", [None]),
+            ("Mounts", [{"Type": "bind", "Source": "/x", "Destination": "/y", "RW": "false"}]),
+            ("Mounts", [{"Type": "unknown", "Destination": "/elsewhere"}]),
+            ("Mounts", [{"Type": "volume", "Name": "socket", "Destination": "/var/run/docker.sock", "RW": True}]),
+            ("GroupAdd", "missing"), ("GroupAdd", "987"), ("GroupAdd", [987]),
+            ("GroupAdd", [""]), ("HostConfig", None),
+        )
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                raw = FakeDockerClient()
+                resource = FakeResource("sibling", image="fixture")
+                target = resource.attrs["HostConfig"] if field == "GroupAdd" else resource.attrs
+                if value == "missing":
+                    del target[field]
+                else:
+                    target[field] = value
+                raw.containers.resources["sibling"] = resource
+                observed = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw)).inspect_container("sibling")
+                evidence_field = "bind_mounts" if field == "Mounts" else "supplementary_groups"
+                self.assertIsNone(getattr(observed, evidence_field, None))
+                self.assertEqual(raw.containers.created, [])
+
+    def test_local_socket_proof_uses_the_actual_transport_and_exact_path(self):
+        from docker.transport import UnixHTTPAdapter
+        from requests.adapters import HTTPAdapter
+
+        for adapter, expected in (
+            (UnixHTTPAdapter("http+unix:///var/run/docker.sock"), True),
+            (UnixHTTPAdapter("http+unix:///another/docker.sock"), False),
+            (HTTPAdapter(), False), (None, False),
+        ):
+            with self.subTest(adapter=type(adapter).__name__, expected=expected):
+                raw = FakeDockerClient()
+                raw.api.base_url = "http+docker://localhost"
+                raw.api.get_adapter = lambda url: adapter
+                sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+                predicate = getattr(sdk, "uses_local_socket", None)
+                self.assertTrue(callable(predicate), "missing actual local socket transport proof")
+                self.assertIs(predicate("/var/run/docker.sock"), expected)
+                self.assertEqual(raw.containers.created, [])
+
     def test_immutable_reference_comparison_rejects_malformed_expected_values(self):
         matches = getattr(docker_sdk, "matches_image_reference", None)
         self.assertTrue(callable(matches), "missing shared immutable-reference comparison")
@@ -477,6 +564,7 @@ class DockerSdkClientTests(unittest.TestCase):
                 "secret_file_digest",
                 "start_container",
                 "stop_container",
+                "uses_local_socket",
             },
         )
 
@@ -1164,7 +1252,7 @@ assert "docker" not in sys.modules
 
         self.assertEqual(
             inspection,
-            DockerSdkResourceInspection(
+            _known_empty_authority(DockerSdkResourceInspection(
                 name="web",
                 running=True,
                 image="ghcr.io/openj92/example@sha256:abc",
@@ -1187,7 +1275,7 @@ assert "docker" not in sys.modules
                 image_id="sha256:" + "b" * 64,
                 network_names=("cpk-net",),
                 configured_user="",
-            ),
+            )),
         )
 
     def test_container_inspection_rejects_ambiguous_image_identity(self) -> None:

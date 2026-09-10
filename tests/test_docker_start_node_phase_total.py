@@ -82,6 +82,8 @@ class _ResourceInspection:
     network_names: tuple[str, ...] = ()
     published_ports: tuple[object, ...] = ()
     private_addresses: dict[str, str] | None = None
+    bind_mounts: tuple[object, ...] | None = ()
+    supplementary_groups: tuple[str, ...] | None = ()
 
 
 class _PhaseClient:
@@ -152,12 +154,8 @@ class _PhaseClient:
         if not self.container_created:
             return None
         network_names = ()
-        if (
-            self.include_intended_network
-            and self.network_name
-            and self.container_network_name == self.network_name
-        ):
-            network_names += (self.network_name,)
+        if self.include_intended_network and self.container_network_name:
+            network_names += (self.container_network_name,)
         if self.extra_network:
             network_names += ("foreign-network",)
         return _ResourceInspection(
@@ -167,7 +165,7 @@ class _PhaseClient:
             dict(self.container_labels or {}) if self.final_labels is None else self.final_labels,
             image_id=self.final_image_id,
             network_names=network_names,
-            private_addresses={self.network_name: "172.18.0.2"} if network_names else {},
+            private_addresses={self.container_network_name: "172.18.0.2"} if network_names else {},
         )
 
     def inspect_image(self, image: str):
@@ -259,7 +257,7 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
         self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
         self.assertEqual(client.pull_calls, [])
         self.assertEqual(client.image_inspect_references, [HELLO_REFERENCE])
-        self.assertEqual(client.calls[:2], ["image-inspect", "network-inspect"])
+        self.assertEqual(client.calls[:3], ["container-inspect", "image-inspect", "network-inspect"])
         self.assertNotIn("legacy-run-container", client.calls)
         self.assertEqual(
             [
@@ -286,8 +284,8 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
         )
         self.assertEqual(client.calls.count("image-inspect"), 2)
         self.assertEqual(
-            client.calls[:4],
-            ["image-inspect", "image-pull", "image-inspect", "network-inspect"],
+            client.calls[:5],
+            ["container-inspect", "image-inspect", "image-pull", "image-inspect", "network-inspect"],
         )
 
     def test_cache_admission_requires_exact_declared_repo_digest_before_mutation(self) -> None:
@@ -297,7 +295,7 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
             _hello_request(with_configuration=True)
         )
 
-        self.assertEqual(client.calls, ["image-inspect"])
+        self.assertEqual(client.calls, ["container-inspect", "image-inspect"])
         self.assertEqual(client.volume_names, [])
         self.assertFalse(client.container_created)
         self.assertIs(result.kind, EffectResultKind.FAILED)
@@ -330,7 +328,7 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
                 result = DockerRuntimeInterpreter(client).execute(request)
                 self.assertIs(result.kind, EffectResultKind.FAILED)
                 self.assertEqual(result.failure.code, "docker.image-reference-conflict")
-                self.assertEqual(client.calls, ["image-inspect"])
+                self.assertEqual(client.calls, ["container-inspect", "image-inspect"])
                 self.assertEqual(client.volume_names, [])
                 self.assertFalse(client.container_created)
 
@@ -350,7 +348,7 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
             client.image_inspect_references,
             [HELLO_REFERENCE, HELLO_REFERENCE],
         )
-        self.assertEqual(client.calls, ["image-inspect", "image-pull", "image-inspect"])
+        self.assertEqual(client.calls, ["container-inspect", "image-inspect", "image-pull", "image-inspect"])
         self.assertIs(result.kind, EffectResultKind.FAILED)
         self.assertEqual(result.failure.code, "docker.image-reference-conflict")
 
@@ -359,12 +357,12 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
             (
                 "cached-malformed",
                 {"cached_image_id": "sha256:" + "G" * 64},
-                ["image-inspect"],
+                ["container-inspect", "image-inspect"],
             ),
             (
                 "cached-wrong-length",
                 {"cached_image_id": "sha256:" + "a" * 63},
-                ["image-inspect"],
+                ["container-inspect", "image-inspect"],
             ),
             (
                 "post-pull-malformed",
@@ -372,7 +370,7 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
                     "cached_image": False,
                     "pulled_image_id": "sha256:" + "G" * 64,
                 },
-                ["image-inspect", "image-pull", "image-inspect"],
+                ["container-inspect", "image-inspect", "image-pull", "image-inspect"],
             ),
             (
                 "post-pull-wrong-length",
@@ -380,7 +378,7 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
                     "cached_image": False,
                     "pulled_image_id": "sha256:" + "a" * 65,
                 },
-                ["image-inspect", "image-pull", "image-inspect"],
+                ["container-inspect", "image-inspect", "image-pull", "image-inspect"],
             ),
         )
         for name, kwargs, expected_calls in cases:
@@ -417,7 +415,7 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
         ).execute(_hello_request(pull_authority=_pull_authority(reference)))
 
         self.assertEqual(resolver.requests, [reference.reference_id])
-        self.assertEqual(client.calls, [])
+        self.assertEqual(client.calls, ["container-inspect"])
         self.assertIs(result.kind, EffectResultKind.FAILED)
         self.assertEqual(result.failure.code, "docker.image-pull-credential-missing")
 
@@ -447,123 +445,30 @@ class DockerStartNodePhaseTotalTests(unittest.TestCase):
         )
         self.assertEqual(client.calls.count("image-inspect"), 2)
         self.assertEqual(
-            client.calls[:4],
-            ["image-inspect", "image-pull", "image-inspect", "network-inspect"],
+            client.calls[:5],
+            ["container-inspect", "image-inspect", "image-pull", "image-inspect", "network-inspect"],
         )
         self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
         self.assertNotIn("registry-token-not-for-evidence", repr(result.descriptor()))
 
     def test_each_start_node_provider_boundary_stops_at_exact_uncertain_phase(self) -> None:
-        prefix = ["image-inspect", "network-inspect", "network-create"]
+        target = ["container-inspect"]
+        image = target + ["image-inspect"]
+        network = image + ["network-inspect", "network-create"]
         cases = (
-            ("image-inspect", "image-availability", True, False, ["image-inspect"]),
-            (
-                "image-pull",
-                "image-availability",
-                False,
-                False,
-                ["image-inspect", "image-pull"],
-            ),
-            (
-                "image-post-pull-inspect",
-                "image-availability",
-                False,
-                False,
-                ["image-inspect", "image-pull", "image-inspect"],
-            ),
-            (
-                "network-inspect",
-                "network",
-                True,
-                False,
-                ["image-inspect", "network-inspect"],
-            ),
-            ("network-create", "network", True, False, prefix),
-            (
-                "configuration-inspect",
-                "configuration",
-                True,
-                True,
-                prefix + ["container-inspect", "configuration-inspect"],
-            ),
-            (
-                "configuration-create",
-                "configuration",
-                True,
-                True,
-                prefix
-                + [
-                    "container-inspect",
-                    "configuration-inspect",
-                    "configuration-create",
-                ],
-            ),
-            (
-                "configuration-materialize",
-                "configuration",
-                True,
-                True,
-                prefix
-                + [
-                    "container-inspect",
-                    "configuration-inspect",
-                    "configuration-create",
-                    "configuration-materialize",
-                ],
-            ),
-            (
-                "configuration-digest",
-                "configuration",
-                True,
-                True,
-                prefix
-                + [
-                    "container-inspect",
-                    "configuration-inspect",
-                    "configuration-create",
-                    "configuration-materialize",
-                    "configuration-digest",
-                ],
-            ),
-            (
-                "container-inspect",
-                "container-create",
-                True,
-                False,
-                prefix + ["container-inspect"],
-            ),
-            (
-                "container-create",
-                "container-create",
-                True,
-                False,
-                prefix + ["container-inspect", "container-create"],
-            ),
-            (
-                "container-start",
-                "container-start",
-                True,
-                False,
-                prefix
-                + [
-                    "container-inspect",
-                    "container-create",
-                    "container-start",
-                ],
-            ),
-            (
-                "final-inspect",
-                "final-inspect",
-                True,
-                False,
-                prefix
-                + [
-                    "container-inspect",
-                    "container-create",
-                    "container-start",
-                    "final-inspect",
-                ],
-            ),
+            ("container-inspect", "container-create", True, False, target),
+            ("image-inspect", "image-availability", True, False, image),
+            ("image-pull", "image-availability", False, False, image + ["image-pull"]),
+            ("image-post-pull-inspect", "image-availability", False, False, image + ["image-pull", "image-inspect"]),
+            ("network-inspect", "network", True, False, image + ["network-inspect"]),
+            ("network-create", "network", True, False, network),
+            ("configuration-inspect", "configuration", True, True, network + ["configuration-inspect"]),
+            ("configuration-create", "configuration", True, True, network + ["configuration-inspect", "configuration-create"]),
+            ("configuration-materialize", "configuration", True, True, network + ["configuration-inspect", "configuration-create", "configuration-materialize"]),
+            ("configuration-digest", "configuration", True, True, network + ["configuration-inspect", "configuration-create", "configuration-materialize", "configuration-digest"]),
+            ("container-create", "container-create", True, False, network + ["container-create"]),
+            ("container-start", "container-start", True, False, network + ["container-create", "container-start"]),
+            ("final-inspect", "final-inspect", True, False, network + ["container-create", "container-start", "final-inspect"]),
         )
         for fail_at, phase, cached, configuration, expected_calls in cases:
             with self.subTest(fail_at=fail_at):
