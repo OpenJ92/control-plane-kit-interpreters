@@ -523,6 +523,14 @@ def run_provider_contract(client, sdk, helper_image, run_id, record_directory):
     from control_plane_kit_core.operations.execution import EffectResultKind
     from control_plane_kit_interpreters.docker import DockerRuntimeInterpreter
 
+    import hashlib
+    from pathlib import Path
+    import control_plane_kit_interpreters.docker.sdk as sdk_owner
+    import control_plane_kit_interpreters.docker.runtime as runtime_owner
+    if (docker.__version__ != "7.2.0"
+            or hashlib.sha256(Path(sdk_owner.__file__).read_bytes()).hexdigest() != "2973a4992f1f79cfba7fbbd3331c7a3841238a26dc7a6fd2066f8f30d186a6e3"
+            or hashlib.sha256(Path(runtime_owner.__file__).read_bytes()).hexdigest() != "bf9764214e9949970f1a2e7445ebcb0f1197759b6a007beeb120bd7bb748d061"):
+        raise RuntimeError("fixture installed source admission failed")
     fixture = prepare_fixture(run_id)
     image = client.images.get(IMAGE_REFERENCE)
     if (IMAGE_REFERENCE not in (image.attrs.get("RepoDigests") or [])
