@@ -5,7 +5,7 @@
     {
       "source": ".github/workflows/tests.yml",
       "companion": "docs/implementation/.github/workflows/tests.yml.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
@@ -23,7 +23,7 @@
     {
       "source": "Dockerfile",
       "companion": "docs/implementation/Dockerfile.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
@@ -41,19 +41,19 @@
     {
       "source": "pyproject.toml",
       "companion": "docs/implementation/pyproject.toml.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
       "source": "src/control_plane_kit_interpreters/__init__.py",
       "companion": "docs/implementation/src/control_plane_kit_interpreters/__init__.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
       "source": "src/control_plane_kit_interpreters/boundaries.py",
       "companion": "docs/implementation/src/control_plane_kit_interpreters/boundaries.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
@@ -71,25 +71,25 @@
     {
       "source": "src/control_plane_kit_interpreters/docker/__init__.py",
       "companion": "docs/implementation/src/control_plane_kit_interpreters/docker/__init__.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
       "source": "src/control_plane_kit_interpreters/docker/authority.py",
       "companion": "docs/implementation/src/control_plane_kit_interpreters/docker/authority.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
       "source": "src/control_plane_kit_interpreters/docker/observer.py",
       "companion": "docs/implementation/src/control_plane_kit_interpreters/docker/observer.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
       "source": "src/control_plane_kit_interpreters/docker/runtime.py",
       "companion": "docs/implementation/src/control_plane_kit_interpreters/docker/runtime.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
@@ -101,7 +101,7 @@
     {
       "source": "src/control_plane_kit_interpreters/probes/__init__.py",
       "companion": "docs/implementation/src/control_plane_kit_interpreters/probes/__init__.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
@@ -131,7 +131,7 @@
     {
       "source": "src/control_plane_kit_interpreters/py.typed",
       "companion": "docs/implementation/src/control_plane_kit_interpreters/py.typed.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
@@ -167,13 +167,13 @@
     {
       "source": "src/control_plane_kit_interpreters/secrets.py",
       "companion": "docs/implementation/src/control_plane_kit_interpreters/secrets.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
       "source": "src/control_plane_kit_interpreters/timing.py",
       "companion": "docs/implementation/src/control_plane_kit_interpreters/timing.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
@@ -191,25 +191,25 @@
     {
       "source": "test_support/package_integrity.py",
       "companion": "docs/implementation/test_support/package_integrity.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
       "source": "test_support/tests/test_gate_contract.py",
       "companion": "docs/implementation/test_support/tests/test_gate_contract.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
       "source": "test_support/tests/test_package_integrity.py",
       "companion": "docs/implementation/test_support/tests/test_package_integrity.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
       "source": "tests/approved_skips.json",
       "companion": "docs/implementation/tests/approved_skips.json.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
@@ -257,13 +257,13 @@
     {
       "source": "tests/test_docker_runtime_effect_observer.py",
       "companion": "docs/implementation/tests/test_docker_runtime_effect_observer.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
       "source": "tests/test_docker_runtime_interpreter.py",
       "companion": "docs/implementation/tests/test_docker_runtime_interpreter.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
@@ -275,7 +275,7 @@
     {
       "source": "tests/test_docker_start_node_phase_total.py",
       "companion": "docs/implementation/tests/test_docker_start_node_phase_total.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
@@ -293,7 +293,7 @@
     {
       "source": "tests/test_package_boundary.py",
       "companion": "docs/implementation/tests/test_package_boundary.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
@@ -311,13 +311,13 @@
     {
       "source": "tests/test_scaffold.py",
       "companion": "docs/implementation/tests/test_scaffold.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
       "source": "tests/test_secret_delivery.py",
       "companion": "docs/implementation/tests/test_secret_delivery.py.md",
-      "status": "pending",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
