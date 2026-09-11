@@ -10,7 +10,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONTRACT_MODE="${CPK_INTERPRETERS_START_NODE_CONTRACT:-0}"
 CONTRACT_RUN="${CPK_INTERPRETERS_START_NODE_CONTRACT_RUN:-}"
 CONTRACT_RECORDS="${CPK_INTERPRETERS_START_NODE_CONTRACT_RECORDS:-}"
-CONTRACT_ARGS=()
+CONTRACT_ARGS=(-e CPK_INTERPRETERS_START_NODE_CONTRACT=0)
 case "$CONTRACT_MODE" in
   0)
     [[ -z "$CONTRACT_RUN" && -z "$CONTRACT_RECORDS" ]] || { echo 'provider-contract inputs require explicit opt-in' >&2; exit 2; }
@@ -54,7 +54,7 @@ cleanup() {
   fi
   if [[ -s "$FIXTURE_RECORDS/image" ]]; then
     local image_id
-    image_id="$(cat "$FIXTURE_RECORDS/image")"
+    image_id="$(cat "$FIXTURE_RECORDS/image")" || return 1
     if [[ "$(docker image inspect --format '{{.Id}}' "$FIXTURE_TAG")" == "$image_id" &&
           "$(docker image inspect --format '{{index .Config.Labels "org.openj92.cpk.test-run"}}' "$image_id")" == "$FIXTURE_RUN" ]]; then
       docker image rm "$FIXTURE_TAG" >/dev/null || failed=1
@@ -72,11 +72,26 @@ cleanup() {
     echo "local secret fixture cleanup incomplete; records=$FIXTURE_RECORDS" >&2
     return 1
   fi
-  rm -f "$FIXTURE_RECORDS/controller" "$FIXTURE_RECORDS/package" "$FIXTURE_RECORDS/image"
-  rmdir "$FIXTURE_RECORDS"
+  rm -f "$FIXTURE_RECORDS/controller" "$FIXTURE_RECORDS/package" "$FIXTURE_RECORDS/image" || return 1
+  rmdir "$FIXTURE_RECORDS" || return 1
 }
 
-trap cleanup EXIT
+GATE_COMPLETED=0
+finish_gate() {
+  local status=$?
+  trap - EXIT
+  if ! cleanup; then
+    [[ "$status" != 0 ]] || status=1
+  fi
+  if [[ "$GATE_COMPLETED" != 1 ]]; then
+    [[ "$status" != 0 ]] || status=1
+  fi
+  if [[ "$status" == 0 ]]; then
+    echo 'control-plane-kit-interpreters owning-gate=PASS'
+  fi
+  exit "$status"
+}
+trap finish_gate EXIT
 
 docker run --rm \
   -v "$ROOT:/source:ro" \
@@ -182,3 +197,4 @@ docker run --name "$FIXTURE_RUN" --cidfile "$FIXTURE_RECORDS/controller" \
   -e "CPK_SECRET_ENGINE_ID=$ENGINE_ID" \
   "${CONTRACT_ARGS[@]}" \
   "$HELPER_IMAGE_ID" python tests/live_docker_secret.py
+GATE_COMPLETED=1
