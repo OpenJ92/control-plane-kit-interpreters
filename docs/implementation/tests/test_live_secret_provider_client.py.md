@@ -1,0 +1,8 @@
+Source: [tests/test_live_secret_provider_client.py](../../../tests/test_live_secret_provider_client.py).
+Maintain this document alongside its source file. When the source or relevant imported contracts change, verify and update this companion in the same change.
+
+This test starts the pinned CPK Secrets ASGI application as a Uvicorn subprocess on a selected loopback port, using a temporary SQLite database, generated master key and fixture credential files. It exercises real HTTP write/resolve/revoke, generated delegation signing material and audit correlations. It reads the resulting SQLite audit rows through the Secrets test query surface and checks selected fixture secret/token strings are absent from captured output and rows.
+
+The subprocess inherits the surrounding environment with explicit Secrets settings. The chosen free port is released before server startup, so selection is not an atomic reservation. Finally cleanup terminates the process, then kills it if communication times out; the temporary directory owns file cleanup. Captured process pipes are not a general bounded logging system. This is local pinned-provider integration evidence, not public deployment or external-provider acceptance. Use the owning Docker gate; no execution is implied by this companion.
+
+Related source and evidence: [pyproject.toml](../../../pyproject.toml), [test.sh](../../../test.sh), [src/control_plane_kit_interpreters/secret_provider/client.py](../../../src/control_plane_kit_interpreters/secret_provider/client.py), [src/control_plane_kit_interpreters/secret_provider/resolver.py](../../../src/control_plane_kit_interpreters/secret_provider/resolver.py).
