@@ -1,0 +1,348 @@
+{
+  "issue": "OpenJ92/control-plane-kit-interpreters#143",
+  "scope": "Tracked source at the issue baseline; documentation coverage is distinct from semantic review",
+  "entries": [
+    {
+      "source": ".github/workflows/tests.yml",
+      "companion": "docs/implementation/.github/workflows/tests.yml.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": ".gitignore",
+      "companion": null,
+      "status": "excluded",
+      "exclusion_reason": "Version-control exclusion metadata, not runtime implementation"
+    },
+    {
+      "source": "AGENTS.md",
+      "companion": null,
+      "status": "excluded",
+      "exclusion_reason": "Governing agent instructions; maintained directly, not recursively mirrored"
+    },
+    {
+      "source": "Dockerfile",
+      "companion": "docs/implementation/Dockerfile.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "LICENSE",
+      "companion": null,
+      "status": "excluded",
+      "exclusion_reason": "License text; authoritative legal document"
+    },
+    {
+      "source": "README.md",
+      "companion": null,
+      "status": "excluded",
+      "exclusion_reason": "Existing prose/decision owner; linked directly rather than recursively mirrored"
+    },
+    {
+      "source": "pyproject.toml",
+      "companion": "docs/implementation/pyproject.toml.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/__init__.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/__init__.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/boundaries.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/boundaries.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/cloudflare/__init__.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/cloudflare/__init__.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/cloudflare/client.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/cloudflare/client.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/docker/__init__.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/docker/__init__.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/docker/authority.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/docker/authority.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/docker/observer.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/docker/observer.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/docker/runtime.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/docker/runtime.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/docker/sdk.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/docker/sdk.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/probes/__init__.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/probes/__init__.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/probes/clients.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/probes/clients.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/probes/gateway.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/probes/gateway.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/probes/public_dns.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/probes/public_dns.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/probes/security.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/probes/security.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/py.typed",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/py.typed.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/secret_provider/__init__.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/secret_provider/__init__.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/secret_provider/bootstrap.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/secret_provider/bootstrap.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/secret_provider/client.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/secret_provider/client.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/secret_provider/custody.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/secret_provider/custody.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/secret_provider/resolver.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/secret_provider/resolver.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/secrets.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/secrets.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/timing.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/timing.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "src/control_plane_kit_interpreters/verification.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/verification.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "test.sh",
+      "companion": "docs/implementation/test.sh.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "test_support/package_integrity.py",
+      "companion": "docs/implementation/test_support/package_integrity.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "test_support/tests/test_gate_contract.py",
+      "companion": "docs/implementation/test_support/tests/test_gate_contract.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "test_support/tests/test_package_integrity.py",
+      "companion": "docs/implementation/test_support/tests/test_package_integrity.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/approved_skips.json",
+      "companion": "docs/implementation/tests/approved_skips.json.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/live_docker_configuration.py",
+      "companion": "docs/implementation/tests/live_docker_configuration.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/live_docker_publication.py",
+      "companion": "docs/implementation/tests/live_docker_publication.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/live_docker_runtime_interpreter.py",
+      "companion": "docs/implementation/tests/live_docker_runtime_interpreter.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/live_docker_secret.py",
+      "companion": "docs/implementation/tests/live_docker_secret.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/live_docker_start_node_contract.py",
+      "companion": "docs/implementation/tests/live_docker_start_node_contract.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_cloudflare_named_ingress.py",
+      "companion": "docs/implementation/tests/test_cloudflare_named_ingress.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_cloudflare_retained_reservations.py",
+      "companion": "docs/implementation/tests/test_cloudflare_retained_reservations.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_docker_runtime_effect_observer.py",
+      "companion": "docs/implementation/tests/test_docker_runtime_effect_observer.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_docker_runtime_interpreter.py",
+      "companion": "docs/implementation/tests/test_docker_runtime_interpreter.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_docker_sdk_client.py",
+      "companion": "docs/implementation/tests/test_docker_sdk_client.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_docker_start_node_phase_total.py",
+      "companion": "docs/implementation/tests/test_docker_start_node_phase_total.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_gateway_probe_client.py",
+      "companion": "docs/implementation/tests/test_gateway_probe_client.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_live_secret_provider_client.py",
+      "companion": "docs/implementation/tests/test_live_secret_provider_client.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_package_boundary.py",
+      "companion": "docs/implementation/tests/test_package_boundary.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_probe_adapters.py",
+      "companion": "docs/implementation/tests/test_probe_adapters.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_public_dns_resolver.py",
+      "companion": "docs/implementation/tests/test_public_dns_resolver.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_scaffold.py",
+      "companion": "docs/implementation/tests/test_scaffold.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_secret_delivery.py",
+      "companion": "docs/implementation/tests/test_secret_delivery.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_secret_provider_client.py",
+      "companion": "docs/implementation/tests/test_secret_provider_client.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_secret_provider_resolver.py",
+      "companion": "docs/implementation/tests/test_secret_provider_resolver.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_verification_adapters.py",
+      "companion": "docs/implementation/tests/test_verification_adapters.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_verification_timing.py",
+      "companion": "docs/implementation/tests/test_verification_timing.py.md",
+      "status": "reviewed",
+      "exclusion_reason": null
+    }
+  ]
+}

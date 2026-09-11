@@ -1,0 +1,13 @@
+# Docker creation and evidence boundaries
+
+Owner: the Interpreters Docker SDK/runtime boundary. Participating files are [sdk.py](../../src/control_plane_kit_interpreters/docker/sdk.py), [runtime.py](../../src/control_plane_kit_interpreters/docker/runtime.py), [the synthetic provider fixture](../../tests/live_docker_start_node_contract.py), and [the owning gate](../../test.sh).
+
+The runtime passes a creation request to `DockerSdkClient.create_container`. That wrapper separates request construction, endpoint construction and the high-level SDK create call. The installed Docker7.2.0 high-level call exercised by #141 obtains a container model through a follow-up inspect after its create API call. Consequently, `sdk-create/provider-api` describes a boundary that can fail after creation; it does not identify the failing HTTP method or establish resource absence.
+
+The test-only observation scope distinguishes the exact recipient API create from the inspect correlated to its returned ID. It forwards each original argument/return/exception unchanged and records only finite method/outcome/status evidence. Success status remains null when the SDK exposes no HTTP response status. Helper/preflight/later inspections are outside that observation. Failed diagnostic recording cannot replace the effect's original result; it makes the witness unavailable/HOLD.
+
+Positive synthetic acceptance requires actual StartRuntime/StartNode success, available observations, exact image/user/network/alias/requested-and-effective-mount conformance, the bounded numeric-user file/readiness probe, available journal and verified permitted cleanup. It also requires the ordinary numeric witness, final owning marker after controller cleanup and exit0. A useful failure diagnostic is still failed acceptance.
+
+The fixture uses fresh dummy material and identities. Its journal is fixture evidence, not a production event store. Its no-pull guard applies to the new phase, not package dependency resolution. Cleanup is limited to exact confirmed synthetic resources and stops on uncertain identity, foreign attachments or failed reads. Existing held resources are not evidence inputs.
+
+[Issue #141](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/141) and [PR #142](https://github.com/OpenJ92/control-plane-kit-interpreters/pull/142) record the actual source/version-bound result and earlier fixture mistakes. Successful isolated creation does not recover a historical discarded response, establish equivalence with deployed CPK execution context or authorize retry. Keep future source/version adoption and operational dispositions in their owning issues; do not turn this note into a current-live-state claim.

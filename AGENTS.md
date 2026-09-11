@@ -8,6 +8,31 @@ without another checkout. Local interpreter rules may tighten it; they may not
 weaken authorization, Docker-only validation, truthful uncertainty, test
 ownership, or GitHub-memory requirements.
 
+## Agent Implementation Companions
+
+Read [the companion guide](docs/implementation/README.md) and relevant
+`docs/implementation/<repository-relative-source-path>.md` notes before design
+or implementation. Verify the owner source and contract-bearing imports or
+dynamic dependencies at the version actually selected by this consumer.
+Companions guide navigation; they do not replace source, tests or authorization.
+
+UPDATE affected companions in the same change when behavior, responsibility,
+contracts, failure/effect boundaries or dependency assumptions change. Create,
+move and remove companions with relevant source files. Every companion begins
+with its source path/link and same-change maintenance reminder. Search actual
+source for affected consumers after contract or dependency-pin changes; known
+reverse links are not exhaustive. Coordinate cross-repository updates with
+actual adoption rather than describing an unadopted upstream API as current.
+
+Before handoff, compare the actual source diff with companion changes. Record
+one sentence in the existing PR decision log identifying updated notes or
+"companion reviewed; no semantic update needed." Do not manufacture prose or
+hash-only edits. Bring newly touched pending files current without blocking
+unrelated work on the entire rollout. Coverage status is not a behavior audit;
+state unknowns and contradictions honestly. Review consequential claims against
+source and use ordinary Git/path review; no additional report or test programme
+is required by [CPK #1799](https://github.com/OpenJ92/control-plane-kit/issues/1799).
+
 ## Shared Product Boundary
 
 CPK is a human-authorized, AI-assisted infrastructure control plane. Providers

@@ -1,0 +1,10 @@
+Source: [src/control_plane_kit_interpreters/probes/security.py](../../../../../src/control_plane_kit_interpreters/probes/security.py).
+Maintain this document alongside its source file. When the source or relevant imported contracts change, verify and update this companion in the same change.
+
+This module authorizes a runtime-observed endpoint against explicit address policy and returns the connect target used by probe transports. Core owns endpoint context/protocol/material values at the pin in pyproject.toml. Literal material is used directly; opaque endpoint material requires the supplied resolver at authorization time. Resolution is an effect boundary, not a source of additional authority.
+
+Runtime-private origins require exact policy membership. Host-local context requires the explicit switch and loopback/localhost classification. Public context requires an allowed hostname, HTTPS unless explicitly relaxed, and a resolver whose entire returned address set is global. One deterministic address is pinned for that request, while Host/SNI retain the original public name. The resolver chooses how to obtain DNS truth; this module does not cache or prove its trustworthiness. Authority-free absolute request paths prevent callers from replacing the selected origin.
+
+Authorized target repr and top-level security messages omit endpoint values. Some errors deliberately chain the underlying resolver/parser exception, so this is not a claim that arbitrary traceback rendering is redacted. Runtime-private and localhost connections are not subject to the public DNS pinning procedure. Transport owners must preserve the selected connect host and Host/SNI distinction.
+
+Related source and evidence: [pyproject.toml](../../../../../pyproject.toml), [src/control_plane_kit_interpreters/probes/clients.py](../../../../../src/control_plane_kit_interpreters/probes/clients.py), [src/control_plane_kit_interpreters/probes/public_dns.py](../../../../../src/control_plane_kit_interpreters/probes/public_dns.py), [tests/test_probe_adapters.py](../../../../../tests/test_probe_adapters.py).
