@@ -1995,6 +1995,63 @@ class ProviderContractObservationTests(unittest.TestCase):
         denied = fixture.resolver.resolve(replace(fixture.grants[0], workspace_id="foreign-workspace"))
         self.assertIsInstance(denied, SecretMissing)
 
+    def test_cleanup_preserves_unexpected_attachments_and_allows_owned_stopped_recipient(self):
+        import tempfile
+        from types import SimpleNamespace
+        import docker
+        from live_docker_start_node_contract import prepare_fixture, FixtureJournal
+        for extra in ("mount", "bind", "port", "effective-mount", None):
+            with self.subTest(unexpected_attachment=extra):
+                fixture = prepare_fixture("cpk141-unit-cleanup")
+                fixture.image_id = "sha256:" + "c" * 64
+                fixture.container_labels = fixture.node_labels
+                state = {"removed": False}
+                attrs = {"Image": fixture.image_id,
+                    "Config": {"User": "10006", "Labels": fixture.container_labels},
+                    "State": {"Running": False},
+                    "NetworkSettings": {"Networks": {fixture.network: {"Aliases": [fixture.material.node_id]}}},
+                    "HostConfig": {"PortBindings": {},
+                        "Binds": [fixture.data_volume + ":/var/lib/cpk-secrets:rw"],
+                        "Mounts": [{"Type": "volume", "Source": name, "Target": target,
+                            "ReadOnly": True, "VolumeOptions": {"Subpath": "content"}}
+                            for name,target in zip(fixture.secret_volumes, fixture.targets)]}}
+                attrs["Mounts"] = [{"Type": "volume", "Name": name, "Destination": target, "RW": False}
+                    for name,target in zip(fixture.secret_volumes, fixture.targets)] + [
+                    {"Type": "volume", "Name": fixture.data_volume, "Destination": "/var/lib/cpk-secrets", "RW": True}]
+                if extra == "effective-mount":
+                    attrs["Mounts"].append({"Type": "bind", "Source": "/foreign-host", "Destination": "/foreign", "RW": True})
+                if extra == "mount":
+                    attrs["HostConfig"]["Mounts"].append({"Type": "volume", "Source": "foreign-volume", "Target": "/foreign"})
+                elif extra == "bind":
+                    attrs["HostConfig"]["Binds"].append("/foreign-host:/foreign:rw")
+                elif extra == "port":
+                    attrs["HostConfig"]["PortBindings"] = {"8081/tcp": [{"HostPort": "12345"}]}
+
+                def remove(*, force):
+                    self.assertTrue(force)
+                    state["removed"] = True
+
+                resource = SimpleNamespace(id="synthetic-recipient-id", attrs=attrs, remove=remove)
+
+                def get_container(_identity):
+                    if state["removed"]:
+                        raise docker.errors.NotFound("synthetic absent")
+                    return resource
+
+                def absent(_identity):
+                    raise docker.errors.NotFound("synthetic absent")
+
+                client = SimpleNamespace(containers=SimpleNamespace(get=get_container),
+                    volumes=SimpleNamespace(get=absent), networks=SimpleNamespace(get=absent))
+                sdk = SimpleNamespace(_client=lambda: client)
+                with tempfile.TemporaryDirectory() as directory:
+                    journal = FixtureJournal(directory, fixture, sdk, "synthetic-helper-image")
+                    try:
+                        self.assertEqual(journal.cleanup(), extra is None)
+                        self.assertEqual(state["removed"], extra is None)
+                    finally:
+                        journal.close()
+
     def test_real_calls_receive_original_values_and_return_objects_once(self):
         fixture = _ProviderBoundaryFixture()
         environment = {"OPAQUE": object()}

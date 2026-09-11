@@ -358,13 +358,9 @@ class FixtureJournal:
             except docker.errors.NotFound:
                 recipient = None
             if recipient is not None:
-                if (recipient.attrs["Config"].get("Labels") != fixture.container_labels
-                        or recipient.attrs["Image"] != fixture.image_id
-                        or recipient.attrs["Config"].get("User") != "10006"):
-                    raise RuntimeError("fixture recipient ownership mismatch")
-                networks = recipient.attrs["NetworkSettings"]["Networks"]
-                if set(networks) != {fixture.network}:
-                    raise RuntimeError("fixture recipient attachment mismatch")
+                # Shape/ownership is the same law as positive conformance;
+                # failed or stopped recipients need not be running for cleanup.
+                recipient = _recipient_conformance(recipient, fixture, fixture.image_id, require_running=False)
                 self.write({"phase": "cleanup-pending", "kind": "recipient", "id": recipient.id})
                 recipient.remove(force=True)
                 self._require_absent(client.containers, recipient.id)
@@ -427,19 +423,24 @@ class FixtureJournal:
         self._file.close()
 
 
-def _recipient_conformance(client, fixture, image_id):
-    container = client.containers.get(fixture.recipient)
+def _recipient_conformance(container, fixture, image_id, *, require_running=True):
     attrs = container.attrs
     host = attrs["HostConfig"]
     networks = attrs["NetworkSettings"]["Networks"]
     mounts = host.get("Mounts") or []
     expected_mounts = {(name, target) for name,target in zip(fixture.secret_volumes, fixture.targets)}
     observed_mounts = {(item.get("Source"), item.get("Target")) for item in mounts}
+    effective = attrs.get("Mounts") or []
+    expected_effective = {(name, target, False) for name,target in expected_mounts}
+    expected_effective.add((fixture.data_volume, "/var/lib/cpk-secrets", True))
     if (attrs["Image"] != image_id or attrs["Config"].get("User") != "10006"
             or attrs["Config"].get("Labels") != fixture.container_labels
-            or not attrs["State"]["Running"] or set(networks) != {fixture.network}
+            or (require_running and not attrs["State"]["Running"]) or set(networks) != {fixture.network}
             or fixture.material.node_id not in (networks[fixture.network].get("Aliases") or [])
-            or host.get("PortBindings") or len(mounts) != 2 or observed_mounts != expected_mounts
+            or host.get("PortBindings") or any((attrs["NetworkSettings"].get("Ports") or {}).values())
+            or len(mounts) != 2 or observed_mounts != expected_mounts
+            or len(effective) != 3 or any(item.get("Type") != "volume" for item in effective)
+            or {(item.get("Name"), item.get("Destination"), item.get("RW")) for item in effective} != expected_effective
             or any(m.get("Type") != "volume" or m.get("ReadOnly") is not True
                    or m.get("VolumeOptions", {}).get("Subpath") != "content" for m in mounts)
             or host.get("Binds") != [fixture.data_volume + ":/var/lib/cpk-secrets:rw"]):
@@ -478,41 +479,40 @@ try:
   finally: connection.close()
   time.sleep(0.1)
 except Exception: ok=False
-print(json.dumps({'files_and_readiness':ok}))
 raise SystemExit(0 if ok else 1)
 '''.replace("TARGETS", repr(fixture.targets)).replace("DIGESTS", repr(fixture.digests))
     journal.write({"phase": "pending", "kind": "recipient-exec", "id": container.id,
-                   "internal_seconds": 15, "controller_seconds": 20, "output_bytes": 4096})
+                   "internal_seconds": 15, "controller_seconds": 20, "output_bytes": 0})
     api = client.api
     prior_timeout = api.timeout
     deadline = time.monotonic() + 20
-    output = bytearray()
-    stream = None
     try:
         api.timeout = 20
         invocation = api.exec_create(container.id,
             ["timeout", "--signal=KILL", "15s", "python", "-B", "-c", script],
-            stdout=True, stderr=True, privileged=False)
+            stdout=False, stderr=False, privileged=False, user="10006")
         exec_id = invocation["Id"]
         journal.write({"phase": "exec-created", "id": exec_id, "recipient_id": container.id})
-        api.timeout = max(0.1, deadline - time.monotonic())
-        stream = api.exec_start(exec_id, stream=True, demux=False)
-        for chunk in stream:
-            if time.monotonic() >= deadline or len(output) + len(chunk) > 4096:
-                raise RuntimeError("fixture exec bound exceeded")
-            output.extend(chunk)
-        api.timeout = max(0.1, deadline - time.monotonic())
-        completed = api.exec_inspect(exec_id)
-        if time.monotonic() >= deadline or completed.get("Running") or completed.get("ExitCode") != 0:
-            raise RuntimeError("fixture exec did not pass")
-        if json.loads(output.decode("utf-8")) != {"files_and_readiness": True}:
-            raise RuntimeError("fixture file readiness evidence failed")
-        journal.write({"phase": "exec-passed", "files_and_readiness": True})
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("fixture exec deadline exceeded before start")
+        api.timeout = remaining
+        api.exec_start(exec_id, detach=True)
+        for _ in range(100):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("fixture exec deadline exceeded")
+            api.timeout = min(1, remaining)
+            completed = api.exec_inspect(exec_id)
+            if not completed.get("Running") and completed.get("ExitCode") is not None:
+                if type(completed["ExitCode"]) is not int or completed["ExitCode"] != 0 or time.monotonic() >= deadline:
+                    raise RuntimeError("fixture exec did not pass")
+                journal.write({"phase": "exec-passed", "files_and_readiness": True})
+                return
+            time.sleep(min(0.2, max(0, deadline - time.monotonic())))
+        raise RuntimeError("fixture exec observation bound exceeded")
     finally:
         api.timeout = prior_timeout
-        output.clear()
-        if stream is not None:
-            stream.close()
 
 
 def run_provider_contract(client, sdk, helper_image, run_id, record_directory):
@@ -569,7 +569,7 @@ def run_provider_contract(client, sdk, helper_image, run_id, record_directory):
                     or report["pull_attempted"] or report["create"]["outcome"] != "returned"
                     or report["inspect"]["outcome"] != "returned" or len(journal.helpers) != 4):
                 raise RuntimeError("fixture StartNode or diagnostic did not succeed")
-            container = _recipient_conformance(client, fixture, image.id)
+            container = _recipient_conformance(client.containers.get(fixture.recipient), fixture, image.id)
             journal.write({"phase": "recipient-conformance", "id": container.id,
                            "image_network_mount_user_running": True})
             _recipient_file_probe(client, container, fixture, journal)
