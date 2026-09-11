@@ -1,0 +1,8 @@
+Source: `tests/test_docker_sdk_client.py`.
+Maintain this document alongside its source file. When the source or relevant imported contracts change, verify and update this companion in the same change.
+
+[Source](../../../tests/test_docker_sdk_client.py) owns SDK representation, client/authority construction, inspection, helper-bound, secret-redaction and endpoint/publication adapter laws. Its fake Docker objects model returned fields and call behavior; they do not prove real daemon acceptance. Preserve distinctions such as absent versus explicit mount fields, exact transport/host publication, image identity and numeric user/group handling when changing those fixtures.
+
+`ProviderContractObservationTests` protects the synthetic observer's original-call/noninterference contract, correlated inspect versus not-reached, no-pull behavior, restoration after failure, actual Core fixture construction and attachment-safe cleanup of an eligible stopped recipient. Unexpected effective mounts, requested mounts, Binds or ports must preserve the recipient. The wrong-workspace grant is refused by the fixture resolver.
+
+The governing owners are [sdk.py](../../../src/control_plane_kit_interpreters/docker/sdk.py) and [live_docker_start_node_contract.py](../../../tests/live_docker_start_node_contract.py). [The creation relation](../../architecture/docker-creation-evidence.md) states what their combined live test adds. #141's ABI/grant and cleanup checks were added during implementation; do not retroactively describe them as the original red evidence. Test identities are navigation into source, not permission to mirror backend state machines here.

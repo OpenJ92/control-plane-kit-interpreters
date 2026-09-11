@@ -1,0 +1,12 @@
+Source: `test.sh`.
+Maintain this document alongside its source file. When the source or relevant imported contracts change, verify and update this companion in the same change.
+
+[Source](../../test.sh) owns the Docker-backed validation sequence: support/integrity, package tests, import isolation and the real numeric-secret controller. Pinned dependencies are the default. Local-Core mode is a distinct explicit input; it must not silently become ordinary pinned evidence. [Dockerfile](../../Dockerfile) supplies the package and numeric-reader targets.
+
+The separate controller receives the daemon socket after a local Unix-context/engine check. Package tests do not receive it through this script. The controller's exact run identity, image IDs and label-bound receipts govern cleanup. Do not broaden receipt cleanup to names/prefixes or Docker prune. The opt-in provider phase additionally requires a fresh record directory and run identity; mode0 rejects stray provider inputs and passes a nonempty explicit disabled-mode argument array.
+
+Whole-gate success is stronger than an exit status observed in isolation. `GATE_COMPLETED` is set only after the final controller command returns successfully. `finish_gate` captures the incoming status, disables recursive EXIT trapping, performs owned cleanup, preserves failures and rejects missing normal completion. It emits the sole owning PASS marker only after these conditions pass. Keep explicit failure propagation inside conditionally invoked cleanup, where Bash errexit alone is insufficient. Optional-array changes must preserve compatibility with the launcher shell.
+
+The need for this fence is recorded in [#141](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/141): an empty array failed under the host shell before the numeric controller, while cleanup left a misleading zero status. Package/import success was not full-gate success. Review the actual final controller output, cleanup marker and exit together; the [creation evidence relation](../architecture/docker-creation-evidence.md) distinguishes ordinary and separately enabled provider evidence.
+
+Changes to gate stages also affect [package_integrity.py](../../test_support/package_integrity.py) and [test_gate_contract.py](../../test_support/tests/test_gate_contract.py). These protect repository evidence ownership, not every shell/runtime failure. Documentation updates do not require a new provider test run.
