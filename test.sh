@@ -6,6 +6,27 @@ POLICY_IMAGE="${CPK_INTERPRETERS_POLICY_IMAGE:-python:3.14-slim}"
 DEPENDENCY_MODE="${CPK_INTERPRETERS_DEPENDENCY_MODE:-pinned}"
 CORE_REPO="${CPK_CORE_REPO:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# A separately admitted one-attempt provider phase; ordinary gates leave it off.
+CONTRACT_MODE="${CPK_INTERPRETERS_START_NODE_CONTRACT:-0}"
+CONTRACT_RUN="${CPK_INTERPRETERS_START_NODE_CONTRACT_RUN:-}"
+CONTRACT_RECORDS="${CPK_INTERPRETERS_START_NODE_CONTRACT_RECORDS:-}"
+CONTRACT_ARGS=()
+case "$CONTRACT_MODE" in
+  0)
+    [[ -z "$CONTRACT_RUN" && -z "$CONTRACT_RECORDS" ]] || { echo 'provider-contract inputs require explicit opt-in' >&2; exit 2; }
+    echo 'start-node-provider-contract=not-requested'
+    ;;
+  1)
+    [[ "$CONTRACT_RUN" =~ ^cpk141-[a-z0-9-]{4,48}$ ]] || { echo 'provider-contract run identity invalid' >&2; exit 2; }
+    [[ "$CONTRACT_RECORDS" =~ ^/tmp/cpk141-[a-zA-Z0-9_-]+$ && ! -e "$CONTRACT_RECORDS" && ! -L "$CONTRACT_RECORDS" ]] || { echo 'provider-contract requires a fresh exact records directory' >&2; exit 2; }
+    mkdir -m 700 "$CONTRACT_RECORDS"
+    CONTRACT_ARGS=(--mount "type=bind,source=$CONTRACT_RECORDS,target=/cpk141-records"
+      -e CPK_INTERPRETERS_START_NODE_CONTRACT=1
+      -e "CPK_INTERPRETERS_START_NODE_CONTRACT_RUN=$CONTRACT_RUN"
+      -e CPK_INTERPRETERS_START_NODE_CONTRACT_RECORDS=/cpk141-records)
+    ;;
+  *) echo 'unsupported provider-contract mode' >&2; exit 2 ;;
+esac
 FIXTURE_RECORDS="$(mktemp -d)"
 FIXTURE_RUN="cpk-secret-$(basename "$FIXTURE_RECORDS")"
 FIXTURE_TAG="control-plane-kit-secret-reader:${FIXTURE_RUN}"
@@ -159,4 +180,5 @@ docker run --name "$FIXTURE_RUN" --cidfile "$FIXTURE_RECORDS/controller" \
   -e "CPK_SECRET_READER_IMAGE=$FIXTURE_IMAGE_ID" \
   -e "CPK_SECRET_HELPER_IMAGE=$HELPER_IMAGE_ID" \
   -e "CPK_SECRET_ENGINE_ID=$ENGINE_ID" \
+  "${CONTRACT_ARGS[@]}" \
   "$HELPER_IMAGE_ID" python tests/live_docker_secret.py

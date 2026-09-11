@@ -104,6 +104,14 @@ def main() -> None:
             assert container.attrs["Image"] == inspected.image_id
             assert container.attrs["Config"]["User"] == (user or inspected.configured_user)
             assert container.attrs["Mounts"][0]["RW"] is False
+        if os.environ.get("CPK_INTERPRETERS_START_NODE_CONTRACT") == "1":
+            from live_docker_start_node_contract import run_provider_contract
+            try:
+                run_provider_contract(client, sdk, helper_image,
+                    os.environ["CPK_INTERPRETERS_START_NODE_CONTRACT_RUN"],
+                    os.environ["CPK_INTERPRETERS_START_NODE_CONTRACT_RECORDS"])
+            except Exception:
+                raise RuntimeError("isolated StartNode provider contract HOLD") from None
     finally:
         for manager, identity in reversed(resources):
             try:

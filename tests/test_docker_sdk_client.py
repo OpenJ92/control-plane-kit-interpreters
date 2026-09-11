@@ -1971,6 +1971,30 @@ class ProviderContractObservationTests(unittest.TestCase):
         from live_docker_start_node_contract import ProviderContractObservation
         return ProviderContractObservation(fixture, "recipient", record)
 
+    def test_synthetic_fixture_uses_pinned_abi_and_exact_fresh_grants(self):
+        import base64
+        from live_docker_start_node_contract import prepare_fixture, IMAGE_REFERENCE
+        from control_plane_kit_core.secrets import SecretMissing
+        fixture = prepare_fixture("cpk141-unit-contract")
+        product = fixture.material.product
+        self.assertEqual(product.image.execution_reference, IMAGE_REFERENCE)
+        self.assertEqual(product.identity.namespace, "control-plane-kit-test")
+        self.assertIsNone(fixture.material.pull_authority)
+        self.assertEqual(fixture.material.runtime_authority_deliveries, ())
+        self.assertEqual(len(fixture.volume_labels), 3)
+        self.assertEqual(len(product.runtime_contract.secret_deliveries), 2)
+        for delivery in product.runtime_contract.secret_deliveries:
+            self.assertEqual(delivery.file_mode.value, "0400")
+        values = {grant.intent.value: fixture.resolver.resolve(grant).value.reveal()
+                  for grant in fixture.grants}
+        self.assertTrue(len(base64.urlsafe_b64decode(values["secrets.custody-root-key"])) == 32)
+        document = json.loads(values["secrets.provider-credentials-document"])
+        self.assertTrue(len(document) == 1 and set(document[0]) == {"subject", "token", "grants"})
+        self.assertTrue(len(document[0]["token"]) >= 48)
+        self.assertEqual(document[0]["grants"], [{"action": "secret.metadata", "workspace_id": fixture.node.source.workspace_id}])
+        denied = fixture.resolver.resolve(replace(fixture.grants[0], workspace_id="foreign-workspace"))
+        self.assertIsInstance(denied, SecretMissing)
+
     def test_real_calls_receive_original_values_and_return_objects_once(self):
         fixture = _ProviderBoundaryFixture()
         environment = {"OPAQUE": object()}
