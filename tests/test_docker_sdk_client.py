@@ -1925,5 +1925,258 @@ def _artifact(content: str = '{"workers":2}\n') -> ConfigurationArtifact:
     )
 
 
+class _ProviderBoundaryFixture:
+    """Call-through specimen for observer laws, with no provider effects."""
+
+    def __init__(self, create_error=None, inspect_error=None):
+        from types import SimpleNamespace
+        self.calls = []
+        self.created = {"Id": "synthetic-created-id"}
+        self.inspected = {"running": False}
+        self.create_error = create_error
+        self.inspect_error = inspect_error
+
+        def create(image, **kwargs):
+            self.calls.append(("create", image, kwargs))
+            if self.create_error is not None:
+                raise self.create_error
+            return self.created
+
+        def inspect(identity):
+            self.calls.append(("inspect", identity))
+            if self.inspect_error is not None:
+                raise self.inspect_error
+            return self.inspected
+
+        self.api = SimpleNamespace(create_container=create, inspect_container=inspect)
+        self.client = SimpleNamespace(api=self.api)
+
+    def _client(self):
+        return self.client
+
+    def create_container(self, *, name, image="fixture-image", environment=None):
+        created = self.api.create_container(image, name=name, environment=environment)
+        self.calls.append(("create-return", created))
+        inspected = self.api.inspect_container(created["Id"])
+        self.calls.append(("inspect-return", inspected))
+        return inspected
+
+    def pull_image(self, *args, **kwargs):
+        self.calls.append(("pull", args, kwargs))
+        return object()
+
+
+class ProviderContractObservationTests(unittest.TestCase):
+    def _observation(self, fixture, record=None):
+        from live_docker_start_node_contract import ProviderContractObservation
+        return ProviderContractObservation(fixture, "recipient", record)
+
+    def test_synthetic_fixture_uses_pinned_abi_and_exact_fresh_grants(self):
+        import base64
+        from live_docker_start_node_contract import prepare_fixture, IMAGE_REFERENCE
+        from control_plane_kit_core.secrets import SecretMissing
+        fixture = prepare_fixture("cpk141-unit-contract")
+        product = fixture.material.product
+        self.assertEqual(product.image.execution_reference, IMAGE_REFERENCE)
+        self.assertEqual(product.identity.namespace, "control-plane-kit-test")
+        self.assertIsNone(fixture.material.pull_authority)
+        self.assertEqual(fixture.material.public_environment, ())
+        self.assertEqual(product.runtime_contract.public_environment, ())
+        self.assertEqual(fixture.material.runtime_authority_deliveries, ())
+        self.assertEqual(len(fixture.volume_labels), 3)
+        self.assertEqual(len(product.runtime_contract.secret_deliveries), 2)
+        for delivery in product.runtime_contract.secret_deliveries:
+            self.assertEqual(delivery.file_mode.value, "0400")
+        values = {grant.intent.value: fixture.resolver.resolve(grant).value.reveal()
+                  for grant in fixture.grants}
+        self.assertTrue(len(base64.urlsafe_b64decode(values["secrets.custody-root-key"])) == 32)
+        document = json.loads(values["secrets.provider-credentials-document"])
+        self.assertTrue(len(document) == 1 and set(document[0]) == {"subject", "token", "grants"})
+        self.assertTrue(len(document[0]["token"]) >= 48)
+        self.assertEqual(document[0]["grants"], [{"action": "secret.metadata", "workspace_id": fixture.node.source.workspace_id}])
+        denied = fixture.resolver.resolve(replace(fixture.grants[0], workspace_id="foreign-workspace"))
+        self.assertIsInstance(denied, SecretMissing)
+
+    def test_cleanup_preserves_unexpected_attachments_and_allows_owned_stopped_recipient(self):
+        import tempfile
+        from types import SimpleNamespace
+        import docker
+        from live_docker_start_node_contract import prepare_fixture, FixtureJournal
+        for extra in ("mount", "bind", "port", "effective-mount", None):
+            with self.subTest(unexpected_attachment=extra):
+                fixture = prepare_fixture("cpk141-unit-cleanup")
+                fixture.image_id = "sha256:" + "c" * 64
+                fixture.container_labels = fixture.node_labels
+                state = {"removed": False}
+                attrs = {"Image": fixture.image_id,
+                    "Config": {"User": "10006", "Labels": fixture.container_labels},
+                    "State": {"Running": False},
+                    "NetworkSettings": {"Networks": {fixture.network: {"Aliases": [fixture.material.node_id]}}},
+                    "HostConfig": {"PortBindings": {},
+                        "Binds": [fixture.data_volume + ":/var/lib/cpk-secrets:rw"],
+                        "Mounts": [{"Type": "volume", "Source": name, "Target": target,
+                            "ReadOnly": True, "VolumeOptions": {"Subpath": "content"}}
+                            for name,target in zip(fixture.secret_volumes, fixture.targets)]}}
+                attrs["Mounts"] = [{"Type": "volume", "Name": name, "Destination": target, "RW": False}
+                    for name,target in zip(fixture.secret_volumes, fixture.targets)] + [
+                    {"Type": "volume", "Name": fixture.data_volume, "Destination": "/var/lib/cpk-secrets", "RW": True}]
+                if extra == "effective-mount":
+                    attrs["Mounts"].append({"Type": "bind", "Source": "/foreign-host", "Destination": "/foreign", "RW": True})
+                if extra == "mount":
+                    attrs["HostConfig"]["Mounts"].append({"Type": "volume", "Source": "foreign-volume", "Target": "/foreign"})
+                elif extra == "bind":
+                    attrs["HostConfig"]["Binds"].append("/foreign-host:/foreign:rw")
+                elif extra == "port":
+                    attrs["HostConfig"]["PortBindings"] = {"8081/tcp": [{"HostPort": "12345"}]}
+
+                def remove(*, force):
+                    self.assertTrue(force)
+                    state["removed"] = True
+
+                resource = SimpleNamespace(id="synthetic-recipient-id", attrs=attrs, remove=remove)
+
+                def get_container(_identity):
+                    if state["removed"]:
+                        raise docker.errors.NotFound("synthetic absent")
+                    return resource
+
+                def absent(_identity):
+                    raise docker.errors.NotFound("synthetic absent")
+
+                client = SimpleNamespace(containers=SimpleNamespace(get=get_container),
+                    volumes=SimpleNamespace(get=absent), networks=SimpleNamespace(get=absent))
+                sdk = SimpleNamespace(_client=lambda: client)
+                with tempfile.TemporaryDirectory() as directory:
+                    journal = FixtureJournal(directory, fixture, sdk, "synthetic-helper-image")
+                    try:
+                        self.assertEqual(journal.cleanup(), extra is None)
+                        self.assertEqual(state["removed"], extra is None)
+                    finally:
+                        journal.close()
+
+    def test_real_calls_receive_original_values_and_return_objects_once(self):
+        fixture = _ProviderBoundaryFixture()
+        environment = {"OPAQUE": object()}
+        observation = self._observation(fixture)
+        with observation:
+            result = fixture.create_container(name="recipient", environment=environment)
+        self.assertIs(result, fixture.inspected)
+        self.assertEqual([call[0] for call in fixture.calls],
+                         ["create", "create-return", "inspect", "inspect-return"])
+        self.assertIs(fixture.calls[0][2]["environment"], environment)
+        self.assertIs(fixture.calls[1][1], fixture.created)
+        self.assertIs(fixture.calls[3][1], fixture.inspected)
+        self.assertEqual(observation.report()["create"],
+                         {"method": "POST", "outcome": "returned", "status": None})
+        self.assertEqual(observation.report()["inspect"],
+                         {"method": "GET", "outcome": "returned", "status": None})
+
+    def test_create_failure_preserves_exception_and_inspect_not_reached(self):
+        error = RuntimeError("fixture-private-message")
+        fixture = _ProviderBoundaryFixture(create_error=error)
+        observation = self._observation(fixture)
+        with observation:
+            with self.assertRaises(RuntimeError) as caught:
+                fixture.create_container(name="recipient")
+        self.assertIs(caught.exception, error)
+        self.assertEqual([call[0] for call in fixture.calls], ["create"])
+        self.assertEqual(observation.report()["create"]["outcome"], "raised")
+        self.assertEqual(observation.report()["inspect"]["outcome"], "not-reached")
+        self.assertNotIn("fixture-private-message", json.dumps(observation.report()))
+
+    def test_inspect_failure_is_distinct_and_preserves_original_exception(self):
+        from docker.errors import APIError
+        from requests import Response
+        response = Response()
+        response.status_code = 404
+        error = APIError("fixture-private-inspection", response=response)
+        fixture = _ProviderBoundaryFixture(inspect_error=error)
+        observation = self._observation(fixture)
+        with observation:
+            with self.assertRaises(APIError) as caught:
+                fixture.create_container(name="recipient")
+        self.assertIs(caught.exception, error)
+        self.assertEqual([call[0] for call in fixture.calls], ["create", "create-return", "inspect"])
+        self.assertEqual(observation.report()["create"]["outcome"], "returned")
+        self.assertEqual(observation.report()["inspect"],
+                         {"method": "GET", "outcome": "raised", "status": 404})
+        self.assertNotIn("fixture-private-inspection", json.dumps(observation.report()))
+
+    def test_unrelated_and_outside_inspections_do_not_enter_recipient_evidence(self):
+        fixture = _ProviderBoundaryFixture()
+        observation = self._observation(fixture)
+        with observation:
+            fixture.api.inspect_container("preflight")
+            fixture.create_container(name="helper")
+            self.assertEqual(observation.report()["create"]["outcome"], "not-reached")
+            self.assertEqual(observation.report()["inspect"]["outcome"], "not-reached")
+            fixture.create_container(name="recipient")
+            fixture.api.inspect_container("final-inspection")
+        self.assertTrue(observation.report()["diagnostic_available"])
+        self.assertEqual(observation.report()["inspect"]["outcome"], "returned")
+        self.assertEqual(sum(call[0] == "inspect" for call in fixture.calls), 4)
+
+    def test_observer_failure_does_not_mask_success_or_actual_failure(self):
+        def broken_record(_record):
+            raise RuntimeError("fixture-observer-failure")
+        for error in (None, RuntimeError("fixture-original-error")):
+            with self.subTest(failing_effect=error is not None):
+                fixture = _ProviderBoundaryFixture(create_error=error)
+                observation = self._observation(fixture, broken_record)
+                with observation:
+                    if error is None:
+                        self.assertIs(fixture.create_container(name="recipient"), fixture.inspected)
+                    else:
+                        with self.assertRaises(RuntimeError) as caught:
+                            fixture.create_container(name="recipient")
+                        self.assertIs(caught.exception, error)
+                self.assertFalse(observation.report()["diagnostic_available"])
+                self.assertNotIn("fixture-observer-failure", json.dumps(observation.report()))
+
+    def test_status_accessor_failure_preserves_effect_exception(self):
+        from docker.errors import APIError
+        class StatusFailure(APIError):
+            def __init__(self, message):
+                Exception.__init__(self, message)
+
+            @property
+            def response(self):
+                raise ValueError("fixture-status-accessor")
+        error = StatusFailure("fixture-original")
+        fixture = _ProviderBoundaryFixture(create_error=error)
+        observation = self._observation(fixture)
+        with observation:
+            with self.assertRaises(StatusFailure) as caught:
+                fixture.create_container(name="recipient")
+        self.assertIs(caught.exception, error)
+        self.assertFalse(observation.report()["diagnostic_available"])
+
+    def test_pull_guard_stops_before_any_downstream_call_and_restores(self):
+        fixture = _ProviderBoundaryFixture()
+        original = fixture.pull_image
+        observation = self._observation(fixture)
+        with observation:
+            with self.assertRaisesRegex(RuntimeError, "fixture image pull prohibited"):
+                fixture.pull_image("absent-image", auth_config=None)
+            self.assertEqual(fixture.calls, [])
+        self.assertTrue(observation.report()["pull_attempted"])
+        self.assertEqual(fixture.pull_image, original)
+        fixture.pull_image("outside-phase")
+        self.assertEqual([call[0] for call in fixture.calls], ["pull"])
+
+    def test_all_original_methods_are_restored_when_effect_raises(self):
+        error = RuntimeError("fixture-failure")
+        fixture = _ProviderBoundaryFixture(create_error=error)
+        originals = (fixture.create_container, fixture.pull_image,
+                     fixture.api.create_container, fixture.api.inspect_container)
+        observation = self._observation(fixture)
+        with self.assertRaises(RuntimeError) as caught:
+            with observation:
+                fixture.create_container(name="recipient")
+        self.assertIs(caught.exception, error)
+        self.assertEqual((fixture.create_container, fixture.pull_image,
+                          fixture.api.create_container, fixture.api.inspect_container), originals)
+
+
 if __name__ == "__main__":
     unittest.main()
