@@ -1980,6 +1980,8 @@ class ProviderContractObservationTests(unittest.TestCase):
         self.assertEqual(product.image.execution_reference, IMAGE_REFERENCE)
         self.assertEqual(product.identity.namespace, "control-plane-kit-test")
         self.assertIsNone(fixture.material.pull_authority)
+        self.assertEqual(fixture.material.public_environment, ())
+        self.assertEqual(product.runtime_contract.public_environment, ())
         self.assertEqual(fixture.material.runtime_authority_deliveries, ())
         self.assertEqual(len(fixture.volume_labels), 3)
         self.assertEqual(len(product.runtime_contract.secret_deliveries), 2)

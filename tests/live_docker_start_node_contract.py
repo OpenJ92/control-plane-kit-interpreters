@@ -129,7 +129,6 @@ def prepare_fixture(run_id):
     import secrets
     from types import SimpleNamespace
 
-    from control_plane_kit_core.environment import PublicStaticEnvironmentBinding
     from control_plane_kit_core.operations.run_identity import RunId
     from control_plane_kit_core.planning import ActivityId, NodeTarget, RuntimeTarget, StartNode, StartRuntime
     from control_plane_kit_core.products import ProductDescriptorCodec, ProductDescriptorDigest, ProductIdentity, ProductReference
@@ -166,9 +165,9 @@ def prepare_fixture(run_id):
         raise RuntimeError("fixture input bound exceeded")
     deliveries = tuple(SecretFileDelivery(target, ref, intent, SecretFileMode.OWNER_READ_ONLY,
                        SecretFilePathBinding(env)) for target,ref,intent,env in zip(targets,references,intents,env_names))
-    contract = replace(original.runtime_contract, secret_deliveries=deliveries,
-        public_environment=(PublicStaticEnvironmentBinding("CPK_SECRETS_DATABASE_PATH", "/var/lib/cpk-secrets/secrets.sqlite3"),
-                            PublicStaticEnvironmentBinding("CPK_SECRETS_PROVIDER_ID", run_id)))
+    # The pinned image already supplies the nonsecret database/provider defaults.
+    # Secret-shaped names are not permitted as PublicStaticEnvironmentBinding.
+    contract = replace(original.runtime_contract, secret_deliveries=deliveries)
     product = replace(original, identity=ProductIdentity("control-plane-kit-test", "start-node-provider-contract", 1),
                       runtime_contract=contract)
     content = ProductDescriptorCodec().encode_document(product)
@@ -538,6 +537,11 @@ def run_provider_contract(client, sdk, helper_image, run_id, record_directory):
             or image.attrs["Config"].get("User") != "10006"
             or client.info().get("ID") != os.environ["CPK_SECRET_ENGINE_ID"]):
         raise RuntimeError("fixture image or engine admission failed")
+    image_environment = dict(entry.split("=", 1) for entry in image.attrs["Config"].get("Env", []) if "=" in entry)
+    if (image_environment.get("CPK_SECRETS_DATABASE_PATH") != "/var/lib/cpk-secrets/secrets.sqlite3"
+            or image_environment.get("CPK_SECRETS_PROVIDER_ID") != "control-plane-kit"
+            or image_environment.get("CPK_SECRETS_DEVELOPMENT_CREDENTIALS_JSON")):
+        raise RuntimeError("fixture inherited image defaults differ")
     fixture.container_labels = {**(image.attrs["Config"].get("Labels") or {}), **fixture.node_labels}
     fixture.image_id = image.id
     for manager,name in [(client.networks, fixture.network), (client.containers, fixture.recipient),
