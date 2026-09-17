@@ -33,6 +33,7 @@ from control_plane_kit_interpreters.secret_provider import (
 )
 from control_plane_kit_secrets.audit import SqliteAuditStore
 from control_plane_kit_secrets.crypto import encode_master_key_for_file
+from health_signing_fixtures import write_provider_control
 
 
 class LiveSecretProviderClientTests(unittest.TestCase):
@@ -89,6 +90,8 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                 encoding="utf-8",
             )
             credentials_file.chmod(0o600)
+            control_file = base / "control.json"
+            write_provider_control(control_file)
             port = _free_port()
             environment = {
                 **os.environ,
@@ -96,6 +99,7 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                 "CPK_SECRETS_MASTER_KEY_FILE": str(key_file),
                 "CPK_SECRETS_PROVIDER_ID": "provider-live",
                 "CPK_SECRETS_CREDENTIALS_FILE": str(credentials_file),
+                "CPK_SECRETS_CONTROL_CONFIGURATION_FILE": str(control_file),
             }
             process = _start_provider(port=port, environment=environment)
             stdout = ""
