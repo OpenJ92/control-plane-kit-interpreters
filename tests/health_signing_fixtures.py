@@ -16,8 +16,7 @@ from control_plane_kit_core.secrets import (
     SecretResolved, SecretUseIntent, SecretValue,
 )
 from control_plane_kit_interpreters.secret_provider import (
-    ControlPlaneKitSecretsClient, ControlPlaneKitSecretsResolver,
-    SecretProviderBootstrapRegistry,
+    ControlPlaneKitSecretsResolver, SecretProviderBootstrapRegistry, canonical_provider_secret_id,
 )
 from control_plane_kit_secrets.api import create_app
 from control_plane_kit_secrets.auth import ProviderCredential, ProviderGrant
@@ -164,15 +163,25 @@ class Provider:
         registry = SecretProviderBootstrapRegistry(
             {grant.endpoint_reference: "http://provider.invalid"},
             {grant.credential_reference: credential_file})
-        client = ControlPlaneKitSecretsClient(registry.configuration_for(
-            endpoint_reference=grant.endpoint_reference, credential_reference=grant.credential_reference),
-            transport=transport)
-        generated = tuple(client.generate_delegation_key(workspace_id="workspace-a",
-            reference=resolution.reference, purpose=grant.purpose, issuer=grant.issuer,
-            caller_subject="actor-a", correlation_id="generate-" + str(index))
-            for index, (resolution, grant) in enumerate(zip(value.resolutions,
-                (value.transit, value.workload), strict=True)))
-        value.publics = tuple(result.public_key for result in generated)
+        generated = []
+        # Provision through the real provider owner. The existing Interpreter
+        # generation response wrapper still accepts only the old probe intent;
+        # #155 exercises immediate-use resolution/signing, not generation.
+        for index, (resolution, grant) in enumerate(zip(value.resolutions,
+                (value.transit, value.workload), strict=True)):
+            secret_id = canonical_provider_secret_id(resolution.reference)
+            response = self.client.post(f"/v1/workspaces/workspace-a/delegation-keys/{secret_id}/generate",
+                headers={"Authorization": "Bearer fixture-token"}, json={
+                    "secret_reference": resolution.reference.reference_id,
+                    "purpose": grant.purpose.value, "issuer": grant.issuer,
+                    "caller_subject": "actor-a", "correlation_id": "generate-" + str(index)})
+            testcase.assertEqual(response.status_code, 200, "synthetic provider key generation failed")
+            payload = response.json()
+            testcase.assertEqual(payload["purpose"], grant.purpose.value)
+            testcase.assertEqual(payload["metadata"]["labels"]["intent"], resolution.intent.value)
+            generated.append(core.DelegationPublicKey(payload["key_id"],
+                core.DelegationKeyAlgorithm(payload["algorithm"]), payload["public_key_pem"]))
+        value.publics = tuple(generated)
         value.transit = replace(value.transit, key_id=value.publics[0].key_id)
         value.workload = replace(value.workload, key_id=value.publics[1].key_id)
         self.resolver = ControlPlaneKitSecretsResolver(registry, transport=transport)

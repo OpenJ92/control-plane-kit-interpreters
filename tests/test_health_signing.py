@@ -103,14 +103,24 @@ class HealthSigningPrerequisiteTests(unittest.TestCase):
         default, selected = world(), world()
 
         def artifacts(value):
-            public = value.publics[1]
-            family = {"issuer": "workload-issuer", "public_keys": [{
-                "key_id": public.key_id, "algorithm": public.algorithm.value,
-                "public_key_pem": public.public_key_pem}]}
+            # Static input aligned with Servers4d781 control_configuration.py:
+            # exact http-api V2 liveness declaration, separate family keys.
+            # This recording test does not execute the CPK configuration decoder.
+            socket = replace(value.target.provider_socket_name, value="http-api")
+            target = replace(value.target, provider_socket_name=socket)
+            declaration = replace(value.declaration,
+                surface=replace(value.declaration.surface, provider_socket_name=socket))
+
+            def family(issuer, public):
+                return {"issuer": issuer, "public_keys": [{
+                    "key_id": public.key_id, "algorithm": public.algorithm.value,
+                    "public_key_pem": public.public_key_pem}]}
+
             content = json.dumps({"profile": "cpk-control-configuration.v1",
-                "target": value.target.descriptor(), "runtime_id": value.runtime.value,
-                "declaration": value.declaration.descriptor(),
-                "surface_read": family, "health_read": family}, sort_keys=True)
+                "target": target.descriptor(), "runtime_id": value.runtime.value,
+                "declaration": declaration.descriptor(),
+                "surface_read": family("surface-issuer", key("surface-key")[1]),
+                "health_read": family("workload-issuer", value.publics[1])}, sort_keys=True)
             return (gateway_artifact(value), ConfigurationArtifact("cpk-control",
                 "/etc/cpk/cpk-server/control.json", ConfigurationMediaType.JSON, content))
 
@@ -268,9 +278,11 @@ class HealthCredentialPairTests(unittest.TestCase):
             encoded.append(True)
             return result
 
-        with patch.object(jwt, "encode", side_effect=slow_encode):
-            self.refused(lambda: self.sign(clock=lambda: 200 if encoded else 150))
-        self.assertTrue(encoded)
+        for expires_after in (1, 2):
+            encoded.clear()
+            with patch.object(jwt, "encode", side_effect=slow_encode):
+                self.refused(lambda: self.sign(clock=lambda: 200 if len(encoded) >= expires_after else 150))
+            self.assertGreaterEqual(len(encoded), expires_after)
 
     def test_partial_resolution_and_wrong_private_identity_publish_no_pair(self):
         value = self.value
