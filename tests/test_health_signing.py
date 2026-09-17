@@ -21,28 +21,13 @@ from control_plane_kit_server_sdk.verification import (
 from control_plane_kit_server_sdk.verifier_keys import (
     AtomicWorkloadNodeHealthReadVerifierKeySet, WorkloadNodeHealthReadVerifierKeySet,
 )
-from control_plane_kit_servers_cpk_local_gateway.health_transit_configuration import (
-    ARTIFACT_ID, CONFIGURATION_PATH, PROFILE,
-)
 from control_plane_kit_servers_cpk_local_gateway.health_transit_verification import (
     GatewayHealthTransitVerificationError, gateway_health_transit_verifier_from_artifact,
 )
-from control_plane_kit_core.configuration import ConfigurationArtifact, ConfigurationFileMode, ConfigurationMediaType
 from health_signing_fixtures import Provider, RecordingResolver, key, private_pem, world
+from receiver_configuration_fixtures import gateway_artifact, receiver_artifacts
 
 MODULE = "control_plane_kit_interpreters.probes.health_signing"
-
-
-def gateway_artifact(value):
-    public = value.publics[0]
-    # The actual receiver's declared slot and public configuration schema.
-    return ConfigurationArtifact(ARTIFACT_ID, CONFIGURATION_PATH, ConfigurationMediaType.JSON, json.dumps({
-        "profile": PROFILE, "workspace_id": value.target.workspace_id.value,
-        "gateway_node_id": value.gateway.value, "runtime_id": value.runtime.value,
-        "issuer": "transit-issuer", "purpose": core.DelegationKeyPurpose.GATEWAY_NODE_HEALTH_READ_TRANSIT.value,
-        "public_keys": [{"key_id": public.key_id, "algorithm": public.algorithm.value,
-                         "public_key_pem": public.public_key_pem}],
-    }, sort_keys=True, separators=(",", ":")), ConfigurationFileMode.READ_ONLY)
 
 
 def workload_verifier(value, now=150):
@@ -102,29 +87,7 @@ class HealthSigningPrerequisiteTests(unittest.TestCase):
         from control_plane_kit_core.operations.execution import EffectResultKind
         default, selected = world(), world()
 
-        def artifacts(value):
-            # Static input aligned with Servers4d781 control_configuration.py:
-            # exact http-api V2 liveness declaration, separate family keys.
-            # This recording test does not execute the CPK configuration decoder.
-            socket = replace(value.target.provider_socket_name, value="http-api")
-            target = replace(value.target, provider_socket_name=socket)
-            declaration = replace(value.declaration,
-                surface=replace(value.declaration.surface, provider_socket_name=socket))
-
-            def family(issuer, public):
-                return {"issuer": issuer, "public_keys": [{
-                    "key_id": public.key_id, "algorithm": public.algorithm.value,
-                    "public_key_pem": public.public_key_pem}]}
-
-            content = json.dumps({"profile": "cpk-control-configuration.v1",
-                "target": target.descriptor(), "runtime_id": value.runtime.value,
-                "declaration": declaration.descriptor(),
-                "surface_read": family("surface-issuer", key("surface-key")[1]),
-                "health_read": family("workload-issuer", value.publics[1])}, sort_keys=True)
-            return (gateway_artifact(value), ConfigurationArtifact("cpk-control",
-                "/etc/cpk/cpk-server/control.json", ConfigurationMediaType.JSON, content))
-
-        original, chosen = artifacts(default), artifacts(selected)
+        original, chosen = receiver_artifacts(default), receiver_artifacts(selected)
         product = docker._product()
         product = replace(product, runtime_contract=replace(product.runtime_contract, configuration_artifacts=original))
         material = docker._material(product)
