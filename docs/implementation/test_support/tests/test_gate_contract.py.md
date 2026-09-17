@@ -1,4 +1,6 @@
 Source: [test_support/tests/test_gate_contract.py](../../../../test_support/tests/test_gate_contract.py).
+
+The early #149 compatibility prerequisite updates only the expected Core coordinate to `b79a02d1ac8ef987dd34abeb2297a231b109f7a6`. Existing assertions and gate semantics stay intact. The ordinary pinned Docker suite must establish actual installation and behavioral compatibility; this selected-coordinate witness does not implement health signing, transport or deployment.
 Maintain this document alongside its source file. When the source or relevant imported contracts change, verify and update this companion in the same change.
 
 This support suite reads gate/Dockerfile/package metadata to establish repository-root anchoring, default pinned proof, explicit local-Core override, one metadata-owned Core coordinate and the expected integrity/import stages. It contains an intentional selected-Core requirement assertion, which must move with a real dependency adoption.
