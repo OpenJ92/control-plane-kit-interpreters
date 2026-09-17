@@ -1,4 +1,8 @@
 Source: [pyproject.toml](../../pyproject.toml).
+
+The early compatibility slice of #149 selects Core `b79a02d1ac8ef987dd34abeb2297a231b109f7a6`, replacing #150's coordinate below. This aligns the exact URL with accepted SDK2c5b588 and Secrets8273b7d for Servers #208's receiver-trust join. Operationsbc559a0 contains the identical Core subtree, but Servers must select its Operations archive independently and prove that installation in its own gate. This metadata change does not implement #149 signing or establish live health transport.
+
+The existing Secrets96e86 test extra remains: its exact manifest has no Core or SDK requirement. Interpreter runtime source, optional extras, Dockerfile, provider-contract opt-in and owning cleanup are unchanged. Ordinary pinned `./test.sh` is the compatibility evidence; a coordinate assertion alone is insufficient.
 Maintain this document alongside its source file. When the source or relevant imported contracts change, verify and update this companion in the same change.
 
 This is the package distribution and dependency-selection boundary. The base dependency is the exact Core archive selected here; runtime backends are optional extras. The Docker extra accepts a range rather than pinning Docker7.2.0, and the test extra also imports a selected Secrets test distribution. Check the actual installed environment before attributing version-specific SDK behavior.
