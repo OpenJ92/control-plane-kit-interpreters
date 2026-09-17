@@ -104,6 +104,8 @@ def main() -> None:
             assert container.attrs["Image"] == inspected.image_id
             assert container.attrs["Config"]["User"] == (user or inspected.configured_user)
             assert container.attrs["Mounts"][0]["RW"] is False
+        from live_docker_configuration import run_configuration_witness
+        run_configuration_witness(client, sdk, run_id, image_id, helper_image)
         if os.environ.get("CPK_INTERPRETERS_START_NODE_CONTRACT") == "1":
             from live_docker_start_node_contract import run_provider_contract
             try:
