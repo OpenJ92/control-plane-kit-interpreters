@@ -125,6 +125,20 @@ This repository must not own:
 
 ## Development
 
+After inspecting governing tests and extracting applicable behavioral laws,
+begin design and source dry runs by reading the actual selected source, imports,
+immutable dependency coordinates, and related implementation companions. Trace
+one concrete input through validation and transformations, authority decisions,
+effects, and output/durable history. Give a short human-readable account with
+function/file anchors, including where the path stops or remains unknown.
+
+Distinguish selected behavior, merged but unselected code, proposed changes, and
+separately verified live behavior. A checkout or dependency pin does not prove
+what is running. Name the last working boundary and smallest missing connection
+before proposing an interface or issue change; reuse existing owners. Do not
+treat issue ordering or evidence labels as missing code. Keep this within the
+existing dry run, not a new checklist or issue-creation step.
+
 Use Docker-first validation:
 
 ```bash
