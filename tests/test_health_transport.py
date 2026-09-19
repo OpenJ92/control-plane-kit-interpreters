@@ -18,6 +18,7 @@ class Stream(httpx.AsyncByteStream):
     def __init__(self, chunks=(), delay=0):
         self.chunks, self.delay = chunks, delay
         self.closed, self.read = False, False
+        self.yield_count = 0
         self.entered = asyncio.Event()
 
     async def __aiter__(self):
@@ -25,6 +26,7 @@ class Stream(httpx.AsyncByteStream):
         self.entered.set()
         for chunk in self.chunks:
             await asyncio.sleep(self.delay)
+            self.yield_count += 1
             yield chunk
 
     async def aclose(self):
@@ -187,16 +189,19 @@ class HealthTransportTests(unittest.IsolatedAsyncioTestCase):
         wrong = json.loads(good)
         wrong["request_id"] = "another"
         cases = (
-            ((b"x" * 447,), {}, "oversized-response"),
-            ((b"x" * 300, b"y" * 147), {}, "oversized-response"),
-            ((good,), {"content-encoding":"gzip"}, "malformed-response"),
-            ((b"{" * 400,), {}, "malformed-response"),
-            ((b'{"outcome":"healthy","outcome":"unknown"}',), {}, "malformed-response"),
-            ((b'{"outcome":NaN}',), {}, "malformed-response"),
-            ((json.dumps(wrong, separators=(",", ":")).encode(),), {}, "malformed-response"),
-            ((b"{}",), {}, "malformed-response"),
+            ((b"x" * 447, b"must-not-read"), {}, "oversized-response", 1),
+            ((b"x" * 300, b"y" * 147, b"must-not-read"), {}, "oversized-response", 2),
+            ((good,), {"content-encoding":"gzip"}, "malformed-response", 0),
+            ((b"{" * 400,), {}, "malformed-response", 1),
+            # Otherwise-valid full result, valid final value: a tolerant JSON
+            # decoder would accept it. Refusal therefore tests duplicate keys.
+            ((b'{"outcome":"unknown",' + good[1:],), {}, "malformed-response", 1),
+            # Nonfinite outcome is malformed; the Core codec also refuses it.
+            ((good.replace(b'"healthy"', b'NaN'),), {}, "malformed-response", 1),
+            ((json.dumps(wrong, separators=(",", ":")).encode(),), {}, "malformed-response", 1),
+            ((b"{}",), {}, "malformed-response", 1),
         )
-        for chunks, headers, expected in cases:
+        for chunks, headers, expected, yielded in cases:
             with self.subTest(expected=expected, headers=headers):
                 stream = Stream(chunks)
                 transport = Transport(httpx.MockTransport(lambda request: httpx.Response(200,
@@ -205,6 +210,7 @@ class HealthTransportTests(unittest.IsolatedAsyncioTestCase):
                     transport=transport)), expected)
                 self.assertTrue(stream.closed)
                 self.assertTrue(transport.closed)
+                self.assertEqual(stream.yield_count, yielded)
                 if headers:
                     self.assertFalse(stream.read)
 
