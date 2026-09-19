@@ -4,10 +4,43 @@ Design: [focused plan](https://github.com/OpenJ92/control-plane-kit-interpreters
 [independent review](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/147#issuecomment-5743180581),
 and [owner disposition](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/147#issuecomment-5743181523).
 
-This target-test stage specifies the missing opt-in `probes.health_transport`
-client. Application implementation has not begun. Existing #149 signing and #180
+The opt-in `probes.health_transport` client connects existing #149 signing and #180
 relay contracts are reused; production authority and lifecycle remain Operations
 and the #181/#1860 caller's responsibility.
+
+```python
+client = SignedGatewayHealthClient(clock=epoch_seconds)
+result = await client.dispatch(
+    context, pair, selected_gateway,
+    transit_grant=original_transit, workload_grant=original_workload,
+)
+```
+
+`SelectedManagementGateway` contains the selected `NamedPublicIngress`, gateway
+node, transit provider socket, workload runtime and relay target alias. It is a
+caller projection, not proof of selection or permission. `dispatch` validates
+that it agrees with the independent context and HTTPS ingress target; it never
+derives expected destination/context from a credential. The client structurally
+compares each compact token with its original grant and leaves cryptographic
+admission to the real receivers. It does not resolve signing material or sign.
+
+The default async system resolver is awaited within the same finite deadline
+as HTTP (default and maximum 5 seconds). Empty, malformed, excessive or any
+non-global answers are refused; a single deterministic public address is pinned.
+The request retains the ingress Host/SNI and ordinary certificate verification.
+There is no second hostname lookup, ambient proxy, redirect, retry or fallback.
+The original half-open credential window is checked immediately before send.
+An injected async resolver/HTTP transport supports controlled composition tests.
+
+`GatewayHealthTransportResult.code == RECEIVED` carries the original-correlated
+Core `result`. Every other code carries `None`: invalid-context,
+destination-rejected, gateway-rejected, timed-out, transport-failed,
+malformed-response or oversized-response. HTTP 400/401/403/413 are gateway
+refusals, 504 is timeout, other 5xx are transport failure; no non-200 creates a
+semantic observation. Status bodies are not read. HTTP 200 requires raw identity
+encoding, at most446 bytes and strict JSON before the Core result codec.
+Responses and clients close on success/failure/cancellation. Cancellation
+propagates without an invented observation; timeout after dispatch is uncertain.
 
 ## Governing laws
 
@@ -50,3 +83,14 @@ The ordinary pinned Docker PR gate supplies red-to-green and owner validation.
 No host Python, local Docker, manual workflow runs, live provider effects, image
 publication or downstream work is part of this slice. Legacy route retirement
 remains a parent completion requirement.
+
+Target-red evidence: PR161 head `e0bf91dd8b7441cf3a3f8a5b3ac1d9e8c260163a`,
+ordinary CI35452961597/job105923202492, composition `7e012cf`:26 support tests
+passed;365 package tests had only12 missing-client failures and0 errors. The
+actual signer/relay/SDK prerequisite and immutable dependency provenance passed.
+Corrected target commit `e8c10938e1fb94d4ce6925565fe5a7d1c9e663fa` was reviewed
+before source implementation: trailing-chunk/yield-count assertions now isolate
+early stream cutoff; otherwise-valid full duplicate JSON isolates duplicate
+rejection. These deeper corrected assertions first execute in source-green CI;
+the unchanged missing-interface guard made another target-only red run redundant.
+Source-green and full owning-gate evidence remain pending on PR161.
