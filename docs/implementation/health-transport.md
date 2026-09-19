@@ -5,7 +5,7 @@ Design: [focused plan](https://github.com/OpenJ92/control-plane-kit-interpreters
 and [owner disposition](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/147#issuecomment-5743181523).
 
 The opt-in `probes.health_transport` client connects existing #149 signing and #180
-relay contracts are reused; production authority and lifecycle remain Operations
+relay contracts; production authority and lifecycle remain Operations
 and the #181/#1860 caller's responsibility.
 
 ```python
@@ -93,4 +93,15 @@ before source implementation: trailing-chunk/yield-count assertions now isolate
 early stream cutoff; otherwise-valid full duplicate JSON isolates duplicate
 rejection. These deeper corrected assertions first execute in source-green CI;
 the unchanged missing-interface guard made another target-only red run redundant.
-Source-green and full owning-gate evidence remain pending on PR161.
+Source head `9a3d61100ea223c56ca3b148ca2a9a59653f4415` passed ordinary pinned
+CI35453351068/job105924229729 (composition `cea909f`):26 support and365 package
+tests, including all13 new tests and the corrected assertions. Integrity reports
+365 tests/38 mocks/0 approved skips. The unchanged owning gate also verified
+selected-not-default readonly configuration mounts (2 slots, numeric reader,
+mode0444, writeEROFS, no residue) and the numeric secret fixture (unrelated UID
+denied, readonly, canonical image resolution, no residue), ending in
+`control-plane-kit-interpreters owning-gate=PASS`.
+
+[PR161 evidence](https://github.com/OpenJ92/control-plane-kit-interpreters/pull/161#issuecomment-5743287087)
+records the source-green log and limits; the PR records final-head CI and review.
+These are source/fixture results, not live DNS/TLS or deployed-image evidence.
