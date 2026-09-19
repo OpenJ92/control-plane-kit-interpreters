@@ -24,11 +24,11 @@ USER 10006:10008
 
 FROM package AS test
 
-# Only the real gateway verifier is exercised from this immutable owner package.
+# Real gateway verification and health relay use this immutable owner package.
 # Do not resolve Servers' old Interpreter pin over the candidate under test.
 # Its imported Core/crypto/FastAPI/uvicorn dependencies come from .[test].
 RUN python -m pip install --no-deps \
-    "control-plane-kit-servers @ https://github.com/OpenJ92/control-plane-kit-servers/archive/4d781b5b87464d522bd157bab491456e52449a9f.zip"
+    "control-plane-kit-servers @ https://github.com/OpenJ92/control-plane-kit-servers/archive/49f50e4df3ec1a380e70f2bddb10b25096c043b7.zip"
 
 COPY tests ./tests
 
