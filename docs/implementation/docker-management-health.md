@@ -52,6 +52,12 @@ setup and failed exactly eight missing-adapter assertions in ordinary
 CI35519295967/job106100477511; 365 existing tests and 26 support tests passed, zero
 errors. Source-green evidence remains pending.
 
+First source `06aec4c` ordinary CI35519558122/job106101171689 exposed an import
+defect before the eight new target bodies: the declaration/profile live in Core
+`node_control_surface_reads`, not `node_control`. The correction changes only that
+import and this record; all target bytes and dependency coordinates stay fixed.
+The 365 existing package tests and 26 support tests passed, but source is not green.
+
 Security/data/history: no new listener, credential family, Docker authority, socket
 recipient or durable mutation. Refusals contain only a closed code. The real
 receivers still own signature admission. Public transport success does not prove

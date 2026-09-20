@@ -8,6 +8,8 @@ from enum import StrEnum
 
 from control_plane_kit_core.node_control import (
     NodeControlGraphReference, NodeControlGraphReferenceRole, NodeControlTarget,
+)
+from control_plane_kit_core.node_control_surface_reads import (
     WorkloadNodeControlSurfaceDeclaration, WorkloadNodeControlSurfaceDeclarationProfile,
 )
 from control_plane_kit_core.node_health_reads import DelegatedWorkloadNodeHealthReadGrant
