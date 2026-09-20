@@ -97,18 +97,18 @@ class ManagedWorld(World):
     def graphs(self, runtime_kind):
         value, contract = self.value, self.contract
         gateway = Node(value.gateway.value, BlockFamily.APPLICATION,
-            BlockSpec("gateway", capabilities=contract.capabilities, verification=contract.verification,
+            BlockSpec(value.gateway.value, capabilities=contract.capabilities, verification=contract.verification,
                 control_surfaces=contract.control_surfaces, gateway_transit=contract.gateway_transit),
             "container-server", value.runtime.value, contract.sockets,
             configuration_artifacts=contract.configuration_artifacts,
             endpoints={port.provider_socket:Endpoint(LiteralAddress(f"http://gateway-a:{port.container_port}"),
                 Protocol.HTTP) for port in contract.provider_ports})
         workload = Node(value.target.node_id.value, BlockFamily.APPLICATION,
-            BlockSpec("workload", capabilities=(CapabilityName.HEALTH_CHECKABLE, CapabilityName.NODE_CONTROLLABLE),
+            BlockSpec(value.target.node_id.value, capabilities=(CapabilityName.HEALTH_CHECKABLE, CapabilityName.NODE_CONTROLLABLE),
                 control_surfaces=(value.declaration.surface,)), "container-server", value.runtime.value,
             BlockSockets(providers=(ProviderSocket("control", Protocol.HTTP),)),
             endpoints={"control":Endpoint(LiteralAddress("http://workload-a:8087"), Protocol.HTTP)})
-        connector = Node("connector-a", BlockFamily.APPLICATION, BlockSpec("connector"),
+        connector = Node("connector-a", BlockFamily.APPLICATION, BlockSpec("connector-a"),
             "container-server", value.runtime.value, BlockSockets())
         nodes = {item.node_id:item for item in (gateway, workload, connector)}
         graph = DeploymentGraph("managed-health", nodes=nodes,

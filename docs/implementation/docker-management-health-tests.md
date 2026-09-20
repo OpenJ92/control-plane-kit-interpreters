@@ -51,3 +51,20 @@ code. Tests do not establish current production admission, alias provenance or
 durable observation folding. All three bootstrap stages, production adoption and
 legacy HTTP-helper retirement remain parent #148 work; the new entrance must never
 use those helpers. Existing legacy behavioral tests remain unchanged.
+
+Initial target head `182f271` ordinary CI35518925141/job106099502885 is **not causal
+red**: all eight new tests errored during `desired.require_valid()` because the
+fixture's BlockSpec role IDs did not match its graph node IDs. Core's actual
+GraphDescriptorCodec correctly rejected those identities. The existing 365
+package tests and 26 support tests passed; integrity counted 373/38 mocks/0 skips.
+No new target test body or downstream gate witness ran after the fixture failure;
+the missing-adapter assertion was not reached.
+Log SHA256 `f7d35533ff03c45100f5f77dc6517afac8087f471d295a3a73633c55c978b8f7`.
+
+The target-only correction aligns all three role IDs and makes the shared actual
+SDK fixture install callbacks only for declared health kinds. Meridian identified
+the latter deeper defect: a liveness-only declaration must not install readiness.
+Keep that narrowed declaration so the real compiler selects liveness. Prior #147
+fixtures declare both kinds and retain their original behavior. All eight target
+bodies and the missing-adapter guard remain unchanged. The corrected target needs
+ordinary automatic CI to establish actual missing-behavior red, plus delta review.
