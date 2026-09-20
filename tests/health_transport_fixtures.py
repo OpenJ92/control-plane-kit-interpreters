@@ -104,8 +104,10 @@ class World:
         install_cpk_control_routes(app, target=value.target, declaration=value.declaration,
             surface_read_verifier=surface, health_dispatcher=WorkloadNodeHealthReadDispatcher(
                 target=value.target, runtime_id=value.runtime, declaration=value.declaration, verifier=health,
-                liveness=lambda:callback(core.NodeHealthReadKind.LIVENESS),
-                readiness=lambda:callback(core.NodeHealthReadKind.READINESS)))
+                liveness=(lambda:callback(core.NodeHealthReadKind.LIVENESS))
+                    if core.NodeHealthReadKind.LIVENESS in value.declaration.surface.health_reads else None,
+                readiness=(lambda:callback(core.NodeHealthReadKind.READINESS))
+                    if core.NodeHealthReadKind.READINESS in value.declaration.surface.health_reads else None))
         return app
 
     def destination(self, module):
