@@ -2,8 +2,8 @@
 
 Governing [exact plan](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/148#issuecomment-5750611634)
 and [target-only release](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/162#issuecomment-5750627936).
-Meridian and Kepler approved the workload-only interface/laws; source is not yet
-implemented. Eight focused tests cover the selection-to-effect boundary.
+Meridian and Kepler approved the workload-only interface/laws. Eight focused tests
+cover the selection-to-effect boundary; source-green evidence is pending.
 
 `docker_management_health_fixtures.ManagedWorld` extends the existing real signer,
 relay and SDK fixture. It constructs the actual Servers #182 three-artifact source
@@ -68,3 +68,10 @@ Keep that narrowed declaration so the real compiler selects liveness. Prior #147
 fixtures declare both kinds and retain their original behavior. All eight target
 bodies and the missing-adapter guard remain unchanged. The corrected target needs
 ordinary automatic CI to establish actual missing-behavior red, plus delta review.
+
+That gate is now satisfied at `1886f085`: Meridian target PASS and independent
+causal-red PASS; ordinary CI35519295967/job106100477511 ran 373 tests with exactly
+eight missing-adapter failures and zero errors, alongside 26 green support tests.
+The actual default product/compiler/resolver prerequisite succeeded. Log SHA256
+`33697a4a9e899c8e29c539259c8f4487b34be582f4ee3a955598eb7c9d98420c`.
+Source implementation preserves these target files unchanged.

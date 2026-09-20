@@ -324,3 +324,26 @@ Local-core mode is labeled in output and is not the default package or CI
 proof. Merely having a sibling checkout no longer changes what is tested.
 
 Use `unittest` only.
+
+## Pinned Docker workload health
+
+The opt-in `docker.management_health.DockerManagedHealthObserver` connects an exact
+Core `ObserveNodeHealth` plan activity to the existing signed gateway client:
+
+```python
+from control_plane_kit_interpreters.docker.management_health import DockerManagedHealthObserver
+
+observer = DockerManagedHealthObserver(signed_gateway_client)
+result = await observer.observe(
+    operation, plan=accepted_plan, activity_id=activity_id, source=source,
+    current=current, desired=desired, context=context, pair=original_pair,
+    transit_grant=original_transit, workload_grant=original_workload,
+    destination=selected_gateway,
+)
+```
+
+These inputs come from the admitted caller; the adapter does not grant authority.
+It checks the selected graph side and complete management relationship before
+dispatch, then returns the existing correlated result or a fixed selection refusal.
+Bootstrap operations are unsupported. Production adoption and legacy helper
+retirement remain parent #148 work. See the [implementation boundary](docs/implementation/docker-management-health.md).
