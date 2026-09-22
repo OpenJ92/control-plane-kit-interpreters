@@ -28,7 +28,7 @@ FROM package AS test
 # Do not resolve Servers' old Interpreter pin over the candidate under test.
 # Its imported Core/crypto/FastAPI/uvicorn dependencies come from .[test].
 RUN python -m pip install --no-deps \
-    "control-plane-kit-servers @ https://github.com/OpenJ92/control-plane-kit-servers/archive/127b7cbf9ae33ae05edbb01e9b610b518e824b90.zip"
+    "control-plane-kit-servers @ https://github.com/OpenJ92/control-plane-kit-servers/archive/77deffd9b32698a1deb2fa173f6c958e6c441f9b.zip"
 
 COPY tests ./tests
 

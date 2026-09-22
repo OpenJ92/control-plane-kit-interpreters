@@ -54,7 +54,7 @@ def admit_transit(value, credential, now=150, **changes):
 class HealthSigningPrerequisiteTests(unittest.TestCase):
     def test_actual_owner_provenance_and_candidate_origin(self):
         for package, coordinate in (
-            ("control-plane-kit-servers", "127b7cbf9ae33ae05edbb01e9b610b518e824b90"),
+            ("control-plane-kit-servers", "77deffd9b32698a1deb2fa173f6c958e6c441f9b"),
             ("control-plane-kit-secrets", "8273b7de86dcaac254a8fcaca22b2769c5e16a4d"),
             ("control-plane-kit-server-sdk", "2c5b588237fbe289c965029b4bc2f072715c42f3"),
         ):
