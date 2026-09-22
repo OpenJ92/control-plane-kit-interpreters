@@ -303,6 +303,11 @@ class DockerBootstrapHealthTests(unittest.IsolatedAsyncioTestCase):
             destination = value.destination(health_transport)
             self.refused(value, await value.observe(self.module, destination=replace(destination,
                 gateway_transit_provider_socket_name="wrong-transit")))
+            value = BootstrapWorld(stage)
+            value.resign(kind=core.NodeHealthReadKind.LIVENESS)
+            self.assertIn(core.NodeHealthReadKind.LIVENESS, value.value.declaration.surface.health_reads)
+            self.assertIn(core.NodeHealthReadKind.READINESS, value.value.declaration.surface.health_reads)
+            self.refused(value, await value.observe(self.module))
 
     async def test_cross_stage_bundle_parts_and_original_expiry_never_send(self):
         for stage, other in (self.stages, tuple(reversed(self.stages))):

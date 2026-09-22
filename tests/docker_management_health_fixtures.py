@@ -54,7 +54,7 @@ class ManagedWorld(World):
             expected_operation=self.plan.activity(self.activity_id).operation)
 
     def resign(self, *, target=None, runtime=None, declaration=None, gateway=None,
-               request_id=None, attempt_id="attempt-a"):
+               request_id=None, attempt_id="attempt-a", kind=None):
         value = self.value
         value.target = value.target if target is None else target
         value.runtime = value.runtime if runtime is None else runtime
@@ -62,10 +62,11 @@ class ManagedWorld(World):
         value.gateway = value.gateway if gateway is None else gateway
         value.request = replace(value.request, target=value.target, runtime_id=value.runtime,
             declaration_identity=value.declaration.identity(),
-            request_id=value.request.request_id if request_id is None else request_id)
+            request_id=value.request.request_id if request_id is None else request_id,
+            kind=value.request.kind if kind is None else kind)
         fields = dict(target=value.target, runtime_id=value.runtime,
             declaration_identity=value.declaration.identity(), request_digest=value.request.canonical_digest(),
-            request_id=value.request.request_id)
+            request_id=value.request.request_id, kind=value.request.kind)
         value.transit = replace(value.transit, gateway_node_id=value.gateway, attempt_id=attempt_id, **fields)
         value.workload = replace(value.workload, audience=core.workload_node_control_audience(value.target), **fields)
         value.resolutions = tuple(replace(item, workspace_id=value.target.workspace_id.value)
