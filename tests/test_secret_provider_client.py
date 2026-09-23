@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from dataclasses import replace
 
 import httpx
 
@@ -33,7 +34,171 @@ from control_plane_kit_interpreters.secret_provider import (
 )
 
 
+_GENERATION_FAMILIES = (
+    (DelegationKeyPurpose.GATEWAY_PROBE, SecretUseIntent.GATEWAY_PROBE_SIGNING_KEY),
+    (DelegationKeyPurpose.GATEWAY_NODE_CONTROL_TRANSIT, SecretUseIntent.GATEWAY_NODE_CONTROL_TRANSIT_SIGNING_KEY),
+    (DelegationKeyPurpose.WORKLOAD_NODE_CONTROL, SecretUseIntent.WORKLOAD_NODE_CONTROL_SIGNING_KEY),
+    (DelegationKeyPurpose.GATEWAY_NODE_HEALTH_READ_TRANSIT, SecretUseIntent.GATEWAY_NODE_HEALTH_READ_TRANSIT_SIGNING_KEY),
+    (DelegationKeyPurpose.WORKLOAD_NODE_HEALTH_READ, SecretUseIntent.WORKLOAD_NODE_HEALTH_READ_SIGNING_KEY),
+)
+
+
 class SecretProviderClientTests(unittest.TestCase):
+    def test_generation_accepts_exact_supported_purpose_intent_pairs(self) -> None:
+        for purpose, intent in _GENERATION_FAMILIES:
+            for replayed in (False, True):
+                with self.subTest(purpose=purpose, replayed=replayed):
+                    reference = SecretReference("secret://provider-a/keys/gateway-b")
+                    secret_id = canonical_provider_secret_id(reference)
+                    requests = []
+
+                    def handle(request):
+                        requests.append((request.method, request.url.path, json.loads(request.content)))
+                        payload = _generated_delegation_key_response(
+                            reference=reference, secret_id=secret_id, purpose=purpose, intent=intent)
+                        payload["replayed"] = replayed
+                        return _response(payload)
+
+                    with _client(handle) as client:
+                        result = client.generate_delegation_key(
+                            workspace_id="workspace-1", reference=reference, purpose=purpose,
+                            issuer="cpk-server", caller_subject="cpk-server", correlation_id="rotation-key-b")
+                    self.assertIsInstance(result, SecretProviderGeneratedDelegationKey)
+                    self.assertEqual(result.reference, reference)
+                    self.assertEqual(result.metadata.reference, reference)
+                    self.assertIs(result.purpose, purpose)
+                    self.assertEqual(result.metadata.labels["intent"], intent.value)
+                    self.assertEqual(result.public_key.key_id, "gateway-test-key")
+                    self.assertEqual(result.issuer, "cpk-server")
+                    self.assertEqual(result.correlation_id, "rotation-key-b")
+                    self.assertIs(result.replayed, replayed)
+                    self.assertEqual(requests, [("POST",
+                        f"/v1/workspaces/workspace-1/delegation-keys/{secret_id}/generate",
+                        {"secret_reference": reference.reference_id, "purpose": purpose.value,
+                         "issuer": "cpk-server", "caller_subject": "cpk-server",
+                         "correlation_id": "rotation-key-b"})])
+                    self.assertNotIn("PRIVATE", repr(result))
+
+    def test_generation_unsupported_purpose_refuses_before_credential_or_send(self) -> None:
+        for purpose in (DelegationKeyPurpose.WORKLOAD_NODE_CONTROL_SURFACE_READ,
+                        "gateway-probe", "unknown", None, []):
+            with self.subTest(purpose=purpose):
+                requests = []
+                with _client(lambda request: requests.append(request) or _response({})) as client:
+                    # A missing credential proves preflight precedes credential I/O.
+                    client.configuration.credential_file.unlink()
+                    with self.assertRaises(SecretProviderClientError) as raised:
+                        client.generate_delegation_key(
+                            workspace_id="workspace-1",
+                            reference=SecretReference("secret://provider-a/keys/gateway-b"),
+                            purpose=purpose, issuer="cpk-server", caller_subject="cpk-server",
+                            correlation_id="rotation-key-b")
+                self.assertIs(raised.exception.code, SecretProviderClientCode.MALFORMED_REQUEST)
+                self.assertIs(raised.exception.certainty, SecretProviderOutcomeCertainty.DEFINITE)
+                self.assertEqual(requests, [])
+
+    def test_generation_cross_family_or_substituted_response_is_uncertain(self) -> None:
+        reference = SecretReference("secret://provider-a/keys/gateway-b")
+        secret_id = canonical_provider_secret_id(reference)
+        for purpose, intent in _GENERATION_FAMILIES:
+            wrong_purpose, wrong_intent = next(pair for pair in _GENERATION_FAMILIES if pair[0] != purpose)
+            for field in ("intent", "purpose", "correlation_id", "issuer", "secret_reference",
+                          "workspace_id", "secret_id", "label_key_id", "fingerprint_sha256"):
+                with self.subTest(purpose=purpose, field=field):
+                    payload = _generated_delegation_key_response(
+                        reference=reference, secret_id=secret_id, purpose=purpose, intent=intent)
+                    if field == "intent":
+                        payload["metadata"]["labels"]["intent"] = wrong_intent.value
+                    elif field == "purpose":
+                        payload["purpose"] = wrong_purpose.value
+                        payload["metadata"]["labels"]["purpose"] = wrong_purpose.value
+                    elif field in ("workspace_id", "secret_id"):
+                        payload["metadata"][field] = "substituted"
+                    elif field == "label_key_id":
+                        payload["metadata"]["labels"]["key_id"] = "substituted"
+                    else:
+                        payload[field] = "0" * 64 if field == "fingerprint_sha256" else "substituted"
+                    requests = []
+                    with _client(lambda request: requests.append(request) or _response(payload)) as client:
+                        with self.assertRaises(SecretProviderClientError) as raised:
+                            client.generate_delegation_key(
+                                workspace_id="workspace-1", reference=reference, purpose=purpose,
+                                issuer="cpk-server", caller_subject="cpk-server", correlation_id="rotation-key-b")
+                    self.assertEqual(len(requests), 1)
+                    self.assertIs(raised.exception.code, SecretProviderClientCode.MALFORMED_RESPONSE)
+                    self.assertIs(raised.exception.certainty, SecretProviderOutcomeCertainty.UNCERTAIN)
+
+    def test_generation_lost_or_malformed_response_never_retries(self) -> None:
+        for failure in ("timeout", "malformed", "conflict"):
+            with self.subTest(failure=failure):
+                requests = []
+
+                def handle(request):
+                    requests.append(request)
+                    if failure == "timeout":
+                        raise httpx.ReadTimeout("provider-token private-value provider.internal", request=request)
+                    if failure == "conflict":
+                        return _response(_error("conflict", "generation-correlation-conflict"), 409)
+                    return _response({"outcome": "generated", "private": "private-value"})
+
+                with _client(handle) as client:
+                    with self.assertRaises(SecretProviderClientError) as raised:
+                        client.generate_delegation_key(
+                            workspace_id="workspace-1",
+                            reference=SecretReference("secret://provider-a/keys/gateway-b"),
+                            purpose=DelegationKeyPurpose.WORKLOAD_NODE_HEALTH_READ,
+                            issuer="cpk-server", caller_subject="cpk-server", correlation_id="rotation-key-b")
+                self.assertEqual(len(requests), 1)
+                expected = {"timeout": SecretProviderClientCode.TIMED_OUT,
+                            "malformed": SecretProviderClientCode.MALFORMED_RESPONSE,
+                            "conflict": SecretProviderClientCode.CONFLICT}[failure]
+                self.assertIs(raised.exception.code, expected)
+                self.assertIs(raised.exception.certainty,
+                    SecretProviderOutcomeCertainty.DEFINITE if failure == "conflict"
+                    else SecretProviderOutcomeCertainty.UNCERTAIN)
+                for protected in ("provider-token", "private-value", "provider.internal"):
+                    self.assertNotIn(protected, repr(raised.exception))
+                self.assertIsNone(raised.exception.__cause__)
+
+    def test_generated_result_rejects_unsupported_purpose(self) -> None:
+        reference = SecretReference("secret://provider-a/keys/gateway-b")
+        payload = _generated_delegation_key_response(
+            reference=reference, secret_id=canonical_provider_secret_id(reference))
+        with _client(lambda request: _response(payload)) as client:
+            result = client.generate_delegation_key(
+                workspace_id="workspace-1", reference=reference, purpose=DelegationKeyPurpose.GATEWAY_PROBE,
+                issuer="cpk-server", caller_subject="cpk-server", correlation_id="rotation-key-b")
+        unsupported = DelegationKeyPurpose.WORKLOAD_NODE_CONTROL_SURFACE_READ
+        metadata = replace(result.metadata, labels={**result.metadata.labels, "purpose": unsupported.value})
+        with self.assertRaises(SecretProviderClientError) as raised:
+            replace(result, purpose=unsupported, metadata=metadata)
+        self.assertIs(raised.exception.code, SecretProviderClientCode.MALFORMED_RESPONSE)
+        self.assertIs(raised.exception.certainty, SecretProviderOutcomeCertainty.UNCERTAIN)
+
+    def test_generation_reads_actual_provider_health_replay_responses(self) -> None:
+        from health_signing_fixtures import Provider, world
+
+        with tempfile.TemporaryDirectory() as directory:
+            value = world()
+            provider = Provider(self, directory, value)
+            for index, (resolution, grant) in enumerate(zip(
+                    value.resolutions, (value.transit, value.workload), strict=True)):
+                with self.subTest(purpose=grant.purpose):
+                    configuration = provider.resolver.bootstrap_registry.configuration_for(
+                        endpoint_reference=resolution.endpoint_reference,
+                        credential_reference=resolution.credential_reference)
+                    with ControlPlaneKitSecretsClient(configuration, transport=provider.resolver.transport) as client:
+                        # Deliberate protocol replay of fixture generation, not an automatic retry.
+                        result = client.generate_delegation_key(
+                            workspace_id="workspace-a", reference=resolution.reference,
+                            purpose=grant.purpose, issuer=grant.issuer, caller_subject="actor-a",
+                            correlation_id="generate-" + str(index))
+                    self.assertTrue(result.replayed)
+                    self.assertEqual(result.public_key, value.publics[index])
+                    self.assertEqual(result.metadata.labels["intent"], resolution.intent.value)
+                    self.assertEqual(result.purpose, grant.purpose)
+                    self.assertEqual(len(provider.calls), index + 1)
+
     def test_exact_version_revocation_uses_exact_path_and_returns_receipt(
         self,
     ) -> None:
@@ -820,6 +985,8 @@ def _generated_delegation_key_response(
     *,
     reference: SecretReference,
     secret_id: str,
+    purpose: DelegationKeyPurpose = DelegationKeyPurpose.GATEWAY_PROBE,
+    intent: SecretUseIntent = SecretUseIntent.GATEWAY_PROBE_SIGNING_KEY,
 ) -> dict[str, object]:
     public_key_pem = (
         "-----BEGIN PUBLIC KEY-----\n"
@@ -838,13 +1005,13 @@ def _generated_delegation_key_response(
                 status="active",
             ),
             "labels": {
-                "intent": "gateway.probe-signing-key",
-                "purpose": "gateway-probe",
+                "intent": intent.value,
+                "purpose": purpose.value,
                 "issuer": "cpk-server",
                 "key_id": "gateway-test-key",
             },
         },
-        "purpose": "gateway-probe",
+        "purpose": purpose.value,
         "issuer": "cpk-server",
         "correlation_id": "rotation-key-b",
         "key_id": "gateway-test-key",
