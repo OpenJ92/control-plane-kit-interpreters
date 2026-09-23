@@ -54,9 +54,9 @@ def admit_transit(value, credential, now=150, **changes):
 class HealthSigningPrerequisiteTests(unittest.TestCase):
     def test_actual_owner_provenance_and_candidate_origin(self):
         for package, coordinate in (
-            ("control-plane-kit-servers", "127b7cbf9ae33ae05edbb01e9b610b518e824b90"),
-            ("control-plane-kit-secrets", "8273b7de86dcaac254a8fcaca22b2769c5e16a4d"),
-            ("control-plane-kit-server-sdk", "2c5b588237fbe289c965029b4bc2f072715c42f3"),
+            ("control-plane-kit-servers", "77deffd9b32698a1deb2fa173f6c958e6c441f9b"),
+            ("control-plane-kit-secrets", "f781f59c2610c63be76716380f34e2d8c9fe8805"),
+            ("control-plane-kit-server-sdk", "d8b72e52c8ebca65bf21a2a2ae51df663b1c8a77"),
         ):
             metadata = json.loads(importlib.metadata.distribution(package).read_text("direct_url.json"))
             self.assertEqual(metadata["url"], f"https://github.com/OpenJ92/{package}/archive/{coordinate}.zip")

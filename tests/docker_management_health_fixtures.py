@@ -16,6 +16,7 @@ from control_plane_kit_server_sdk.verifier_keys import (
 )
 from control_plane_kit_servers_cpk_local_gateway.control_configuration import (
     GatewayControlConfiguration, gateway_control_configuration_artifact, gateway_control_declaration,
+    decode_gateway_control_configuration,
 )
 from control_plane_kit_servers_cpk_local_gateway.health_relay import GatewayHealthRelay
 from control_plane_kit_servers_cpk_local_gateway.health_relay_configuration import (
@@ -52,21 +53,26 @@ class ManagedWorld(World):
         core.resolve_management_observation(self.operation, self.current, self.desired,
             expected_operation=self.plan.activity(self.activity_id).operation)
 
-    def resign(self, *, target=None, runtime=None, declaration=None, gateway=None):
+    def resign(self, *, target=None, runtime=None, declaration=None, gateway=None,
+               request_id=None, attempt_id="attempt-a", kind=None):
         value = self.value
         value.target = value.target if target is None else target
         value.runtime = value.runtime if runtime is None else runtime
         value.declaration = value.declaration if declaration is None else declaration
         value.gateway = value.gateway if gateway is None else gateway
         value.request = replace(value.request, target=value.target, runtime_id=value.runtime,
-            declaration_identity=value.declaration.identity())
+            declaration_identity=value.declaration.identity(),
+            request_id=value.request.request_id if request_id is None else request_id,
+            kind=value.request.kind if kind is None else kind)
         fields = dict(target=value.target, runtime_id=value.runtime,
-            declaration_identity=value.declaration.identity(), request_digest=value.request.canonical_digest())
-        value.transit = replace(value.transit, gateway_node_id=value.gateway, **fields)
+            declaration_identity=value.declaration.identity(), request_digest=value.request.canonical_digest(),
+            request_id=value.request.request_id, kind=value.request.kind)
+        value.transit = replace(value.transit, gateway_node_id=value.gateway, attempt_id=attempt_id, **fields)
         value.workload = replace(value.workload, audience=core.workload_node_control_audience(value.target), **fields)
-        value.resolutions = tuple(replace(item, workspace_id=value.target.workspace_id.value)
+        value.resolutions = tuple(replace(item, workspace_id=value.target.workspace_id.value,
+            operation_id=attempt_id)
             for item in value.resolutions)
-        self.context = HealthSigningContext(value.request, "attempt-a", value.gateway,
+        self.context = HealthSigningContext(value.request, attempt_id, value.gateway,
             value.declaration, "transit-issuer", "workload-issuer")
         self.pair = Ed25519HealthCredentialPairSigner(RecordingResolver(value), lambda:self.now).sign(
             self.context, transit_grant=value.transit, workload_grant=value.workload,
@@ -139,3 +145,42 @@ class ManagedWorld(World):
             destination=self.destination(health_transport))
         values.update(changes)
         return await module.DockerManagedHealthObserver(client or self.client(health_transport)).observe(**values)
+
+
+class BootstrapWorld(ManagedWorld):
+    """Actual compiled stage and same-app relay/self SDK; no durable admission."""
+    def __init__(self, stage, runtime_kind=RuntimeKind.DOCKER):
+        super().__init__(runtime_kind=runtime_kind)
+        own = decode_gateway_control_configuration(self.artifacts[2].content.encode())
+        self.resign(target=own.target, declaration=own.declaration,
+            request_id="request-" + stage.value, attempt_id="attempt-" + stage.value)
+        binding = GatewayHealthTargetBinding("arbitrary-self-alias", own.target, own.runtime_id,
+            own.declaration, "http://gateway-a:8000")
+        configuration = GatewayHealthRelayConfiguration(own.target.workspace_id, own.target.node_id,
+            own.runtime_id, (binding,))
+        self.artifacts = (self.artifacts[0], gateway_health_relay_configuration_artifact(configuration), self.artifacts[2])
+        self.contract = gateway_health_source_runtime_contract(*self.artifacts)
+        gateway = self.desired.graph.node(own.target.node_id.value)
+        gateway = replace(gateway, configuration_artifacts=self.contract.configuration_artifacts)
+        self.desired = validate_graph(replace(self.desired.graph,
+            nodes={**self.desired.graph.nodes, gateway.node_id:gateway}))
+        self.desired.require_valid()
+        self.plan = core.compile_graph_activity_plan(self.current, self.desired)
+        if not self.plan.ready_for_execution:
+            raise AssertionError("actual bootstrap fixture must compile without review blockers")
+        activity, = (item for item in self.plan.activities if type(item.operation) is core.ObserveManagementBootstrap
+                     and item.operation.stage is stage)
+        self.activity_id, self.operation = activity.activity_id, activity.operation
+        core.resolve_management_observation(self.operation, self.current, self.desired,
+            expected_operation=self.plan.activity(self.activity_id).operation)
+        # The internal transport is wired only after constructing the same app.
+        # It never calls a substitute workload server or fabricates a response.
+        self.workload_transport = Transport(None)
+        relay = GatewayHealthRelay(configuration, gateway_health_transit_verifier_from_artifact(self.artifacts[0]),
+            clock=lambda:self.now, transport=self.workload_transport)
+        self.gateway_app = create_app(health_relay=relay, control_configuration=own, clock=lambda:self.now)
+        self.workload_transport.inner = httpx.ASGITransport(app=self.gateway_app)
+        self.gateway_transport = Transport(httpx.ASGITransport(app=self.gateway_app))
+
+    def destination(self, module):
+        return replace(super().destination(module), target_id="arbitrary-self-alias")
