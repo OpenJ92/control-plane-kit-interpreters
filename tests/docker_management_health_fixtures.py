@@ -69,7 +69,8 @@ class ManagedWorld(World):
             request_id=value.request.request_id, kind=value.request.kind)
         value.transit = replace(value.transit, gateway_node_id=value.gateway, attempt_id=attempt_id, **fields)
         value.workload = replace(value.workload, audience=core.workload_node_control_audience(value.target), **fields)
-        value.resolutions = tuple(replace(item, workspace_id=value.target.workspace_id.value)
+        value.resolutions = tuple(replace(item, workspace_id=value.target.workspace_id.value,
+            operation_id=attempt_id)
             for item in value.resolutions)
         self.context = HealthSigningContext(value.request, attempt_id, value.gateway,
             value.declaration, "transit-issuer", "workload-issuer")

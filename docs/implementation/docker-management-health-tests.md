@@ -75,3 +75,13 @@ eight missing-adapter failures and zero errors, alongside 26 green support tests
 The actual default product/compiler/resolver prerequisite succeeded. Log SHA256
 `33697a4a9e899c8e29c539259c8f4487b34be582f4ee3a955598eb7c9d98420c`.
 Source implementation preserves these target files unchanged.
+
+#164 checkpoint d196433 resolved the dependency conflict but all seven bootstrap
+methods errored while constructing signed fixtures. `resign` changed the context
+and transit attempt ID while leaving synthetic key-resolution `operation_id`
+from the base world. The existing signer correctly rejects that mismatch before
+resolving keys. The narrow fixture correction carries the same supplied attempt
+into both resolution grants; legacy default attempt-a and all signer/assertion
+semantics remain unchanged. Run 35806125926 is setup-only evidence (26 support
+and 373 existing package tests passed), not causal observer red. The corrected
+fixture must pass setup before missing observer behavior can be credited.
