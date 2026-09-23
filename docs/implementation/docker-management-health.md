@@ -1,4 +1,4 @@
-# Pinned Docker workload health (#162)
+# Pinned Docker workload and bootstrap health (#162, #164)
 
 `docker.management_health.DockerManagedHealthObserver` is an opt-in effect adapter
 between existing Core selection and the original signed gateway transport. It is
@@ -27,8 +27,9 @@ gateway, transit socket and complete named ingress. Mismatches return one closed
 redacted refusal before DNS/HTTP. The alias is receiving configuration rather than
 graph truth; the caller selects it, and the actual relay enforces its correlation.
 
-Only exact `ObserveNodeHealth` reaches that path. Bootstrap and legacy operations
-return unsupported before reading protected inputs. The new adapter cannot use
+Exact `ObserveNodeHealth` and the two protected bootstrap stages described below
+reach that path. Local-ready, connector-connected and legacy operations
+return unsupported before reading protected inputs. The adapter cannot use
 Docker exec, helpers, private workload access or a fallback route; it has no Docker
 client. Existing legacy helper dispatch remains unchanged and is mandatory parent
 #148 retirement work when production adoption occurs.
@@ -50,13 +51,14 @@ The [target companion](docker-management-health-tests.md) records provenance and
 fixture corrections. Corrected target `1886f085` passed its actual product/compiler
 setup and failed exactly eight missing-adapter assertions in ordinary
 CI35519295967/job106100477511; 365 existing tests and 26 support tests passed, zero
-errors. Source-green evidence remains pending.
+errors. The later #162 source was accepted at merge388282a after 26 support and
+373 package tests passed; the following import failure is historical.
 
 First source `06aec4c` ordinary CI35519558122/job106101171689 exposed an import
 defect before the eight new target bodies: the declaration/profile live in Core
 `node_control_surface_reads`, not `node_control`. The correction changes only that
 import and this record; all target bytes and dependency coordinates stay fixed.
-The 365 existing package tests and 26 support tests passed, but source is not green.
+The 365 existing package tests and 26 support tests passed in that failed run.
 
 Security/data/history: no new listener, credential family, Docker authority, socket
 recipient or durable mutation. Refusals contain only a closed code. The real

@@ -345,5 +345,9 @@ result = await observer.observe(
 These inputs come from the admitted caller; the adapter does not grant authority.
 It checks the selected graph side and complete management relationship before
 dispatch, then returns the existing correlated result or a fixed selection refusal.
-Bootstrap operations are unsupported. Production adoption and legacy helper
+The authenticated-management-path and gateway-ingress-ready bootstrap stages
+select the gateway's own READINESS/V2 surface through the same signed transport.
+Local-ready, connector-connected and legacy operations remain unsupported.
+Original plan pins and signed context remain required; this observer does not
+establish durable stage authority. Production adoption and legacy helper
 retirement remain parent #148 work. See the [implementation boundary](docs/implementation/docker-management-health.md).
