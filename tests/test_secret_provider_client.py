@@ -187,12 +187,12 @@ class SecretProviderClientTests(unittest.TestCase):
                     configuration = provider.resolver.bootstrap_registry.configuration_for(
                         endpoint_reference=resolution.endpoint_reference,
                         credential_reference=resolution.credential_reference)
-                    with ControlPlaneKitSecretsClient(configuration, transport=provider.resolver.transport) as client:
-                        # Deliberate protocol replay of fixture generation, not an automatic retry.
-                        result = client.generate_delegation_key(
-                            workspace_id="workspace-a", reference=resolution.reference,
-                            purpose=grant.purpose, issuer=grant.issuer, caller_subject="actor-a",
-                            correlation_id="generate-" + str(index))
+                    client = ControlPlaneKitSecretsClient(configuration, transport=provider.resolver.transport)
+                    # Deliberate protocol replay of fixture generation, not an automatic retry.
+                    result = client.generate_delegation_key(
+                        workspace_id="workspace-a", reference=resolution.reference,
+                        purpose=grant.purpose, issuer=grant.issuer, caller_subject="actor-a",
+                        correlation_id="generate-" + str(index))
                     self.assertTrue(result.replayed)
                     self.assertEqual(result.public_key, value.publics[index])
                     self.assertEqual(result.metadata.labels["intent"], resolution.intent.value)
