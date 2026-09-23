@@ -1,4 +1,4 @@
-"""Pinned workload selection followed by one original signed gateway dispatch.
+"""Pinned health selection followed by one original signed gateway dispatch.
 
 Construction is not admission. The caller owns accepted-record provenance,
 current authority, installed relay alias selection and durable result folding.
@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from control_plane_kit_core.node_control import (
-    NodeControlGraphReference, NodeControlGraphReferenceRole, NodeControlTarget,
+    NodeControlGraphReference, NodeControlGraphReferenceRole, NodeControlTarget, NodeHealthReadKind,
 )
 from control_plane_kit_core.node_control_surface_reads import (
     WorkloadNodeControlSurfaceDeclaration, WorkloadNodeControlSurfaceDeclarationProfile,
@@ -16,6 +16,7 @@ from control_plane_kit_core.node_health_reads import DelegatedWorkloadNodeHealth
 from control_plane_kit_core.node_health_transit import DelegatedGatewayNodeHealthReadTransitGrant
 from control_plane_kit_core.planning import (
     ActivityId, ActivityOperation, ActivityPlan, ObserveNodeHealth, PlanGraphSide,
+    ObserveManagementBootstrap, ManagementBootstrapStage,
     resolve_management_observation,
 )
 from control_plane_kit_core.runtime_effects import RuntimeEffectSource
@@ -62,9 +63,12 @@ class DockerManagedHealthObserver:
         workload_grant: DelegatedWorkloadNodeHealthReadGrant,
         destination: SelectedManagementGateway,
     ) -> DockerHealthObservationResult:
-        if type(operation) is not ObserveNodeHealth:
+        bootstrap = type(operation) is ObserveManagementBootstrap
+        if (type(operation) is not ObserveNodeHealth and not (bootstrap and operation.stage in (
+                ManagementBootstrapStage.AUTHENTICATED_MANAGEMENT_PATH,
+                ManagementBootstrapStage.GATEWAY_INGRESS_READY))):
             return DockerHealthObservationRefused(DockerHealthObservationRefusalCode.UNSUPPORTED_OPERATION)
-        # A bootstrap request must return above before any protected input access.
+        # Unsupported local/native/legacy requests never read protected inputs.
         try:
             if (type(plan) is not ActivityPlan or type(activity_id) is not ActivityId
                     or type(source) is not RuntimeEffectSource
@@ -81,18 +85,30 @@ class DockerManagedHealthObserver:
             roles = NodeControlGraphReferenceRole
             revision = (source.base_graph_id if operation.target.graph_side is PlanGraphSide.BASE_GRAPH
                 else source.desired_graph_id)
+            if bootstrap:
+                node = resolved.gateway_node
+                socket = resolved.gateway_readiness_socket
+                health_kind = NodeHealthReadKind.READINESS
+                surfaces = tuple(surface for surface in node.block_spec.control_surfaces
+                    if surface.provider_socket_name.value == socket and health_kind in surface.health_reads)
+                if len(surfaces) != 1:
+                    raise ValueError
+                surface, = surfaces
+            else:
+                node, surface = resolved.workload_node, resolved.workload_surface
+                socket, health_kind = operation.provider_socket_name, operation.health_kind
             target = NodeControlTarget(
                 NodeControlGraphReference(roles.WORKSPACE, source.workspace_id),
                 NodeControlGraphReference(roles.GRAPH_REVISION, revision),
-                NodeControlGraphReference(roles.NODE, resolved.workload_node.node_id),
-                NodeControlGraphReference(roles.PROVIDER_SOCKET, operation.provider_socket_name))
+                NodeControlGraphReference(roles.NODE, node.node_id),
+                NodeControlGraphReference(roles.PROVIDER_SOCKET, socket))
             runtime_id = NodeControlGraphReference(roles.RUNTIME, operation.target.runtime_id)
             gateway = NodeControlGraphReference(roles.NODE, resolved.gateway_node.node_id)
-            declaration = WorkloadNodeControlSurfaceDeclaration(resolved.workload_surface,
+            declaration = WorkloadNodeControlSurfaceDeclaration(surface,
                 WorkloadNodeControlSurfaceDeclarationProfile.V2)
             request = context.request
             if (request.target != target or request.runtime_id != runtime_id
-                    or request.kind is not operation.health_kind
+                    or request.kind is not health_kind
                     or request.declaration_identity != declaration.identity()
                     or context.declaration != declaration or context.gateway_node_id != gateway
                     or destination.ingress != resolved.ingress

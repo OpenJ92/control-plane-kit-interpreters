@@ -62,3 +62,26 @@ Security/data/history: no new listener, credential family, Docker authority, soc
 recipient or durable mutation. Refusals contain only a closed code. The real
 receivers still own signature admission. Public transport success does not prove
 bootstrap completion, production invocation, image qualification or live TLS/DNS.
+
+## Bootstrap observer extension (#164)
+
+The supported operation set now includes exact `ObserveManagementBootstrap`
+values for AUTHENTICATED_MANAGEMENT_PATH and GATEWAY_INGRESS_READY. Local-ready,
+connector-connected and legacy operations still refuse before protected inputs.
+The existing Core resolver compares the original operation with the selected
+plan activity and rederives graph/relation pins. For bootstrap, the selected
+node is the resolved gateway, the socket is its resolved readiness socket, and
+the declaration is the unique matching graph surface under V2. READINESS is
+required even when the caller supplies a valid signed liveness bundle.
+
+Both branches use the same authored revision/runtime/gateway/complete-ingress
+congruence checks and the same one-shot #147 dispatch with original context,
+pair and grants. The observer never fabricates an ObserveNodeHealth operation,
+changes the caller's alias, re-signs, retries or uses a private fallback. The
+existing API has no durable stage provenance: coherent whole-bundle substitution
+cannot be adjudicated here. Operations retains admission, attempts and folding.
+
+Corrected targets 0a8743a passed real setup and failed exactly seven unsupported
+bootstrap assertions, with zero errors, in ordinary CI35806391490. Meridian
+causal-red PASS is PR165 comment5787410141. Source validation is pending; later
+assertions and runtime witness phases require the full unchanged owner gate.
