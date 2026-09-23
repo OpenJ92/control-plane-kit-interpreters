@@ -42,9 +42,11 @@ placed in descriptors, history or logs. Python memory erasure is not promised.
 
 Tests join the actual selected SDK workload verifier and Servers gateway verifier,
 plus real local Secrets API provisioning and Interpreter authorized resolution.
-The old Interpreter generation response wrapper still accepts only probe intent;
-#158 owns that separate gap. Provisioning fixture keys through the real provider
-does not establish Interpreter generation-client support.
+The #158 generation-client tests separately verify both actual provider health
+responses and the explicit supported purpose-to-intent mapping. This closes the
+old probe-only response limitation without changing this fixture's ownership:
+signer fixtures still provision through the provider API directly. Protocol
+compatibility does not grant authority to provision keys or complete live setup.
 
 The selected configuration recording witness proves the material-to-SDK bytes and
 readonly mount specifications, including digest refusal. Its CPK bytes are static

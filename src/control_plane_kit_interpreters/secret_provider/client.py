@@ -26,6 +26,7 @@ from control_plane_kit_core.secrets import (
     SecretReference,
     SecretUseIntent,
     SecretValue,
+    health_signing_intent_for,
 )
 
 from .bootstrap import SecretProviderClientConfiguration
@@ -52,6 +53,24 @@ _METADATA_KEYS = frozenset(
     }
 )
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
+_GENERATION_INTENTS = MappingProxyType({
+    DelegationKeyPurpose.GATEWAY_PROBE: SecretUseIntent.GATEWAY_PROBE_SIGNING_KEY,
+    DelegationKeyPurpose.GATEWAY_NODE_CONTROL_TRANSIT:
+        SecretUseIntent.GATEWAY_NODE_CONTROL_TRANSIT_SIGNING_KEY,
+    DelegationKeyPurpose.WORKLOAD_NODE_CONTROL:
+        SecretUseIntent.WORKLOAD_NODE_CONTROL_SIGNING_KEY,
+    DelegationKeyPurpose.GATEWAY_NODE_HEALTH_READ_TRANSIT:
+        health_signing_intent_for(DelegationKeyPurpose.GATEWAY_NODE_HEALTH_READ_TRANSIT),
+    DelegationKeyPurpose.WORKLOAD_NODE_HEALTH_READ:
+        health_signing_intent_for(DelegationKeyPurpose.WORKLOAD_NODE_HEALTH_READ),
+})
+
+
+def _generation_intent(purpose: object) -> SecretUseIntent | None:
+    """Select only supported provider families, never infer support from enum membership."""
+    if not isinstance(purpose, DelegationKeyPurpose):
+        return None
+    return _GENERATION_INTENTS.get(purpose)
 
 
 class SecretProviderClientCode(StrEnum):
@@ -174,11 +193,12 @@ class SecretProviderGeneratedDelegationKey:
     replayed: bool
 
     def __post_init__(self) -> None:
+        expected_intent = _generation_intent(self.purpose)
         if (
             not isinstance(self.reference, SecretReference)
             or not isinstance(self.metadata, SecretProviderVersionMetadata)
             or self.metadata.reference != self.reference
-            or not isinstance(self.purpose, DelegationKeyPurpose)
+            or expected_intent is None
             or not isinstance(self.issuer, str)
             or not _IDENTIFIER.fullmatch(self.issuer)
             or not isinstance(self.correlation_id, str)
@@ -186,7 +206,7 @@ class SecretProviderGeneratedDelegationKey:
             or not isinstance(self.public_key, DelegationPublicKey)
             or type(self.replayed) is not bool
             or self.metadata.labels.get("intent")
-            != SecretUseIntent.GATEWAY_PROBE_SIGNING_KEY.value
+            != expected_intent.value
             or self.metadata.labels.get("purpose") != self.purpose.value
             or self.metadata.labels.get("issuer") != self.issuer
             or self.metadata.labels.get("key_id") != self.public_key.key_id
@@ -325,7 +345,7 @@ class ControlPlaneKitSecretsClient:
         _request_identity(workspace_id, caller_subject, correlation_id)
         _require_reference(reference)
         if (
-            not isinstance(purpose, DelegationKeyPurpose)
+            _generation_intent(purpose) is None
             or not isinstance(issuer, str)
             or not _IDENTIFIER.fullmatch(issuer)
         ):

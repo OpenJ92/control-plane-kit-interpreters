@@ -268,9 +268,14 @@ The same client exposes a closed delegation-key generation operation. It sends
 only workspace, `SecretReference`, purpose, issuer, caller, and correlation
 metadata to the provider. It validates the returned core `DelegationPublicKey`,
 fingerprint, provider version, and exact reference identity; it never generates
-or receives the private key in the generation response. Transport ambiguity is
-reported as uncertain so callers can safely retry the provider's
-correlation-idempotent operation.
+or receives the private key in the generation response. Supported purposes are
+gateway probe, gateway node-control transit, workload node-control, gateway
+node-health-read transit, and workload node-health-read. Each requires its exact
+Core signing-key intent. Surface-read and untyped purposes refuse before
+credential loading or HTTP; provider credential scope still governs permission.
+Transport ambiguity is reported as uncertain. The client never automatically
+retries generation; any deliberate replay requires separate authority and the
+original correlation, with provider idempotency remaining provider-owned.
 
 Exact version retirement uses the same bounded client boundary but remains
 distinct from whole-reference revocation. The client validates the exact
