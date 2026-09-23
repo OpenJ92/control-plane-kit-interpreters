@@ -164,9 +164,9 @@ class Provider:
             {grant.endpoint_reference: "http://provider.invalid"},
             {grant.credential_reference: credential_file})
         generated = []
-        # Provision through the real provider owner. The existing Interpreter
-        # generation response wrapper still accepts only the old probe intent;
-        # #155 exercises immediate-use resolution/signing, not generation.
+        # Provision through the real provider owner to isolate signing tests.
+        # #158 separately verifies the generation client against these actual
+        # health responses using deliberate original-correlation replay.
         for index, (resolution, grant) in enumerate(zip(value.resolutions,
                 (value.transit, value.workload), strict=True)):
             secret_id = canonical_provider_secret_id(resolution.reference)
