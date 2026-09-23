@@ -18,3 +18,14 @@ Issue #150 adopts reviewed Core merge `95452249d0340707a5cdffe737e34669e9d53165`
 The inspected Core interval adds optional health reads, V2 declarations/results, dedicated health request/result/transit contracts, routes and key purposes. Legacy surfaces default to no health reads and retain V1 shape; health declarations require the explicit health-checkable capability. Operations source is unchanged across this interval, and Interpreters has no Operations dependency. Availability of new enum values is not implemented health transport, signing or issuer-selection authority. Existing gateway canonical signing, key/audience binding, denial before I/O, Docker uncertainty/cleanup classification and secret-delivery behavior remain owned by their existing interpreter tests.
 
 Historically, #150/#154 retained Secrets `96e86dc3248d578780d64d5d7fc5d6359631d1d6`, whose base/test metadata introduced no conflicting Core requirement. #155's test-only adoption above supersedes that selection. Ordinary pinned-suite evidence includes the established local synthetic-secret witness and exact owning cleanup, with StartNode provider opt-in disabled. It does not establish external provider or published-product acceptance. Servers must separately adopt the accepted Interpreters commit through its coordinate generator; this change alone does not complete downstream consumption or authorize image publication.
+
+Issue #164 resumes after the separately reviewed SDK #34 and Secrets #33
+adoptions: the test extra now selects Secrets
+`f781f59c2610c63be76716380f34e2d8c9fe8805`, which selects SDK
+`d8b72e52c8ebca65bf21a2a2ae51df663b1c8a77` and the same Core
+`e074bda49fa0c46f420d675e45a93f787b460c02` as this package. The existing
+health-signing provenance test advances both installed-owner expectations.
+The earlier #155/#149 coordinates above are historical. This corrects the
+incompatible direct Core URLs that stopped package collection; the ordinary
+owner gate must still establish genuine observer target-red. No installer,
+fixture, functional source, unrelated pin or authority changes accompany it.
