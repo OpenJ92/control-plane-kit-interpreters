@@ -588,6 +588,8 @@ class DockerSdkClientTests(unittest.TestCase):
                 "create_volume",
                 "from_authority",
                 "inspect_container",
+                "inspect_connector_container",
+                "inspect_connector_image",
                 "inspect_authority_provider_facts",
                 "inspect_image",
                 "inspect_network",
