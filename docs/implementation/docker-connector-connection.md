@@ -58,6 +58,12 @@ red log SHA256: d2e3f2e81e259b30ace37c7b30cd339d39574fd9884aa9313dd26db3a6704def
 The scaffold is now replaced with source; exact source-green evidence remains
 pending on PR168. No claim of live deployment or selected product adoption.
 
+First source39238ac ran all400 package tests: the14 new methods passed, while
+the existing exact public SDK method inventory required adding the two planned
+projection methods. Its set-equality assertion remains strict; no behavioral
+assertion was removed. This is source/test API inventory alignment, not a new
+contract or unrelated apparatus repair.
+
 ## Handoff
 
 Operations #1860 must change both tunnel delivery generation and recognition to
