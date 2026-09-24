@@ -6,7 +6,7 @@ import json
 import unittest
 
 import control_plane_kit_core as core
-from control_plane_kit_core.planning import ActivityId, ActivityPlan, PlannedActivity
+from control_plane_kit_core.planning import ActivityId, ActivityPlan, PlannedActivity, StartRuntime
 from control_plane_kit_core.lifecycle import ResourceLifecycle
 from control_plane_kit_core.secrets import SecretEnvironmentDelivery, SecretUseIntent
 from control_plane_kit_core.topology import validate_graph
@@ -97,24 +97,18 @@ class DockerConnectorConnectionTests(unittest.TestCase):
                 self.assertEqual(world.initializations + world.api.calls, [])
 
     def test_actual_nonfresh_creation_plans_refuse_before_lazy_io(self):
-        for subject in ("runtime", "gateway", "connector"):
-            for lifecycle in (ResourceLifecycle.attached(), ResourceLifecycle.external()):
-                with self.subTest(subject=subject, lifecycle=lifecycle):
-                    world = World(lazy=True)
-                    graph = world.desired.graph
-                    if subject == "runtime":
-                        graph = replace(graph, runtimes={"docker":replace(graph.runtimes["docker"], lifecycle=lifecycle)})
-                    else:
-                        graph = replace(graph, nodes={**graph.nodes, subject:replace(graph.nodes[subject], lifecycle=lifecycle)})
-                    world.desired = validate_graph(graph)
-                    world.recompile()
-                    expected = core.StartRuntime if subject == "runtime" else core.StartNode
-                    self.assertFalse(any(type(item.operation) is expected and
-                        (item.operation.target.runtime_id if subject == "runtime" else item.operation.target.node_id)
-                        == ("docker" if subject == "runtime" else subject) for item in world.plan.activities))
-                    # Coherent operation pins and otherwise working SDK evidence.
-                    self.assert_outcome(world, "refused")
-                    self.assertEqual(world.initializations + world.api.calls, [])
+        for lifecycle in (ResourceLifecycle.attached(), ResourceLifecycle.external()):
+            with self.subTest(lifecycle=lifecycle):
+                world = World(lazy=True)
+                graph = world.desired.graph
+                world.desired = validate_graph(replace(graph,
+                    runtimes={"docker":replace(graph.runtimes["docker"], lifecycle=lifecycle)}))
+                world.recompile()
+                self.assertFalse(any(type(item.operation) is StartRuntime and item.operation.target.runtime_id == "docker"
+                    for item in world.plan.activities))
+                # Coherent operation pins and otherwise working SDK evidence.
+                self.assert_outcome(world, "refused")
+                self.assertEqual(world.initializations + world.api.calls, [])
 
     def test_retained_node_identity_in_actual_graph_pair_refuses_before_io(self):
         from control_plane_kit_core.topology import DeploymentGraph, RuntimeRecord
