@@ -49,8 +49,14 @@ not a workflow/admission emulator. They preserve prior signed-observer guards an
 SDK/runtime laws. Covered cases include original selection denial before lazy I/O,
 file-only delivery, owned name/image/network, launch/environment/mount tampering,
 latest output strictness, nanosecond boundaries, late reads and final replacement.
-The interface scaffold deliberately raises NotImplementedError; target-red and
-source-green evidence will be recorded on the PR through normal owning Docker CI.
+Initial target6cded83 reached82 intended NotImplementedError cases in normal
+owning CI36025322221. Independent review found three isolated fixture-law gaps;
+corrected target332a119 passed target review5817814885 and reached84 intended
+NotImplementedError cases in CI36025736670/job107721673826. Both runs had400
+package tests and26 policy tests; no unrelated exception/failure type. Corrected
+red log SHA256: d2e3f2e81e259b30ace37c7b30cd339d39574fd9884aa9313dd26db3a6704def.
+The scaffold is now replaced with source; exact source-green evidence remains
+pending on PR168. No claim of live deployment or selected product adoption.
 
 ## Handoff
 

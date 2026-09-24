@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import json
+import math
 import os
 import re
 from io import BytesIO
@@ -230,6 +231,37 @@ class DockerSdkImageInspection:
 
 
 @dataclass(frozen=True, repr=False)
+class DockerSdkConnectorSample:
+    start: str
+    end: str
+    exit_code: int
+    output: str
+
+
+@dataclass(frozen=True, repr=False)
+class DockerSdkConnectorInspection:
+    container_id: str
+    name: str
+    image_id: str
+    labels: tuple[tuple[str, str], ...]
+    launch_digest: str
+    network: str
+    secret_mount: "DockerSdkSecretMount"
+    started_at: str
+    sample: DockerSdkConnectorSample
+
+
+@dataclass(frozen=True, repr=False)
+class DockerSdkConnectorImage:
+    image_id: str
+    launch_digest: str
+
+
+class DockerSdkConnectorEvidenceError(ValueError):
+    """Closed postdecode projection failure; contains no provider material."""
+
+
+@dataclass(frozen=True, repr=False)
 class DockerSdkSecretFileInspection:
     content_digest: str
     uid: int
@@ -425,6 +457,34 @@ class DockerSdkClient:
         if self.client is None:
             self.client = self._connect()
         return self.client
+
+    def _connector_api(self) -> Any:
+        # The normal factory may negotiate version before this check. Its
+        # supported SDK default is finite; injected clients must prove theirs.
+        api = self._client().api
+        timeout = getattr(api, "timeout", None)
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 60:
+            raise DockerSdkConnectorEvidenceError("connector acquisition configuration is invalid")
+        return api
+
+    def inspect_connector_container(self, identity: str) -> DockerSdkConnectorInspection:
+        try:
+            return _connector_container(self._connector_api().inspect_container(identity))
+        except Exception:
+            raise DockerSdkConnectorEvidenceError("connector evidence is unavailable") from None
+
+    def inspect_connector_image(self, reference: str, *, token_path: str) -> DockerSdkConnectorImage:
+        try:
+            attrs = _connector_mapping(self._connector_api().inspect_image(reference))
+            identity = attrs["Id"]
+            if not _is_canonical_sha256_image_id(identity):
+                raise ValueError
+            digests = _connector_strings(attrs["RepoDigests"], 32)
+            if not matches_image_reference(reference, digests):
+                raise ValueError
+            return DockerSdkConnectorImage(identity, _connector_launch(attrs["Config"], token_path=token_path))
+        except Exception:
+            raise DockerSdkConnectorEvidenceError("connector image evidence is unavailable") from None
 
     def uses_local_socket(self, path: str) -> bool:
         """Prove the active SDK transport/path, not daemon-host provenance.
@@ -1334,6 +1394,117 @@ def _observed_supplementary_groups(attrs: object) -> tuple[str, ...] | None:
     if type(groups) is not list or any(type(group) is not str or not group for group in groups):
         return None
     return tuple(groups)
+
+
+def _connector_text(value: Any, limit: int = 4096) -> str:
+    if type(value) is not str or len(value) > limit or len(value.encode("utf-8")) > limit or "\x00" in value:
+        raise ValueError
+    return value
+
+
+def _connector_mapping(value: Any, limit: int = 128) -> dict:
+    if type(value) is not dict or len(value) > limit or any(type(key) is not str for key in value):
+        raise ValueError
+    return value
+
+
+def _connector_strings(value: Any, count: int = 64) -> tuple[str, ...]:
+    if type(value) is not list or len(value) > count:
+        raise ValueError
+    return tuple(_connector_text(item) for item in value)
+
+
+def _connector_launch(raw: Any, *, token_path: str | None = None) -> str:
+    """Hash only after exact bounded validation; never truncate candidate data.
+
+    Image mode checks reader-v1 program and overlays the sole admitted token
+    path. Container mode hashes actual launch. Environment order is immaterial;
+    argv order and every environment value remain material to equality.
+    """
+    config = _connector_mapping(raw)
+    entrypoint = _connector_strings(config["Entrypoint"])
+    command = _connector_strings(config["Cmd"])
+    user = _connector_text(config["User"], 128)
+    cwd = _connector_text(config["WorkingDir"])
+    stop = _connector_text(config["StopSignal"], 32)
+    shell = () if config.get("Shell") is None else _connector_strings(config["Shell"])
+    if config.get("Volumes") not in (None, {}):
+        raise ValueError
+    environment = {}
+    for item in _connector_strings(config["Env"], 128):
+        name, separator, value = item.partition("=")
+        if not separator or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None or name in environment:
+            raise ValueError
+        environment[name] = value
+    health = _connector_mapping(config["Healthcheck"], 6)
+    if not {"Test", "Interval", "Timeout", "Retries"} <= set(health) <= {
+            "Test", "Interval", "Timeout", "Retries", "StartPeriod", "StartInterval"}:
+        raise ValueError
+    probe = _connector_strings(health["Test"])
+    timing = []
+    for key in ("Interval", "Timeout", "Retries", "StartPeriod", "StartInterval"):
+        value = health.get(key, 0)
+        if type(value) is not int or not 0 <= value <= 2**63 - 1:
+            raise ValueError
+        timing.append(value)
+    if token_path is not None:
+        if (entrypoint != ("cloudflared", "--no-autoupdate", "--metrics", "127.0.0.1:20241")
+                or command != ("tunnel", "run") or user != "65532:65532" or stop != "SIGTERM"
+                or probe != ("CMD", "python", "-m", "control_plane_kit_servers_cloudflared_connector.readiness")
+                or timing != [5_000_000_000, 3_000_000_000, 1, 0, 0]
+                or shell or cwd or "TUNNEL_TOKEN" in environment or "TUNNEL_TOKEN_FILE" in environment):
+            raise ValueError
+        environment["TUNNEL_TOKEN_FILE"] = _connector_text(token_path)
+    payload = (entrypoint, command, user, cwd, stop, shell, environment, probe, timing)
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _connector_container(raw: Any) -> DockerSdkConnectorInspection:
+    attrs = _connector_mapping(raw)
+    identity = _connector_text(attrs["Id"], 64)
+    if re.fullmatch(r"[0-9a-f]{64}", identity) is None or not _is_canonical_sha256_image_id(attrs["Image"]):
+        raise ValueError
+    name = _connector_text(attrs["Name"], 256)
+    state = _connector_mapping(attrs["State"])
+    if state["Running"] is not True or state["Paused"] is not False or state["Restarting"] is not False:
+        raise ValueError
+    started_at = _connector_text(state["StartedAt"], 40)
+    config = _connector_mapping(attrs["Config"])
+    labels = _connector_mapping(config["Labels"])
+    labels = tuple(sorted((_connector_text(key, 256), _connector_text(value)) for key, value in labels.items()))
+    launch = _connector_launch(config)
+    argv = _connector_strings(config["Entrypoint"]) + _connector_strings(config["Cmd"])
+    if not argv or _connector_text(attrs["Path"]) != argv[0] or _connector_strings(attrs["Args"]) != argv[1:]:
+        raise ValueError
+    host = _connector_mapping(attrs["HostConfig"])
+    network = _connector_text(host["NetworkMode"], 256)
+    networks = _connector_mapping(_connector_mapping(attrs["NetworkSettings"])["Networks"], 1)
+    if tuple(networks) != (network,):
+        raise ValueError
+    if any(host.get(key) not in (None, [], {}) for key in ("Binds", "Tmpfs", "VolumesFrom")):
+        raise ValueError
+    configured, observed = host["Mounts"], attrs["Mounts"]
+    if type(configured) is not list or type(observed) is not list or len(configured) != 1 or len(observed) != 1:
+        raise ValueError
+    _connector_mapping(configured[0])
+    _connector_mapping(observed[0])
+    mounts = _readonly_secret_mounts(attrs)
+    if len(mounts) != 1:
+        raise ValueError
+    mount, = mounts
+    _connector_text(mount.target_path)
+    _connector_text(mount.volume_name, 256)
+    log = _connector_mapping(state["Health"])["Log"]
+    if type(log) is not list or not 1 <= len(log) <= 32:
+        raise ValueError
+    latest = _connector_mapping(log[-1], 4)
+    if set(latest) != {"Start", "End", "ExitCode", "Output"} or type(latest["ExitCode"]) is not int:
+        raise ValueError
+    if latest["ExitCode"] not in (0, 1):
+        raise ValueError
+    sample = DockerSdkConnectorSample(_connector_text(latest["Start"], 40), _connector_text(latest["End"], 40),
+        latest["ExitCode"], _connector_text(latest["Output"], 256))
+    return DockerSdkConnectorInspection(identity, name, attrs["Image"], labels, launch, network, mount, started_at, sample)
 
 
 def _readonly_secret_mounts(attrs: Any) -> tuple[DockerSdkSecretMount, ...]:

@@ -35,6 +35,7 @@ from control_plane_kit_core.runtime_effects import (
 )
 from control_plane_kit_core.secrets import (
     AuthorizedSecretResolver,
+    SecretFileDelivery,
     SecretReference,
     SecretResolutionCode,
     SecretResolutionError,
@@ -1501,7 +1502,7 @@ def _container_environment(
 def _secret_volume_name(
     request: RuntimeEffectRequest,
     node_id: str,
-    secret: SecretFileRuntimeMaterial,
+    secret: SecretFileRuntimeMaterial | SecretFileDelivery,
 ) -> str:
     return _volume_name(
         request,
