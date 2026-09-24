@@ -39,7 +39,7 @@ class DockerConnectorConnectionTests(unittest.TestCase):
                     self.assertEqual(result.sample_end, "2026-09-24T12:00:01.000000001Z")
 
     def test_original_selection_mismatches_refuse_before_lazy_initialization(self):
-        for case in ("stage", "runtime", "graph", "relation", "plan", "activity", "authority", "product", "image", "metadata", "ingress", "retained", "base"):
+        for case in ("stage", "runtime", "graph", "relation", "plan", "activity", "authority", "other-authority", "product", "image", "metadata", "stale-metadata-pin", "ingress", "retained", "base"):
             with self.subTest(case=case):
                 world, changes = World(lazy=True), {}
                 request, op = world.request, world.request.operation
@@ -50,14 +50,21 @@ class DockerConnectorConnectionTests(unittest.TestCase):
                 elif case == "plan": changes["plan"] = ActivityPlan((PlannedActivity(request.activity_id, replace(op, stage=core.ManagementBootstrapStage.GATEWAY_INGRESS_READY)),))
                 elif case == "activity": request = replace(request, activity_id=ActivityId("other"))
                 elif case == "authority": request = replace(request, authority_ref=None)
+                elif case == "other-authority": request = replace(request, authority_ref=replace(request.authority_ref, reference_id="other"))
                 elif case == "product": request = replace(request, products=())
                 elif case == "image":
                     material = replace(world.material, product=replace(world.material.product,
                         image=replace(world.material.product.image, digest="sha256:" + "f" * 64)))
                     request = replace(request, products=(material,))
-                elif case == "metadata":
+                elif case in ("metadata", "stale-metadata-pin"):
                     node = replace(world.desired.graph.nodes["connector"], metadata={})
                     changes["desired"] = validate_graph(replace(world.desired.graph, nodes={**world.desired.graph.nodes, "connector": node}))
+                    if case == "metadata":
+                        coherent = core.compile_graph_activity_plan(world.current, changes["desired"])
+                        activity, = (item for item in coherent.activities if type(item.operation) is core.ObserveManagementBootstrap
+                            and item.operation.stage is core.ManagementBootstrapStage.CONNECTOR_CONNECTED)
+                        changes["plan"] = coherent
+                        request = replace(request, operation=activity.operation, activity_id=activity.activity_id)
                 elif case == "ingress": changes["desired"] = validate_graph(replace(world.desired.graph,
                     public_ingresses=(replace(world.ingress, hostname="other.example.invalid"),)))
                 elif case == "retained": changes["current"] = world.desired
@@ -154,6 +161,11 @@ class DockerConnectorConnectionTests(unittest.TestCase):
         for container in world.containers:
             container["Config"]["Env"].reverse()
         self.assert_outcome(world, "connected")
+        world = World()
+        for container in world.containers:
+            # Same lawful key/value: a dict conversion would otherwise hide it.
+            container["Config"]["Env"].append(container["Config"]["Env"][0])
+        self.assert_outcome(world, "unknown")
         for key, value in (("Healthcheck", {"Test": ["CMD", "true"]}), ("Entrypoint", ["sh"])):
             world = World()
             world.image["Config"][key] = value
@@ -207,6 +219,9 @@ class DockerConnectorConnectionTests(unittest.TestCase):
         current["Output"] = current["Output"].rstrip().ljust(256)
         world.mutate("State", "Health", {"Log":[current]})
         self.assert_outcome(world, "connected")
+        current["Output"] += " "
+        world.mutate("State", "Health", {"Log":[current]})
+        self.assert_outcome(world, "unknown")
 
     def test_precise_incarnation_freshness_and_nonfuture_boundaries(self):
         cases = [("2026-09-24T11:59:51Z", "2026-09-24T11:59:52Z", "connected"),

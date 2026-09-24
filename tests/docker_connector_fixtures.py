@@ -88,6 +88,7 @@ class World:
         self.current = validate_graph(DeploymentGraph("native"))
         self.desired = validate_graph(DeploymentGraph("native", nodes={"gateway": gateway, "connector": connector},
             runtimes={"docker": RuntimeRecord("docker", RuntimeKind.DOCKER, ("gateway", "connector"),
+                authority_ref=RuntimeAuthorityReference("docker-authority"),
                 management=core.RuntimeManagement("gateway", "management"))}, public_ingresses=(self.ingress,)))
         self.current.require_valid()
         self.desired.require_valid()
