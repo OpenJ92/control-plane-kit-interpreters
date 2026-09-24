@@ -19,7 +19,10 @@ environment token delivery. Source availability is not image publication or live
 adoption. Default dispatch and signed management observer guards are unchanged.
 
 Selection uses Core's actual compiler/resolver and existing Docker ownership/name
-derivation. Bounded SDK projection precedes comparison of effective launch,
+derivation. The plan must equal the actual graph-pair compilation, with new
+runtime, gateway, connector and ingress identities and actual StartRuntime,
+both StartNode and AllocatePublicIngress obligations. A newly named attached or
+external runtime is not fresh. Bounded SDK projection precedes comparison of effective launch,
 environment, mounts and current process incarnation. Environment key order is
 irrelevant; duplicate names, malformed/truncated values and extra overrides are
 rejected before hashing. Ordered argv is preserved. The newest completed sample
@@ -30,8 +33,9 @@ configuration, sample output or exception diagnostics in public results.
 
 Passive samples may precede observation admission. Require
 StartedAt <= Start <= End <= acceptance time and End age <=10 seconds, retaining
-nanosecond precision. There is no invented native grant/expiry. Signed health
-windows remain distinct. This is point-in-time evidence, not an atomic or
+nanosecond precision. Native timestamps reject invalid zone components before
+Python can normalize them. There is no invented native grant/expiry; signed-stage
+health windows remain unchanged and distinct. This is point-in-time evidence, not an atomic or
 continuing attestation. Unknown/disconnected never becomes fabricated readiness.
 
 Three semantic SDK lookups: container by owned name, pinned image, same container
@@ -63,6 +67,20 @@ the existing exact public SDK method inventory required adding the two planned
 projection methods. Its set-equality assertion remains strict; no behavioral
 assertion was removed. This is source/test API inventory alignment, not a new
 contract or unrelated apparatus repair.
+
+Meridian source HOLD5818004839 found the incomplete fresh-profile guard and
+invalid-offset normalization. Three focused regression methods were added. The
+first checkpoint7bb5a3a was mixed evidence (3 intended failures,6 fixture/compiler
+errors). Corrected6194a5b owning CI36027819235/job107728725277 ran403 package
+tests with exactly5 intended assertion failures, zero errors;26 policy tests
+passed. SHA256:2da12bb14d35e7473ed069835dff7bf65c207d1abe55794ba43c51d31dd52160.
+Source now checks the actual full creation plan and explicit timezone components.
+
+The attempted attached/external *node* fixtures hit an existing selected Core
+compiler `_add_dependencies` KeyError and are outside this adapter's validated
+profile. Supported attached/external *runtime* cases and actual retained node
+identities remain executable regressions. The compiler limitation is preserved
+on Core1860comment5818088268; it was not repaired, skipped or marked xfail here.
 
 ## Handoff
 

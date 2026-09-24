@@ -12,7 +12,8 @@ from uuid import UUID
 
 from control_plane_kit_core.planning import (
     ActivityPlan, ManagementBootstrapStage, ObserveManagementBootstrap,
-    PlanGraphSide, resolve_management_observation,
+    PlanGraphSide, resolve_management_observation, compile_graph_activity_plan,
+    AllocatePublicIngress, StartNode, StartRuntime,
 )
 from control_plane_kit_core.products import ProductReference
 from control_plane_kit_core.runtime_effects import RuntimeEffectRequest
@@ -74,6 +75,19 @@ class DockerConnectorConnectionObserver:
                     or runtime_id in current.graph.runtimes):
                 raise ValueError
             node = resolved.connector_node
+            gateway_id, ingress_id = resolved.gateway_node.node_id, resolved.ingress.ingress_id
+            # Freshness belongs to the complete graph pair and real creation
+            # obligations, not merely a new runtime ID or the observation pin.
+            compiled = compile_graph_activity_plan(current, desired)
+            operations = tuple(item.operation for item in compiled.activities)
+            if (plan != compiled or not compiled.ready_for_execution
+                    or gateway_id in current.graph.nodes or node.node_id in current.graph.nodes
+                    or any(item.ingress_id == ingress_id for item in current.graph.public_ingresses)
+                    or not any(type(item) is StartRuntime and item.target.runtime_id == runtime_id for item in operations)
+                    or not all(any(type(item) is StartNode and item.target.node_id == identity for item in operations)
+                        for identity in (gateway_id, node.node_id))
+                    or not any(type(item) is AllocatePublicIngress and item.target.ingress_id == ingress_id for item in operations)):
+                raise ValueError
             material, = request.products
             contract = material.product.runtime_contract
             if (material.node_id != node.node_id or material.runtime_id != runtime_id
@@ -144,6 +158,10 @@ def _timestamp_ns(value):
     if match is None:
         raise ValueError
     whole, fraction, zone = match.groups()
+    # fromisoformat normalizes offsets such as +00:60; reject malformed RFC3339
+    # components before conversion so normalization cannot manufacture freshness.
+    if zone != "Z" and (int(zone[1:3]) > 23 or int(zone[4:6]) > 59):
+        raise ValueError
     parsed = datetime.fromisoformat(whole + ("+00:00" if zone == "Z" else zone))
     return _clock_ns(parsed) + int((fraction or "").ljust(9, "0"))
 
