@@ -137,3 +137,11 @@ class World:
     def mutate(self, section, key, value, *, final_only=False):
         for container in self.containers[1:] if final_only else self.containers:
             container[section][key] = deepcopy(value)
+
+    def recompile(self):
+        self.current.require_valid()
+        self.desired.require_valid()
+        self.plan = core.compile_graph_activity_plan(self.current, self.desired)
+        activity, = (item for item in self.plan.activities if type(item.operation) is core.ObserveManagementBootstrap
+                     and item.operation.stage is core.ManagementBootstrapStage.CONNECTOR_CONNECTED)
+        self.request = replace(self.request, operation=activity.operation, activity_id=activity.activity_id)

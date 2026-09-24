@@ -7,6 +7,7 @@ import unittest
 
 import control_plane_kit_core as core
 from control_plane_kit_core.planning import ActivityId, ActivityPlan, PlannedActivity
+from control_plane_kit_core.lifecycle import ResourceLifecycle
 from control_plane_kit_core.secrets import SecretEnvironmentDelivery, SecretUseIntent
 from control_plane_kit_core.topology import validate_graph
 from control_plane_kit_core.types import RuntimeKind
@@ -93,6 +94,38 @@ class DockerConnectorConnectionTests(unittest.TestCase):
                     from control_plane_kit_core.products import PublicStaticEnvironmentBinding
                     material = replace(material, public_environment=(PublicStaticEnvironmentBinding("PYTHONPATH", "/tmp/PRIVATE-CANDIDATE"),))
                 self.assert_outcome(world, "refused", request=replace(world.request, products=(material,)))
+                self.assertEqual(world.initializations + world.api.calls, [])
+
+    def test_actual_nonfresh_creation_plans_refuse_before_lazy_io(self):
+        for subject in ("runtime", "gateway", "connector"):
+            for lifecycle in (ResourceLifecycle.attached(), ResourceLifecycle.external()):
+                with self.subTest(subject=subject, lifecycle=lifecycle):
+                    world = World(lazy=True)
+                    graph = world.desired.graph
+                    if subject == "runtime":
+                        graph = replace(graph, runtimes={"docker":replace(graph.runtimes["docker"], lifecycle=lifecycle)})
+                    else:
+                        graph = replace(graph, nodes={**graph.nodes, subject:replace(graph.nodes[subject], lifecycle=lifecycle)})
+                    world.desired = validate_graph(graph)
+                    world.recompile()
+                    expected = core.StartRuntime if subject == "runtime" else core.StartNode
+                    self.assertFalse(any(type(item.operation) is expected and
+                        (item.operation.target.runtime_id if subject == "runtime" else item.operation.target.node_id)
+                        == ("docker" if subject == "runtime" else subject) for item in world.plan.activities))
+                    # Coherent operation pins and otherwise working SDK evidence.
+                    self.assert_outcome(world, "refused")
+                    self.assertEqual(world.initializations + world.api.calls, [])
+
+    def test_retained_node_identity_in_actual_graph_pair_refuses_before_io(self):
+        from control_plane_kit_core.topology import DeploymentGraph, RuntimeRecord
+        for subject in ("gateway", "connector"):
+            with self.subTest(subject=subject):
+                world = World(lazy=True)
+                retained = replace(world.desired.graph.nodes[subject], runtime_id="old-runtime")
+                world.current = validate_graph(DeploymentGraph("native", nodes={subject:retained},
+                    runtimes={"old-runtime":RuntimeRecord("old-runtime", RuntimeKind.DOCKER, (subject,))}))
+                world.recompile()
+                self.assert_outcome(world, "refused")
                 self.assertEqual(world.initializations + world.api.calls, [])
 
     def test_sdk_timeout_conformance_injected_eager_and_lazy(self):
@@ -246,6 +279,15 @@ class DockerConnectorConnectionTests(unittest.TestCase):
             world.after_read = advance
             self.assert_outcome(world, "unknown")
             self.assertEqual(len(world.api.calls), slow_read)
+
+    def test_invalid_offset_is_not_normalized_into_fresh_evidence(self):
+        for zone, outcome in (("+00:60", "unknown"), ("+01:00", "connected")):
+            with self.subTest(zone=zone):
+                world = World()
+                world.mutate("State", "Health", {"Log":[sample(
+                    start="2026-09-24T13:00:00.000000001" + zone,
+                    end="2026-09-24T13:00:01.000000001" + zone)]})
+                self.assert_outcome(world, outcome)
 
     def test_final_id_incarnation_ownership_launch_and_newest_sample_must_be_unchanged(self):
         for case in ("id", "started", "dead", "labels", "env", "new-failure", "new-success"):
