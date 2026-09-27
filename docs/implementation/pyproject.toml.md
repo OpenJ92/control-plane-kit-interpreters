@@ -1,17 +1,17 @@
 Source: [pyproject.toml](../../pyproject.toml).
 
-Current #169 adoption selects Core `f1e6cf2420bf2ec381aab745f462d4e64baef5fc`
-and test-only Secrets `43b742d1ecb4b7b1fbabb62890a4045afa7a2fec`. That reviewed
-Secrets #36 merge selects SDK `22f1267bde5015efe2fea4f07be4ce8ddf83bc0c`
+Current #171 adoption selects Core `79c1a8bfe049ab17604466da00d43a1258ae33f9`
+and test-only Secrets `436f21ec957c772123156ded668002c681ce4c50`. That reviewed
+Secrets #38 merge selects SDK `06e9346d7257ce29dcfebc74ddcb4c11e6525cb5`
 and the identical Core URL. Existing exact metadata/installed-provenance
 expectations move together; functional source, provider opt-in and the ordinary
 Docker gate are unchanged. The test-only Servers installation remains
 `77deffd9b32698a1deb2fa173f6c958e6c441f9b` with `--no-deps`, as declared in
 Dockerfile; earlier fixture and dependency coordinates below are historical.
-Core's e074→f1e delta concerns operations reobserve/waiting/restart and saga
-journal handling. Those owners are not implemented or imported here; this
-adoption preserves existing health signing, gateway/managed observation and
-native connection effects. Only the ordinary owning gate can establish package
+Core adds the pure shared-wrapper configuration contract and SDK adds receiving
+setup helpers. Existing explicit health signing and gateway verifier call sites
+remain unchanged. This adoption preserves the existing health signing,
+gateway/managed observation and native connection effects. Only the ordinary owning gate can establish package
 compatibility. Servers must separately adopt this reviewed merge.
 
 The early compatibility slice of #149 selects Core `b79a02d1ac8ef987dd34abeb2297a231b109f7a6`, replacing #150's coordinate below. This aligns the exact URL with accepted SDK2c5b588 and Secrets8273b7d for Servers #208's receiver-trust join. Operationsbc559a0 contains the identical Core subtree, but Servers must select its Operations archive independently and prove that installation in its own gate. This metadata change does not implement #149 signing or establish live health transport.

@@ -1,10 +1,10 @@
 Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py).
 Maintain this document alongside its source file. When the source or relevant imported contracts change, verify and update this companion in the same change.
 
-The #169 dependency adoption touches only the existing installed-owner
+The #171 dependency adoption touches only the existing installed-owner
 provenance expectations in HealthSigningPrerequisiteTests. Secrets now selects
-the reviewed #36 merge `43b742d1ecb4b7b1fbabb62890a4045afa7a2fec`; its SDK
-dependency is the reviewed #37 merge `22f1267bde5015efe2fea4f07be4ce8ddf83bc0c`.
+the reviewed #38 merge `436f21ec957c772123156ded668002c681ce4c50`; its SDK
+dependency is the reviewed #39 merge `06e9346d7257ce29dcfebc74ddcb4c11e6525cb5`.
 The Servers verifier fixture remains at
 `77deffd9b32698a1deb2fa173f6c958e6c441f9b`, installed only in the Docker test
 stage with its existing no-deps boundary. Exact direct_url comparisons and the
