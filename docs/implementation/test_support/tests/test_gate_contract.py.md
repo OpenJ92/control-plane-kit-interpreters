@@ -1,7 +1,7 @@
 Source: [test_support/tests/test_gate_contract.py](../../../../test_support/tests/test_gate_contract.py).
 
-Current #171 adoption changes only CORE_REQUIREMENT to the reviewed Core
-`79c1a8bfe049ab17604466da00d43a1258ae33f9` archive. All five existing contract
+Current #173 adoption changes only CORE_REQUIREMENT to the reviewed Core
+`6b2d173bccbab9f8cb4fa4c35fef60d2ca27aa0e` archive. All five existing contract
 tests and their assertions remain intact; no installer, fixture, gate or
 provider-opt-in change. Earlier adoption coordinates below are historical.
 

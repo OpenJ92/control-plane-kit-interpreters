@@ -1,15 +1,16 @@
 Source: [pyproject.toml](../../pyproject.toml).
 
-Current #171 adoption selects Core `79c1a8bfe049ab17604466da00d43a1258ae33f9`
-and test-only Secrets `436f21ec957c772123156ded668002c681ce4c50`. That reviewed
-Secrets #38 merge selects SDK `06e9346d7257ce29dcfebc74ddcb4c11e6525cb5`
+Current #173 adoption selects Core `6b2d173bccbab9f8cb4fa4c35fef60d2ca27aa0e`
+and test-only Secrets `7a26fdc174ceb08657ed23062bf3323f62e48f4b`. That reviewed
+Secrets #40 merge selects SDK `e19b7ed205d492bdae3abe7c2449732bcc4d53dc`
 and the identical Core URL. Existing exact metadata/installed-provenance
 expectations move together; functional source, provider opt-in and the ordinary
 Docker gate are unchanged. The test-only Servers installation remains
 `77deffd9b32698a1deb2fa173f6c958e6c441f9b` with `--no-deps`, as declared in
 Dockerfile; earlier fixture and dependency coordinates below are historical.
-Core adds the pure shared-wrapper configuration contract and SDK adds receiving
-setup helpers. Existing explicit health signing and gateway verifier call sites
+Since #171, Core adds only the workload verifier read's operations route,
+projection and parity declarations; SDK and Secrets runtime source is unchanged.
+Existing explicit health signing and gateway verifier call sites
 remain unchanged. This adoption preserves the existing health signing,
 gateway/managed observation and native connection effects. Only the ordinary owning gate can establish package
 compatibility. Servers must separately adopt this reviewed merge.
