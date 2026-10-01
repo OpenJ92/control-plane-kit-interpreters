@@ -30,6 +30,59 @@ from receiver_configuration_fixtures import gateway_artifact, receiver_artifacts
 MODULE = "control_plane_kit_interpreters.probes.health_signing"
 
 
+class ReceiverHealthMigrationTests(unittest.TestCase):
+    def test_admission_rejects_obsolete_pair_and_accepts_receiver_authority_contexts(self):
+        from obsolete_health_signing_fixtures import obsolete_world, ObsoleteRecordingResolver
+        api = importlib.import_module(MODULE)
+        old = obsolete_world()
+        resolver = ObsoleteRecordingResolver(old)
+        context = api.HealthSigningContext(old.request, "attempt-a", old.gateway,
+            old.declaration, "transit-issuer", "workload-issuer")
+        arguments = dict(transit_grant=old.transit, workload_grant=old.workload,
+            transit_key=api.HealthSigningKey(old.publics[0], old.resolutions[0]),
+            workload_key=api.HealthSigningKey(old.publics[1], old.resolutions[1]))
+        signer = api.Ed25519HealthCredentialPairSigner(resolver, lambda: 150)
+        # Construction is outside the assertion. At target-red the actual old
+        # signer signs this lawful pair: only its missing refusal earns red.
+        with patch.object(jwt, "encode", wraps=jwt.encode) as signing:
+            with patch.object(httpx, "Client") as network:
+                with self.assertRaises(api.HealthCredentialSigningError) as caught:
+                    signer.sign(context, **arguments)
+                signing.assert_not_called()
+                network.assert_not_called()
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(str(caught.exception), "health credential signing failed")
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertIsNone(caught.exception.__context__)
+
+        # The successor half of the same admission contract has no target-red
+        # credit. It must execute against K/U/Z and the real SB gateway at green.
+        value = world()
+        self.assertIs(type(value.request), core.ReceiverHealthReadRequest)
+        for authored, projection in (("authored-a", "projection-a"), ("authored-b", "projection-b")):
+            with self.subTest(authored=authored):
+                request = replace(value.request,
+                    authority_context=core.NodeControlAuthorityContext(authored, projection))
+                changed = dict(authority_context=request.authority_context,
+                    request_digest=request.canonical_digest())
+                transit = replace(value.transit, **changed)
+                workload = replace(value.workload, **changed)
+                selected = api.HealthSigningContext(request, "attempt-a", value.gateway_target,
+                    value.declaration, "transit-issuer", "workload-issuer")
+                current_resolver = RecordingResolver(value)
+                pair = api.Ed25519HealthCredentialPairSigner(current_resolver, lambda: 150).sign(
+                    selected, transit_grant=transit, workload_grant=workload,
+                    transit_key=api.HealthSigningKey(value.publics[0], value.resolutions[0]),
+                    workload_key=api.HealthSigningKey(value.publics[1], value.resolutions[1]))
+                self.assertEqual(pair.request, request)
+                self.assertEqual(pair.request.target, value.target)
+                self.assertEqual(current_resolver.calls, list(value.resolutions))
+                # Existing helpers call the actual selected gateway and SDK.
+                value.request = request
+                self.assertEqual(admit_transit(value, pair.transit_credential), request)
+                self.assertEqual(admit_workload(value, pair.workload_credential), request)
+
+
 def workload_verifier(value, now=150):
     return Ed25519WorkloadNodeHealthReadVerifier(
         AtomicWorkloadNodeHealthReadVerifierKeySet(WorkloadNodeHealthReadVerifierKeySet(
