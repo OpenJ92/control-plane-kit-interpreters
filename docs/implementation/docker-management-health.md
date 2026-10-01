@@ -9,6 +9,7 @@ observer = DockerManagedHealthObserver(signed_gateway_client)
 result = await observer.observe(
     operation, plan=accepted_plan, activity_id=activity_id, source=source,
     current=current, desired=desired, context=context, pair=pair,
+    authority_context=current_authority,
     transit_grant=original_transit, workload_grant=original_workload,
     destination=selected_gateway,
 )
@@ -16,14 +17,22 @@ result = await observer.observe(
 
 The caller supplies the accepted plan and both validated snapshots, existing
 `RuntimeEffectSource` authored revision identities, original #149 context/pair and
-grants, and the selected installed relay destination. Construction of these values
+grants, the independently selected current `NodeControlAuthorityContext`, and the
+selected installed relay destination. Construction of these values
 does not prove approval, current authority, transaction exit or alias provenance.
 Those responsibilities remain Operations and the #181/#1860 production caller.
 
 The adapter obtains the expected operation from the supplied plan/activity before
-calling Core's real resolver. It requires a Docker runtime and derives the exact
-workspace, side-specific authored revision, node, socket, runtime, declaration,
-gateway, transit socket and complete named ingress. Mismatches return one closed
+calling Core's real resolver. It requires a Docker runtime and selects the
+original workload and gateway common receiver artifacts through Core's exact
+environment-slot selector. Full receiver targets must match graph workspace,
+runtime, node and own control socket; the declaration must match the selected
+surface. The gateway's own receiver identity is distinct from its selected
+transit socket and canonical `RECEIVER_HEALTH_READ_V2` protocol. Full named ingress
+comparison remains. The independently supplied authority must match the original
+request and the source's selected base/desired authored graph id. The adapter
+cannot establish the realized projection's database provenance or derive it from
+topology; Operations owns that current-authority input. Mismatches return one closed
 redacted refusal before DNS/HTTP. The alias is receiving configuration rather than
 graph truth; the caller selects it, and the actual relay enforces its correlation.
 
@@ -46,6 +55,12 @@ selected gateway and correlated Core result. Transformation: rederive selection,
 check congruence, dispatch once. Invalid compositions return a fixed refusal.
 The adapter's output is not generic `RuntimeEffectResult` or durable history.
 Operations owns admission, attempts, uncertain outcome policy and result folding.
+
+The #175 I-A implementation candidate has static target review at `a025135` and
+prior causal-red evidence only for obsolete signer admission. All 407 package
+methods, original effect/closure laws and frozen obsolete specimen remain.
+Canonical artifact/authority and transport behavior awaits actual S-B/I-C whole
+gates; earlier source-green records below do not validate this candidate.
 
 The [target companion](docker-management-health-tests.md) records provenance and
 fixture corrections. Corrected target `1886f085` passed its actual product/compiler

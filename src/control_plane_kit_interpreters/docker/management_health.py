@@ -7,19 +7,24 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from control_plane_kit_core.node_control import (
-    NodeControlGraphReference, NodeControlGraphReferenceRole, NodeControlTarget, NodeHealthReadKind,
+    NodeControlGraphReference, NodeControlGraphReferenceRole, NodeHealthReadKind,
 )
 from control_plane_kit_core.node_control_surface_reads import (
     WorkloadNodeControlSurfaceDeclaration, WorkloadNodeControlSurfaceDeclarationProfile,
 )
-from control_plane_kit_core.node_health_reads import DelegatedWorkloadNodeHealthReadGrant
-from control_plane_kit_core.node_health_transit import DelegatedGatewayNodeHealthReadTransitGrant
+from control_plane_kit_core.receiver_health_reads import DelegatedWorkloadReceiverHealthReadGrant
+from control_plane_kit_core.receiver_health_transit import DelegatedGatewayReceiverHealthReadTransitGrant
+from control_plane_kit_core.receiver_configuration import (
+    ReceiverNodeControlConfigurationCodec, select_receiver_node_control_configuration_artifact,
+)
+from control_plane_kit_core.receiver_identity import NodeControlAuthorityContext, NodeControlAuthorityContextCodec
 from control_plane_kit_core.planning import (
     ActivityId, ActivityOperation, ActivityPlan, ObserveNodeHealth, PlanGraphSide,
     ObserveManagementBootstrap, ManagementBootstrapStage,
     resolve_management_observation,
 )
 from control_plane_kit_core.runtime_effects import RuntimeEffectSource
+from control_plane_kit_core.runtime_management import GatewayTransitProtocol
 from control_plane_kit_core.topology import ValidatedGraph
 from control_plane_kit_core.types import RuntimeKind
 
@@ -58,9 +63,10 @@ class DockerManagedHealthObserver:
     async def observe(
         self, operation: ActivityOperation, *, plan: ActivityPlan, activity_id: ActivityId,
         source: RuntimeEffectSource, current: ValidatedGraph, desired: ValidatedGraph,
+        authority_context: NodeControlAuthorityContext,
         context: HealthSigningContext, pair: SignedHealthCredentialPair,
-        transit_grant: DelegatedGatewayNodeHealthReadTransitGrant,
-        workload_grant: DelegatedWorkloadNodeHealthReadGrant,
+        transit_grant: DelegatedGatewayReceiverHealthReadTransitGrant,
+        workload_grant: DelegatedWorkloadReceiverHealthReadGrant,
         destination: SelectedManagementGateway,
     ) -> DockerHealthObservationResult:
         bootstrap = type(operation) is ObserveManagementBootstrap
@@ -85,6 +91,12 @@ class DockerManagedHealthObserver:
             roles = NodeControlGraphReferenceRole
             revision = (source.base_graph_id if operation.target.graph_side is PlanGraphSide.BASE_GRAPH
                 else source.desired_graph_id)
+            # Operations supplies current authority independently of the signed
+            # request and installed receiver. This adapter owns no projection store.
+            authority = NodeControlAuthorityContextCodec().decode(
+                NodeControlAuthorityContextCodec().encode(authority_context))
+            if authority != authority_context or authority.authored_graph_id != revision:
+                raise ValueError
             if bootstrap:
                 node = resolved.gateway_node
                 socket = resolved.gateway_readiness_socket
@@ -97,24 +109,29 @@ class DockerManagedHealthObserver:
             else:
                 node, surface = resolved.workload_node, resolved.workload_surface
                 socket, health_kind = operation.provider_socket_name, operation.health_kind
-            target = NodeControlTarget(
-                NodeControlGraphReference(roles.WORKSPACE, source.workspace_id),
-                NodeControlGraphReference(roles.GRAPH_REVISION, revision),
-                NodeControlGraphReference(roles.NODE, node.node_id),
-                NodeControlGraphReference(roles.PROVIDER_SOCKET, socket))
             runtime_id = NodeControlGraphReference(roles.RUNTIME, operation.target.runtime_id)
             gateway = NodeControlGraphReference(roles.NODE, resolved.gateway_node.node_id)
+            installed = _receiver(node, source.workspace_id, runtime_id, socket)
+            gateway_surfaces = tuple(surface for surface in resolved.gateway_node.block_spec.control_surfaces
+                if NodeHealthReadKind.READINESS in surface.health_reads)
+            if len(gateway_surfaces) != 1:
+                raise ValueError
+            gateway_installed = _receiver(resolved.gateway_node, source.workspace_id,
+                runtime_id, gateway_surfaces[0].provider_socket_name.value)
             declaration = WorkloadNodeControlSurfaceDeclaration(surface,
                 WorkloadNodeControlSurfaceDeclarationProfile.V2)
             request = context.request
-            if (request.target != target or request.runtime_id != runtime_id
+            transit = resolved.gateway_node.block_spec.gateway_transit
+            if (request.target != installed.target or request.authority_context != authority
                     or request.kind is not health_kind
                     or request.declaration_identity != declaration.identity()
-                    or context.declaration != declaration or context.gateway_node_id != gateway
+                    or installed.declaration != declaration or context.declaration != declaration
+                    or context.gateway_target != gateway_installed.target
                     or destination.ingress != resolved.ingress
                     or destination.gateway_node_id != gateway or destination.runtime_id != runtime_id
-                    or destination.gateway_transit_provider_socket_name
-                        != resolved.gateway_node.block_spec.gateway_transit.provider_socket_name):
+                    or destination.gateway_transit_provider_socket_name != transit.provider_socket_name
+                    or transit.protocol is not GatewayTransitProtocol.RECEIVER_HEALTH_READ_V2
+                    or destination.gateway_transit_protocol is not transit.protocol):
                 raise ValueError
         except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
             return DockerHealthObservationRefused(DockerHealthObservationRefusalCode.INVALID_SELECTION)
@@ -123,3 +140,17 @@ class DockerManagedHealthObserver:
         # receivers authenticate it. No retry, renewal, signing or private fallback.
         return await self.client.dispatch(context, pair, destination,
             transit_grant=transit_grant, workload_grant=workload_grant)
+
+
+def _receiver(node, workspace_id, runtime_id, socket):
+    """Read the original selected artifact; never synthesize receiver identity."""
+    artifact = select_receiver_node_control_configuration_artifact(
+        artifacts=node.configuration_artifacts,
+        environment=(*node.public_environment, *node.socket_environment),
+        control_surfaces=node.block_spec.control_surfaces)
+    configuration = ReceiverNodeControlConfigurationCodec().decode_bytes(artifact.content.encode("utf-8"))
+    target = configuration.target
+    if (target.workspace_id.value != workspace_id or target.runtime_id != runtime_id
+            or target.node_id.value != node.node_id or target.provider_socket_name.value != socket):
+        raise ValueError
+    return configuration

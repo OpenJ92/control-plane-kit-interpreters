@@ -30,33 +30,86 @@ from receiver_configuration_fixtures import gateway_artifact, receiver_artifacts
 MODULE = "control_plane_kit_interpreters.probes.health_signing"
 
 
+class ReceiverHealthMigrationTests(unittest.TestCase):
+    def test_admission_rejects_obsolete_pair_and_accepts_receiver_authority_contexts(self):
+        from obsolete_health_signing_fixtures import obsolete_world, ObsoleteRecordingResolver
+        api = importlib.import_module(MODULE)
+        old = obsolete_world()
+        resolver = ObsoleteRecordingResolver(old)
+        context = api.HealthSigningContext(old.request, "attempt-a", old.gateway,
+            old.declaration, "transit-issuer", "workload-issuer")
+        arguments = dict(transit_grant=old.transit, workload_grant=old.workload,
+            transit_key=api.HealthSigningKey(old.publics[0], old.resolutions[0]),
+            workload_key=api.HealthSigningKey(old.publics[1], old.resolutions[1]))
+        signer = api.Ed25519HealthCredentialPairSigner(resolver, lambda: 150)
+        # Construction is outside the assertion. At target-red the actual old
+        # signer signs this lawful pair: only its missing refusal earns red.
+        with patch.object(jwt, "encode", wraps=jwt.encode) as signing:
+            with patch.object(httpx, "Client") as network:
+                with self.assertRaises(api.HealthCredentialSigningError) as caught:
+                    signer.sign(context, **arguments)
+                signing.assert_not_called()
+                network.assert_not_called()
+        self.assertEqual(resolver.calls, [])
+        self.assertEqual(str(caught.exception), "health credential signing failed")
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertIsNone(caught.exception.__context__)
+
+        # The successor half of the same admission contract has no target-red
+        # credit. It must execute against K/U/Z and the real SB gateway at green.
+        value = world()
+        self.assertIs(type(value.request), core.ReceiverHealthReadRequest)
+        for authored, projection in (("authored-a", "projection-a"), ("authored-b", "projection-b")):
+            with self.subTest(authored=authored):
+                request = replace(value.request,
+                    authority_context=core.NodeControlAuthorityContext(authored, projection))
+                changed = dict(authority_context=request.authority_context,
+                    request_digest=request.canonical_digest())
+                transit = replace(value.transit, **changed)
+                workload = replace(value.workload, **changed)
+                selected = api.HealthSigningContext(request, "attempt-a", value.gateway_target,
+                    value.declaration, "transit-issuer", "workload-issuer")
+                current_resolver = RecordingResolver(value)
+                pair = api.Ed25519HealthCredentialPairSigner(current_resolver, lambda: 150).sign(
+                    selected, transit_grant=transit, workload_grant=workload,
+                    transit_key=api.HealthSigningKey(value.publics[0], value.resolutions[0]),
+                    workload_key=api.HealthSigningKey(value.publics[1], value.resolutions[1]))
+                self.assertEqual(pair.request, request)
+                self.assertEqual(pair.request.target, value.target)
+                self.assertEqual(current_resolver.calls, list(value.resolutions))
+                # Existing helpers call the actual selected gateway and SDK.
+                value.request = request
+                self.assertEqual(admit_transit(value, pair.transit_credential), request)
+                self.assertEqual(admit_workload(value, pair.workload_credential), request)
+
+
 def workload_verifier(value, now=150):
     return Ed25519WorkloadNodeHealthReadVerifier(
         AtomicWorkloadNodeHealthReadVerifierKeySet(WorkloadNodeHealthReadVerifierKeySet(
             core.DelegationKeyPurpose.WORKLOAD_NODE_HEALTH_READ, (value.publics[1],))),
-        expected_issuer="workload-issuer", expected_audience=core.workload_node_control_audience(value.target),
+        expected_issuer="workload-issuer", expected_audience=core.receiver_node_control_audience(value.target),
         clock=lambda: now)
 
 
 def admit_workload(value, credential, now=150, **changes):
     return workload_verifier(value, now).admit(credential, **{
         "route_kind": value.request.kind, "candidate": None, "expected_target": value.target,
-        "expected_runtime_id": value.runtime, "expected_declaration": value.declaration, **changes})
+        "expected_declaration": value.declaration, **changes})
 
 
 def admit_transit(value, credential, now=150, **changes):
     return gateway_health_transit_verifier_from_artifact(gateway_artifact(value)).verify(
         credential, value.request, **{"expected_attempt_id": "attempt-a", "expected_target": value.target,
-        "expected_runtime_id": value.runtime, "expected_declaration": value.declaration,
+        "expected_declaration": value.declaration,
         "expected_kind": value.request.kind, "now": now, **changes})
 
 
 class HealthSigningPrerequisiteTests(unittest.TestCase):
     def test_actual_owner_provenance_and_candidate_origin(self):
         for package, coordinate in (
-            ("control-plane-kit-servers", "77deffd9b32698a1deb2fa173f6c958e6c441f9b"),
-            ("control-plane-kit-secrets", "7a26fdc174ceb08657ed23062bf3323f62e48f4b"),
-            ("control-plane-kit-server-sdk", "e19b7ed205d492bdae3abe7c2449732bcc4d53dc"),
+            ("control-plane-kit-servers", "9921911d3939855a4f7c1989acdf7683fc8961da"),
+            ("control-plane-kit-secrets", "edfb8c0ebfc0cfcf3a667fb60d52b4a83bda1634"),
+            ("control-plane-kit-server-sdk", "5dc93b92c27bb9bbe2af027f945a347e5e4131bc"),
         ):
             metadata = json.loads(importlib.metadata.distribution(package).read_text("direct_url.json"))
             self.assertEqual(metadata["url"], f"https://github.com/OpenJ92/{package}/archive/{coordinate}.zip")
@@ -131,7 +184,7 @@ class HealthCredentialPairTests(unittest.TestCase):
         # Deliberate causal red, after existing Core/owner imports and fixture construction.
         self.assertIsNotNone(importlib.util.find_spec(MODULE), "#155 paired health signer is missing")
         self.api = importlib.import_module(MODULE)
-        self.context = self.api.HealthSigningContext(self.value.request, "attempt-a", self.value.gateway,
+        self.context = self.api.HealthSigningContext(self.value.request, "attempt-a", self.value.gateway_target,
             self.value.declaration, "transit-issuer", "workload-issuer")
 
     def arguments(self):
@@ -192,7 +245,7 @@ class HealthCredentialPairTests(unittest.TestCase):
                 action()
         for action in (
             lambda: admit_workload(self.value, pair.workload_credential,
-                expected_runtime_id=replace(self.value.runtime, value="runtime-b")),
+                expected_target=replace(self.value.target, runtime_id=replace(self.value.runtime, value="runtime-b"))),
             lambda: admit_workload(self.value, pair.workload_credential, now=200),
             lambda: admit_workload(self.value, pair.transit_credential),
         ):
@@ -207,7 +260,8 @@ class HealthCredentialPairTests(unittest.TestCase):
             {"workload_grant": None}, {"transit_key": None},
             {"transit_grant": replace(value.transit, attempt_id="attempt-b")},
             {"workload_grant": replace(value.workload, request_id="observation-b")},
-            {"workload_grant": replace(value.workload, runtime_id=replace(value.runtime, value="runtime-b"))},
+            {"workload_grant": replace(value.workload,
+                target=replace(value.target, runtime_id=replace(value.runtime, value="runtime-b")))},
             {"workload_grant": replace(value.workload, expires_at=199)},
             {"workload_key": self.api.HealthSigningKey(value.publics[1], wrong_resolution)},
             {"workload_key": self.api.HealthSigningKey(value.publics[1], replace(value.resolutions[1], operation_id="attempt-b"))},
@@ -222,6 +276,23 @@ class HealthCredentialPairTests(unittest.TestCase):
         self.refused(lambda: self.sign(context=replace(self.context,
             request=replace(value.request, declaration_identity=replace(value.request.declaration_identity, value="a" * 64)))))
         self.assertEqual(self.resolver.calls, [])
+
+    def test_full_gateway_scope_and_authority_mismatch_refuse_before_material(self):
+        value = self.value
+        for field in ("workspace_id", "runtime_id", "node_id", "provider_socket_name", "receiver_id"):
+            with self.subTest(field=field):
+                replacement = ("f" * 32 if field == "receiver_id" else
+                    replace(getattr(value.gateway_target, field), value="foreign"))
+                context = replace(self.context,
+                    gateway_target=replace(value.gateway_target, **{field:replacement}))
+                self.refused(lambda: self.sign(context=context))
+                self.assertEqual(self.resolver.calls, [])
+        for field in ("authored_graph_id", "realized_projection_id"):
+            with self.subTest(field=field):
+                request = replace(value.request,
+                    authority_context=replace(value.authority_context, **{field:"foreign"}))
+                self.refused(lambda: self.sign(context=replace(self.context, request=request)))
+                self.assertEqual(self.resolver.calls, [])
 
     def test_original_window_is_checked_before_between_and_after_effects(self):
         for now in (100, 200, True, -1):

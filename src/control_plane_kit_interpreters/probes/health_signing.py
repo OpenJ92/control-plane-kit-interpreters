@@ -14,19 +14,19 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from control_plane_kit_core.delegation_keys import DelegationKeyAlgorithm, DelegationPublicKey
-from control_plane_kit_core.node_control import (
-    NodeControlGraphReference, workload_node_control_audience,
+from control_plane_kit_core.receiver_identity import (
+    NodeControlReceiverTarget, NodeControlReceiverTargetCodec, receiver_node_control_audience,
 )
 from control_plane_kit_core.node_control_surface_reads import (
     WorkloadNodeControlSurfaceDeclaration, WorkloadNodeControlSurfaceDeclarationCodec,
 )
-from control_plane_kit_core.node_health_reads import (
-    DelegatedWorkloadNodeHealthReadGrant, DelegatedWorkloadNodeHealthReadGrantCodec,
-    NodeHealthReadRequest, NodeHealthReadRequestCodec, verify_workload_node_health_read_grant,
+from control_plane_kit_core.receiver_health_reads import (
+    DelegatedWorkloadReceiverHealthReadGrant, DelegatedWorkloadReceiverHealthReadGrantCodec,
+    ReceiverHealthReadRequest, ReceiverHealthReadRequestCodec, verify_workload_receiver_health_read_grant,
 )
-from control_plane_kit_core.node_health_transit import (
-    DelegatedGatewayNodeHealthReadTransitGrant, DelegatedGatewayNodeHealthReadTransitGrantCodec,
-    verify_gateway_node_health_read_transit_grant,
+from control_plane_kit_core.receiver_health_transit import (
+    DelegatedGatewayReceiverHealthReadTransitGrant, DelegatedGatewayReceiverHealthReadTransitGrantCodec,
+    verify_gateway_receiver_health_read_transit_grant,
 )
 from control_plane_kit_core.secrets import (
     AuthorizedSecretResolver, SecretProviderEndpointReference, SecretReference,
@@ -41,9 +41,9 @@ class HealthCredentialSigningError(RuntimeError):
 @dataclass(frozen=True, slots=True, repr=False)
 class HealthSigningContext:
     """Independent caller context; construction alone proves no current authority."""
-    request: NodeHealthReadRequest
+    request: ReceiverHealthReadRequest
     attempt_id: str
-    gateway_node_id: NodeControlGraphReference
+    gateway_target: NodeControlReceiverTarget
     declaration: WorkloadNodeControlSurfaceDeclaration
     transit_issuer: str
     workload_issuer: str
@@ -64,7 +64,7 @@ class HealthSigningKey:
 @dataclass(frozen=True, slots=True, repr=False)
 class SignedHealthCredentialPair:
     """Ephemeral complete output; never place credentials in history or descriptors."""
-    request: NodeHealthReadRequest
+    request: ReceiverHealthReadRequest
     transit_credential: bytes
     workload_credential: bytes
 
@@ -78,8 +78,8 @@ class Ed25519HealthCredentialPairSigner:
     clock: Callable[[], int]
 
     def sign(self, context: HealthSigningContext, *,
-             transit_grant: DelegatedGatewayNodeHealthReadTransitGrant,
-             workload_grant: DelegatedWorkloadNodeHealthReadGrant,
+             transit_grant: DelegatedGatewayReceiverHealthReadTransitGrant,
+             workload_grant: DelegatedWorkloadReceiverHealthReadGrant,
              transit_key: HealthSigningKey, workload_key: HealthSigningKey,
              ) -> SignedHealthCredentialPair:
         """Validate both families, then resolve/sign once without renewing either.
@@ -89,24 +89,23 @@ class Ed25519HealthCredentialPairSigner:
         """
         try:
             context = _context(context)
-            transit_grant = _canonical(transit_grant, DelegatedGatewayNodeHealthReadTransitGrant,
-                DelegatedGatewayNodeHealthReadTransitGrantCodec())
-            workload_grant = _canonical(workload_grant, DelegatedWorkloadNodeHealthReadGrant,
-                DelegatedWorkloadNodeHealthReadGrantCodec())
+            transit_grant = _canonical(transit_grant, DelegatedGatewayReceiverHealthReadTransitGrant,
+                DelegatedGatewayReceiverHealthReadTransitGrantCodec())
+            workload_grant = _canonical(workload_grant, DelegatedWorkloadReceiverHealthReadGrant,
+                DelegatedWorkloadReceiverHealthReadGrantCodec())
             transit_key, workload_key = _key(transit_key), _key(workload_key)
             _pair(context, transit_grant, workload_grant, transit_key, workload_key)
             now = _now(self.clock)
             expected = dict(expected_target=context.request.target,
-                expected_runtime_id=context.request.runtime_id,
                 expected_declaration=context.declaration, expected_kind=context.request.kind, now=now)
-            if not verify_gateway_node_health_read_transit_grant(transit_grant, context.request,
+            if not verify_gateway_receiver_health_read_transit_grant(transit_grant, context.request,
                     expected_issuer=context.transit_issuer, expected_key_id=transit_key.public_key.key_id,
-                    expected_attempt_id=context.attempt_id, expected_gateway_node_id=context.gateway_node_id,
+                    expected_attempt_id=context.attempt_id, expected_gateway_target=context.gateway_target,
                     **expected).is_accepted:
                 raise ValueError
-            if not verify_workload_node_health_read_grant(workload_grant, context.request,
+            if not verify_workload_receiver_health_read_grant(workload_grant, context.request,
                     expected_issuer=context.workload_issuer, expected_key_id=workload_key.public_key.key_id,
-                    expected_audience=workload_node_control_audience(context.request.target),
+                    expected_audience=receiver_node_control_audience(context.request.target),
                     **expected).is_accepted:
                 raise ValueError
 
@@ -145,11 +144,9 @@ def _context(value: HealthSigningContext) -> HealthSigningContext:
         raise ValueError
     if any(type(text) is not str for text in (value.attempt_id, value.transit_issuer, value.workload_issuer)):
         raise ValueError
-    gateway = value.gateway_node_id
-    if type(gateway) is not NodeControlGraphReference or replace(gateway) != gateway:
-        raise ValueError
-    return replace(value, gateway_node_id=replace(gateway),
-        request=_canonical(value.request, NodeHealthReadRequest, NodeHealthReadRequestCodec()),
+    return replace(value, gateway_target=_canonical(value.gateway_target,
+        NodeControlReceiverTarget, NodeControlReceiverTargetCodec()),
+        request=_canonical(value.request, ReceiverHealthReadRequest, ReceiverHealthReadRequestCodec()),
         declaration=_canonical(value.declaration, WorkloadNodeControlSurfaceDeclaration,
             WorkloadNodeControlSurfaceDeclarationCodec()))
 
