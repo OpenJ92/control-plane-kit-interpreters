@@ -46,11 +46,11 @@ class HealthTransportPrerequisiteTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=value.gateway_transport, base_url="https://gateway.example.invalid") as client:
             response = await client.post("/cpk/health/liveness", headers={
                 "Authorization":"Bearer " + value.pair.transit_credential.decode()}, json={
-                "profile":"cpk-gateway-health-relay-request.v1", "target_id":"workload-management",
+                "profile":"cpk-gateway-health-relay-request.v2", "target_id":"workload-management",
                 "attempt_id":value.context.attempt_id, "request":value.pair.request.descriptor(),
                 "workload_credential":value.pair.workload_credential.decode()})
         self.assertEqual(response.status_code, 200)
-        result = core.NodeHealthReadResultCodec(value.value.request, value.value.declaration).decode(response.json())
+        result = core.ReceiverHealthReadResultCodec(value.value.request, value.value.declaration).decode(response.json())
         self.assertIs(result.outcome, core.NodeHealthReadOutcome.HEALTHY)
         self.assertEqual(value.callbacks, [core.NodeHealthReadKind.LIVENESS])
         self.assertEqual(str(value.workload_transport.requests[0].url), "http://workload-a:8087/__control/health/liveness")
@@ -98,7 +98,7 @@ class HealthTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.headers["accept-encoding"], "identity")
         self.assertNotIn("cookie", request.headers)
         self.assertEqual(json.loads(request.content), {
-            "profile":"cpk-gateway-health-relay-request.v1", "target_id":"workload-management",
+            "profile":"cpk-gateway-health-relay-request.v2", "target_id":"workload-management",
             "attempt_id":"attempt-a", "request":value.value.request.descriptor(),
             "workload_credential":value.pair.workload_credential.decode()})
         self.assertNotIn(value.pair.transit_credential.decode(), repr(result))
@@ -111,7 +111,12 @@ class HealthTransportTests(unittest.IsolatedAsyncioTestCase):
             {"pair":replace(value.pair, workload_credential=b"bad\r\nheader")},
             {"pair":replace(value.pair, request=replace(value.value.request, request_id="other"))},
             {"context":replace(value.context, attempt_id="another-attempt")},
-            {"context":replace(value.context, gateway_node_id=replace(value.value.gateway, value="other-gateway"))},
+            {"context":replace(value.context, gateway_target=replace(value.value.gateway_target,
+                node_id=replace(value.value.gateway, value="other-gateway")))},
+            {"context":replace(value.context, gateway_target=replace(value.value.gateway_target,
+                receiver_id="f" * 32))},
+            {"context":replace(value.context, request=replace(value.value.request,
+                authority_context=replace(value.value.authority_context, realized_projection_id="foreign-projection")))},
             {"transit_grant":replace(value.value.transit, jti="other-transit")},
             {"workload_grant":replace(value.value.workload, jti="other-workload")},
             {"workload_grant":replace(value.value.workload, expires_at=199)},
@@ -130,6 +135,9 @@ class HealthTransportTests(unittest.IsolatedAsyncioTestCase):
             replace(selected, gateway_transit_provider_socket_name="application"),
             replace(selected, runtime_id=replace(value.value.runtime, value="other-runtime")),
             replace(selected, target_id="../arbitrary-url"),
+            replace(selected, gateway_transit_protocol="gateway-node-health-read-transit.v1"),
+            replace(selected, gateway_transit_protocol="gateway-receiver-health-read-transit.v2"),
+            replace(selected, gateway_transit_protocol=None),
         )
         for destination in cases:
             with self.subTest(destination=repr(destination)):
@@ -184,7 +192,7 @@ class HealthTransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_raw_stream_bounds_encoding_and_strict_correlated_json(self):
         value = World()
-        good = core.NodeHealthReadResult(value.value.request, value.value.declaration,
+        good = core.ReceiverHealthReadResult(value.value.request, value.value.declaration,
             core.NodeHealthReadOutcome.HEALTHY).canonical_bytes()
         wrong = json.loads(good)
         wrong["request_id"] = "another"

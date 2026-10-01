@@ -99,7 +99,7 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                 "CPK_SECRETS_MASTER_KEY_FILE": str(key_file),
                 "CPK_SECRETS_PROVIDER_ID": "provider-live",
                 "CPK_SECRETS_CREDENTIALS_FILE": str(credentials_file),
-                "CPK_SECRETS_CONTROL_CONFIGURATION_FILE": str(control_file),
+                "CPK_WRAPPER_CONFIGURATION_FILE": str(control_file),
             }
             process = _start_provider(port=port, environment=environment)
             stdout = ""

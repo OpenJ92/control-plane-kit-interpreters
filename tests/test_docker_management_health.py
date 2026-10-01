@@ -77,7 +77,7 @@ class DockerManagementHealthTests(unittest.IsolatedAsyncioTestCase):
                 self.refused(value, await value.observe(self.module, source=wrong))
                 result = await value.observe(self.module)
                 self.assertEqual(result.code.value, "received")
-                self.assertEqual(result.result.request.target.graph_revision.value, "revision-a")
+                self.assertEqual(result.result.request.authority_context.authored_graph_id, "revision-a")
                 self.assertEqual(len(value.gateway_transport.requests), 1)
 
     async def test_plan_graph_relation_and_complete_ingress_mismatches_refuse_before_io(self):
@@ -110,19 +110,62 @@ class DockerManagementHealthTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(ingress=ingress.descriptor()):
                 self.refused(value, await value.observe(self.module, destination=replace(destination, ingress=ingress)))
 
+    async def test_retained_receiver_uses_independent_current_authority(self):
+        value = self.value
+        installed_target = value.value.target
+        artifacts = value.desired.graph.nodes[installed_target.node_id.value].configuration_artifacts
+        authority = core.NodeControlAuthorityContext("accepted-b", "realized-b")
+        source = replace(value.source, desired_graph_id="accepted-b")
+        value.resign(authority_context=authority)
+        # Signing a coherent new context does not replace independently supplied
+        # current caller authority. No request field becomes its own expectation.
+        self.refused(value, await value.observe(self.module, source=source))
+        result = await value.observe(self.module, source=source, authority_context=authority)
+        self.assertEqual(result.code.value, "received")
+        self.assertEqual(result.result.request.target, installed_target)
+        self.assertEqual(result.result.request.authority_context, authority)
+        self.assertEqual(value.desired.graph.nodes[installed_target.node_id.value].configuration_artifacts, artifacts)
+        self.assertEqual(value.callbacks, [core.NodeHealthReadKind.READINESS])
+
+    async def test_valid_foreign_receiver_artifact_cannot_be_restamped_from_request(self):
+        value = self.value
+        node = value.desired.graph.nodes[value.operation.node_id]
+        artifact, = node.configuration_artifacts
+        codec = core.ReceiverNodeControlConfigurationCodec()
+        installed = codec.decode_bytes(artifact.content.encode())
+        foreign = replace(installed, target=replace(installed.target, receiver_id="f" * 32))
+        changed = replace(node, configuration_artifacts=(replace(artifact,
+            content=codec.encode_bytes(foreign).decode()),))
+        value.desired = validate_graph(replace(value.desired.graph,
+            nodes={**value.desired.graph.nodes, node.node_id:changed}))
+        value.desired.require_valid()
+        # Recompile the actual changed graph so graph/digest mismatch cannot
+        # stand in for checking the independently selected installed receiver.
+        value.plan = core.compile_graph_activity_plan(value.current, value.desired)
+        self.assertTrue(value.plan.ready_for_execution)
+        activity, = (item for item in value.plan.activities if type(item.operation) is core.ObserveNodeHealth)
+        value.activity_id, value.operation = activity.activity_id, activity.operation
+        self.refused(value, await value.observe(self.module))
+
     async def test_other_valid_signed_context_and_destination_cannot_override_selection(self):
-        for field in ("workspace_id", "graph_revision", "node_id", "provider_socket_name", "runtime", "gateway", "declaration"):
+        for field in ("workspace_id", "receiver_id", "node_id", "provider_socket_name", "runtime",
+                      "gateway", "gateway_receiver", "authored_graph_id", "realized_projection_id", "declaration"):
             with self.subTest(field=field):
                 value = ManagedWorld()
                 if field == "runtime":
                     value.resign(runtime=replace(value.value.runtime, value="other-runtime"))
                 elif field == "gateway":
                     value.resign(gateway=replace(value.value.gateway, value="other-gateway"))
+                elif field == "gateway_receiver":
+                    value.resign(gateway_target=replace(value.value.gateway_target, receiver_id="f" * 32))
+                elif field in ("authored_graph_id", "realized_projection_id"):
+                    value.resign(authority_context=replace(value.value.authority_context, **{field:"other"}))
                 elif field == "declaration":
                     value.resign(declaration=replace(value.value.declaration,
                         surface=replace(value.value.declaration.surface, health_reads=(core.NodeHealthReadKind.READINESS,))))
                 else:
-                    target = replace(value.value.target, **{field:replace(getattr(value.value.target, field), value="other")})
+                    target = replace(value.value.target, **{field:("f" * 32 if field == "receiver_id"
+                        else replace(getattr(value.value.target, field), value="other"))})
                     declaration = value.value.declaration
                     if field == "provider_socket_name":
                         declaration = replace(declaration, surface=replace(declaration.surface,
@@ -153,7 +196,7 @@ class DockerManagementHealthTests(unittest.IsolatedAsyncioTestCase):
         class Unreadable:
             def __getattribute__(self, name):
                 raise AssertionError("unsupported operation accessed protected input")
-        inputs = {name:Unreadable() for name in ("source", "context", "pair", "transit_grant", "workload_grant", "destination")}
+        inputs = {name:Unreadable() for name in ("source", "authority_context", "context", "pair", "transit_grant", "workload_grant", "destination")}
         operations = [core.ObserveManagementBootstrap(value.operation.target, stage)
             for stage in (core.ManagementBootstrapStage.GATEWAY_LOCAL_READY,
                           core.ManagementBootstrapStage.CONNECTOR_CONNECTED)]
@@ -282,17 +325,23 @@ class DockerBootstrapHealthTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_other_signed_own_context_cannot_override_graph_selection(self):
         for stage in self.stages:
-            for field in ("workspace_id", "graph_revision", "node_id", "provider_socket_name", "runtime", "gateway", "declaration"):
+            for field in ("workspace_id", "receiver_id", "node_id", "provider_socket_name", "runtime",
+                          "gateway", "gateway_receiver", "authored_graph_id", "realized_projection_id", "declaration"):
                 value = BootstrapWorld(stage)
                 if field == "runtime":
                     value.resign(runtime=replace(value.value.runtime, value="foreign"))
                 elif field == "gateway":
                     value.resign(gateway=replace(value.value.gateway, value="foreign"))
+                elif field == "gateway_receiver":
+                    value.resign(gateway_target=replace(value.value.gateway_target, receiver_id="f" * 32))
+                elif field in ("authored_graph_id", "realized_projection_id"):
+                    value.resign(authority_context=replace(value.value.authority_context, **{field:"foreign"}))
                 elif field == "declaration":
                     value.resign(declaration=replace(value.value.declaration,
                         surface=replace(value.value.declaration.surface, health_reads=(core.NodeHealthReadKind.READINESS,))))
                 else:
-                    target = replace(value.value.target, **{field:replace(getattr(value.value.target, field), value="foreign")})
+                    target = replace(value.value.target, **{field:("f" * 32 if field == "receiver_id"
+                        else replace(getattr(value.value.target, field), value="foreign"))})
                     declaration = value.value.declaration
                     if field == "provider_socket_name":
                         declaration = replace(declaration, surface=replace(declaration.surface,

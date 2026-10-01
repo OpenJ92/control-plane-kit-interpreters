@@ -1,5 +1,19 @@
 # Immediate-use paired health signing (#155)
 
+## #175 preimplementation target interface
+
+The reviewed migration targets change `HealthSigningContext.request` and
+`SignedHealthCredentialPair.request` to `ReceiverHealthReadRequest`, and replace
+`gateway_node_id` with independent `gateway_target: NodeControlReceiverTarget`.
+The existing signer accepts only receiver V2 workload/transit grants through
+their Core codecs/predicates. Receiver target/runtime and original request
+authority remain separate; signing cannot restamp either or authorize itself.
+Construction stays non-authorizing data; actual admission and fixed detached
+refusal remain at `sign`. Original key resolution, purposes, window and complete
+pair rules below are preserved. At this target checkpoint production is still
+old and this successor behavior has not run. The frozen valid obsolete specimen
+must continue reaching the real signer and then fail before observed effects.
+
 `probes.health_signing` turns a trusted post-transaction projection of an already
 admitted authority pair into two ephemeral compact credentials. Import it
 explicitly with the existing gateway crypto extra; the package root stays light.

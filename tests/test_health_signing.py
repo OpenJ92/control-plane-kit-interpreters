@@ -87,20 +87,20 @@ def workload_verifier(value, now=150):
     return Ed25519WorkloadNodeHealthReadVerifier(
         AtomicWorkloadNodeHealthReadVerifierKeySet(WorkloadNodeHealthReadVerifierKeySet(
             core.DelegationKeyPurpose.WORKLOAD_NODE_HEALTH_READ, (value.publics[1],))),
-        expected_issuer="workload-issuer", expected_audience=core.workload_node_control_audience(value.target),
+        expected_issuer="workload-issuer", expected_audience=core.receiver_node_control_audience(value.target),
         clock=lambda: now)
 
 
 def admit_workload(value, credential, now=150, **changes):
     return workload_verifier(value, now).admit(credential, **{
         "route_kind": value.request.kind, "candidate": None, "expected_target": value.target,
-        "expected_runtime_id": value.runtime, "expected_declaration": value.declaration, **changes})
+        "expected_declaration": value.declaration, **changes})
 
 
 def admit_transit(value, credential, now=150, **changes):
     return gateway_health_transit_verifier_from_artifact(gateway_artifact(value)).verify(
         credential, value.request, **{"expected_attempt_id": "attempt-a", "expected_target": value.target,
-        "expected_runtime_id": value.runtime, "expected_declaration": value.declaration,
+        "expected_declaration": value.declaration,
         "expected_kind": value.request.kind, "now": now, **changes})
 
 
@@ -184,7 +184,7 @@ class HealthCredentialPairTests(unittest.TestCase):
         # Deliberate causal red, after existing Core/owner imports and fixture construction.
         self.assertIsNotNone(importlib.util.find_spec(MODULE), "#155 paired health signer is missing")
         self.api = importlib.import_module(MODULE)
-        self.context = self.api.HealthSigningContext(self.value.request, "attempt-a", self.value.gateway,
+        self.context = self.api.HealthSigningContext(self.value.request, "attempt-a", self.value.gateway_target,
             self.value.declaration, "transit-issuer", "workload-issuer")
 
     def arguments(self):
@@ -245,7 +245,7 @@ class HealthCredentialPairTests(unittest.TestCase):
                 action()
         for action in (
             lambda: admit_workload(self.value, pair.workload_credential,
-                expected_runtime_id=replace(self.value.runtime, value="runtime-b")),
+                expected_target=replace(self.value.target, runtime_id=replace(self.value.runtime, value="runtime-b"))),
             lambda: admit_workload(self.value, pair.workload_credential, now=200),
             lambda: admit_workload(self.value, pair.transit_credential),
         ):
@@ -260,7 +260,8 @@ class HealthCredentialPairTests(unittest.TestCase):
             {"workload_grant": None}, {"transit_key": None},
             {"transit_grant": replace(value.transit, attempt_id="attempt-b")},
             {"workload_grant": replace(value.workload, request_id="observation-b")},
-            {"workload_grant": replace(value.workload, runtime_id=replace(value.runtime, value="runtime-b"))},
+            {"workload_grant": replace(value.workload,
+                target=replace(value.target, runtime_id=replace(value.runtime, value="runtime-b")))},
             {"workload_grant": replace(value.workload, expires_at=199)},
             {"workload_key": self.api.HealthSigningKey(value.publics[1], wrong_resolution)},
             {"workload_key": self.api.HealthSigningKey(value.publics[1], replace(value.resolutions[1], operation_id="attempt-b"))},
@@ -275,6 +276,23 @@ class HealthCredentialPairTests(unittest.TestCase):
         self.refused(lambda: self.sign(context=replace(self.context,
             request=replace(value.request, declaration_identity=replace(value.request.declaration_identity, value="a" * 64)))))
         self.assertEqual(self.resolver.calls, [])
+
+    def test_full_gateway_scope_and_authority_mismatch_refuse_before_material(self):
+        value = self.value
+        for field in ("workspace_id", "runtime_id", "node_id", "provider_socket_name", "receiver_id"):
+            with self.subTest(field=field):
+                replacement = ("f" * 32 if field == "receiver_id" else
+                    replace(getattr(value.gateway_target, field), value="foreign"))
+                context = replace(self.context,
+                    gateway_target=replace(value.gateway_target, **{field:replacement}))
+                self.refused(lambda: self.sign(context=context))
+                self.assertEqual(self.resolver.calls, [])
+        for field in ("authored_graph_id", "realized_projection_id"):
+            with self.subTest(field=field):
+                request = replace(value.request,
+                    authority_context=replace(value.authority_context, **{field:"foreign"}))
+                self.refused(lambda: self.sign(context=replace(self.context, request=request)))
+                self.assertEqual(self.resolver.calls, [])
 
     def test_original_window_is_checked_before_between_and_after_effects(self):
         for now in (100, 200, True, -1):

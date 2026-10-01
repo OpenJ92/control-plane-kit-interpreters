@@ -78,7 +78,7 @@ class World:
             (), (core.NodeHealthReadKind.READINESS,))
         gateway = Node("gateway", BlockFamily.APPLICATION,
             BlockSpec("gateway", capabilities=(CapabilityName.NODE_CONTROLLABLE, CapabilityName.HEALTH_CHECKABLE),
-                control_surfaces=(control,), gateway_transit=core.GatewayTransitDeclaration("transit", core.GatewayTransitProtocol.NODE_HEALTH_READ_V1)),
+                control_surfaces=(control,), gateway_transit=core.GatewayTransitDeclaration("transit", core.GatewayTransitProtocol.RECEIVER_HEALTH_READ_V2)),
             "container-server", "docker", BlockSockets(providers=(ProviderSocket("control", Protocol.HTTP), ProviderSocket("transit", Protocol.HTTP))),
             endpoints={name: Endpoint(LiteralAddress("http://gateway:8000"), Protocol.HTTP) for name in ("control", "transit")})
         connector = Node("connector", BlockFamily.APPLICATION, BlockSpec("connector"), "container-server", "docker", BlockSockets(),

@@ -21,14 +21,11 @@ from control_plane_kit_interpreters.secret_provider import (
 from control_plane_kit_secrets.api import create_app
 from control_plane_kit_secrets.auth import ProviderCredential, ProviderGrant
 from control_plane_kit_secrets.control import (
-    SecretsControlConfiguration, encode_secrets_control_configuration,
+    encode_secrets_control_configuration,
     secrets_control_declaration,
 )
 from control_plane_kit_secrets.crypto import encode_master_key_for_file, load_master_key_file
 from control_plane_kit_secrets.custody import admit_provider_custody
-from control_plane_kit_server_sdk.verifier_keys import (
-    WorkloadNodeControlSurfaceReadVerifierKeySet, WorkloadNodeHealthReadVerifierKeySet,
-)
 
 
 def key(key_id):
@@ -46,54 +43,54 @@ def private_pem(private):
 
 def provider_control():
     roles = core.NodeControlGraphReferenceRole
-    target = core.NodeControlTarget(*(
+    target = core.NodeControlReceiverTarget(*(
         core.NodeControlGraphReference(role, value) for role, value in (
-            (roles.WORKSPACE, "workspace-a"), (roles.GRAPH_REVISION, "revision-a"),
-            (roles.NODE, "provider-a"), (roles.PROVIDER_SOCKET, "control"))))
-    return SecretsControlConfiguration(target=target,
-        runtime_id=core.NodeControlGraphReference(roles.RUNTIME, "runtime-a"),
-        declaration=secrets_control_declaration(), surface_issuer="surface-issuer",
-        surface_keys=WorkloadNodeControlSurfaceReadVerifierKeySet(
-            core.DelegationKeyPurpose.WORKLOAD_NODE_CONTROL_SURFACE_READ, (key("surface")[1],)),
-        health_issuer="health-issuer", health_keys=WorkloadNodeHealthReadVerifierKeySet(
-            core.DelegationKeyPurpose.WORKLOAD_NODE_HEALTH_READ, (key("health")[1],)))
+            (roles.WORKSPACE, "workspace-a"), (roles.RUNTIME, "runtime-a"),
+            (roles.NODE, "provider-a"), (roles.PROVIDER_SOCKET, "control"))), "c" * 32)
+    return core.ReceiverNodeControlConfiguration(target, secrets_control_declaration(), (
+        core.NodeControlVerificationConfiguration(core.DelegationKeyPurpose.WORKLOAD_NODE_CONTROL_SURFACE_READ,
+            "surface-issuer", (key("surface")[1],)),
+        core.NodeControlVerificationConfiguration(core.DelegationKeyPurpose.WORKLOAD_NODE_HEALTH_READ,
+            "health-issuer", (key("health")[1],))))
 
 
 def write_provider_control(path):
     path.write_bytes(encode_secrets_control_configuration(provider_control()))
-    path.chmod(0o600)
+    path.chmod(0o444)
 
 
 def world():
     roles = core.NodeControlGraphReferenceRole
-    target = core.NodeControlTarget(*(
+    target = core.NodeControlReceiverTarget(*(
         core.NodeControlGraphReference(role, value) for role, value in (
-            (roles.WORKSPACE, "workspace-a"), (roles.GRAPH_REVISION, "revision-a"),
-            (roles.NODE, "workload-a"), (roles.PROVIDER_SOCKET, "control"))))
+            (roles.WORKSPACE, "workspace-a"), (roles.RUNTIME, "runtime-a"),
+            (roles.NODE, "workload-a"), (roles.PROVIDER_SOCKET, "control"))), "a" * 32)
     runtime = core.NodeControlGraphReference(roles.RUNTIME, "runtime-a")
     gateway = core.NodeControlGraphReference(roles.NODE, "gateway-a")
+    gateway_target = replace(target, node_id=gateway, receiver_id="b" * 32)
+    authority_context = core.NodeControlAuthorityContext("revision-a", "projection-a")
     declaration = core.WorkloadNodeControlSurfaceDeclaration(
         core.WorkloadNodeControlSurfaceDescriptor(target.provider_socket_name, (),
             health_reads=(core.NodeHealthReadKind.LIVENESS,)),
         profile=core.WorkloadNodeControlSurfaceDeclarationProfile.V2)
-    request = core.NodeHealthReadRequest(target, runtime, core.NodeHealthReadKind.LIVENESS,
+    request = core.ReceiverHealthReadRequest(target, authority_context, core.NodeHealthReadKind.LIVENESS,
         declaration.identity(), "observation-a")
     transit_private, transit_public = key("transit-key")
     workload_private, workload_public = key("workload-key")
     common = dict(canonicalization=core.NodeControlCanonicalization.JCS_RFC8785_V1,
-        target=target, runtime_id=runtime, kind=request.kind,
+        target=target, authority_context=authority_context, kind=request.kind,
         declaration_identity=declaration.identity(), request_id=request.request_id,
         request_digest=request.canonical_digest(), issued_at=100, not_before=101, expires_at=200)
-    transit = core.DelegatedGatewayNodeHealthReadTransitGrant(
-        profile=core.DelegatedGatewayNodeHealthReadTransitGrantProfile.V1,
+    transit = core.DelegatedGatewayReceiverHealthReadTransitGrant(
+        profile=core.DelegatedGatewayReceiverHealthReadTransitGrantProfile.V2,
         purpose=core.DelegationKeyPurpose.GATEWAY_NODE_HEALTH_READ_TRANSIT,
-        issuer="transit-issuer", key_id=transit_public.key_id, gateway_node_id=gateway,
+        issuer="transit-issuer", key_id=transit_public.key_id, gateway_target=gateway_target,
         attempt_id="attempt-a", jti="transit-jti", **common)
-    workload = core.DelegatedWorkloadNodeHealthReadGrant(
-        profile=core.DelegatedWorkloadNodeHealthReadGrantProfile.V1,
+    workload = core.DelegatedWorkloadReceiverHealthReadGrant(
+        profile=core.DelegatedWorkloadReceiverHealthReadGrantProfile.V2,
         purpose=core.DelegationKeyPurpose.WORKLOAD_NODE_HEALTH_READ,
         issuer="workload-issuer", key_id=workload_public.key_id,
-        audience=core.workload_node_control_audience(target), jti="workload-jti", **common)
+        audience=core.receiver_node_control_audience(target), jti="workload-jti", **common)
     references = (SecretReference("secret://provider-a/keys/transit"),
                   SecretReference("secret://provider-a/keys/workload"))
     intents = (SecretUseIntent.GATEWAY_NODE_HEALTH_READ_TRANSIT_SIGNING_KEY,
@@ -112,6 +109,7 @@ def world():
         activity_id="health-a")
         for marker, reference, intent in zip("ab", references, intents, strict=True))
     return SimpleNamespace(target=target, runtime=runtime, gateway=gateway,
+        gateway_target=gateway_target, authority_context=authority_context,
         declaration=declaration, request=request, transit=transit, workload=workload,
         publics=(transit_public, workload_public), privates=(transit_private, workload_private),
         resolutions=resolutions)

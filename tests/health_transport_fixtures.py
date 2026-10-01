@@ -10,15 +10,7 @@ from control_plane_kit_core.public_ingress import (
 from control_plane_kit_interpreters.probes.health_signing import (
     Ed25519HealthCredentialPairSigner, HealthSigningContext, HealthSigningKey,
 )
-from control_plane_kit_server_sdk.fastapi import install_cpk_control_routes
-from control_plane_kit_server_sdk.health import WorkloadNodeHealthReadDispatcher
-from control_plane_kit_server_sdk.verification import (
-    Ed25519WorkloadNodeHealthReadVerifier, Ed25519WorkloadNodeControlSurfaceReadVerifier,
-)
-from control_plane_kit_server_sdk.verifier_keys import (
-    WorkloadNodeHealthReadVerifierKeySet, AtomicWorkloadNodeHealthReadVerifierKeySet,
-    WorkloadNodeControlSurfaceReadVerifierKeySet, AtomicWorkloadNodeControlSurfaceReadVerifierKeySet,
-)
+from control_plane_kit_server_sdk.fastapi import install_cpk_wrapper
 from control_plane_kit_servers_cpk_local_gateway.health_relay import GatewayHealthRelay
 from control_plane_kit_servers_cpk_local_gateway.health_relay_configuration import (
     GatewayHealthTargetBinding, GatewayHealthRelayConfiguration,
@@ -27,8 +19,8 @@ from control_plane_kit_servers_cpk_local_gateway.health_transit_verification imp
     gateway_health_transit_verifier_from_artifact,
 )
 from control_plane_kit_servers_cpk_local_gateway.server import create_app
-from health_signing_fixtures import world, RecordingResolver, key
-from receiver_configuration_fixtures import gateway_artifact
+from health_signing_fixtures import world, RecordingResolver
+from receiver_configuration_fixtures import gateway_artifact, receiver_configuration
 
 
 class Resolver:
@@ -67,7 +59,7 @@ class World:
         value.transit = replace(value.transit, **changed)
         value.workload = replace(value.workload, **changed)
         self.now = 150
-        self.context = HealthSigningContext(value.request, "attempt-a", value.gateway,
+        self.context = HealthSigningContext(value.request, "attempt-a", value.gateway_target,
             value.declaration, "transit-issuer", "workload-issuer")
         signer = Ed25519HealthCredentialPairSigner(RecordingResolver(value), lambda:self.now)
         self.pair = signer.sign(self.context, transit_grant=value.transit, workload_grant=value.workload,
@@ -79,40 +71,30 @@ class World:
         self.callbacks = []
         self.outcome = core.NodeHealthReadOutcome.HEALTHY
         self.workload_transport = Transport(httpx.ASGITransport(app=self.workload_app()))
-        configuration = GatewayHealthRelayConfiguration(value.target.workspace_id, value.gateway,
-            value.runtime, (GatewayHealthTargetBinding("workload-management", value.target,
-                value.runtime, value.declaration, "http://workload-a:8087"),))
+        configuration = GatewayHealthRelayConfiguration(value.gateway_target,
+            (GatewayHealthTargetBinding("workload-management", value.target,
+                value.declaration, "http://workload-a:8087"),))
         relay = GatewayHealthRelay(configuration, gateway_health_transit_verifier_from_artifact(
             gateway_artifact(value)), clock=lambda:self.now, transport=self.workload_transport)
         self.gateway_transport = Transport(httpx.ASGITransport(app=create_app(health_relay=relay)))
 
     def workload_app(self):
         value = self.value
-        audience = core.workload_node_control_audience(value.target)
-        health = Ed25519WorkloadNodeHealthReadVerifier(AtomicWorkloadNodeHealthReadVerifierKeySet(
-            WorkloadNodeHealthReadVerifierKeySet(core.DelegationKeyPurpose.WORKLOAD_NODE_HEALTH_READ,
-                (value.publics[1],))), expected_issuer="workload-issuer", expected_audience=audience,
-            clock=lambda:self.now)
-        surface = Ed25519WorkloadNodeControlSurfaceReadVerifier(AtomicWorkloadNodeControlSurfaceReadVerifierKeySet(
-            WorkloadNodeControlSurfaceReadVerifierKeySet(core.DelegationKeyPurpose.WORKLOAD_NODE_CONTROL_SURFACE_READ,
-                (key("surface-key")[1],))), expected_issuer="surface-issuer", expected_audience=audience,
-            clock=lambda:self.now)
+        configuration = receiver_configuration(value.target, value.declaration, value.publics[1])
         def callback(kind):
             self.callbacks.append(kind)
             return self.outcome
         app = FastAPI()
-        install_cpk_control_routes(app, target=value.target, declaration=value.declaration,
-            surface_read_verifier=surface, health_dispatcher=WorkloadNodeHealthReadDispatcher(
-                target=value.target, runtime_id=value.runtime, declaration=value.declaration, verifier=health,
-                liveness=(lambda:callback(core.NodeHealthReadKind.LIVENESS))
-                    if core.NodeHealthReadKind.LIVENESS in value.declaration.surface.health_reads else None,
-                readiness=(lambda:callback(core.NodeHealthReadKind.READINESS))
-                    if core.NodeHealthReadKind.READINESS in value.declaration.surface.health_reads else None))
+        install_cpk_wrapper(app, configuration=configuration, clock=lambda:self.now,
+            liveness=(lambda:callback(core.NodeHealthReadKind.LIVENESS))
+                if core.NodeHealthReadKind.LIVENESS in value.declaration.surface.health_reads else None,
+            readiness=(lambda:callback(core.NodeHealthReadKind.READINESS))
+                if core.NodeHealthReadKind.READINESS in value.declaration.surface.health_reads else None)
         return app
 
     def destination(self, module):
         return module.SelectedManagementGateway(self.ingress, self.value.gateway, "control",
-            self.value.runtime, "workload-management")
+            self.value.runtime, "workload-management", core.GatewayTransitProtocol.RECEIVER_HEALTH_READ_V2)
 
     def client(self, module, **changes):
         return module.SignedGatewayHealthClient(**{"clock":lambda:self.now,

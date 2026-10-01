@@ -24,6 +24,23 @@ reviewed I175/receiving237 plan: full gateway/workload receiver targets, separat
 request authority context, independent observer authority input, and canonical
 V2 transit. No runtime implementation or dependency adoption is claimed here.
 
+The subsequent #175 preimplementation target translation uses the actual common
+receiver configuration for Secrets and workload fixtures, receiver HEALTH V2
+requests/grants, full independent gateway targets and receiver audiences. The
+process fixture selects `CPK_WRAPPER_CONFIGURATION_FILE` with public mode0444;
+its private key/credential files stay0600. Real provider/SDK/gateway owners and
+all existing signer assertions remain. The immutable obsolete negative helper
+is unchanged. One added method strengthens full gateway scope and both authority
+context mismatch refusals before material resolution. Declared archive constants
+will advance only with the actual candidate pins; no nonexistent SB is invented.
+
+The initial #175 ordinary red at70a3503 ran404 tests: all403 prior methods pass
+and exactly the new obsolete-signing refusal fails with no errors. That evidence
+does not execute these later translated fixtures or new canonical assertions.
+They require the actual K/U/Z + SB/IC whole gate; this target translation is
+reviewed before production and is not separately run against knowingly mixed
+dependencies.
+
 The #173 dependency adoption touches only the existing installed-owner
 provenance expectations in HealthSigningPrerequisiteTests. Secrets now selects
 the reviewed #40 merge `7a26fdc174ceb08657ed23062bf3323f62e48f4b`; its SDK

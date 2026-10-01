@@ -100,3 +100,29 @@ into both resolution grants; legacy default attempt-a and all signer/assertion
 semantics remain unchanged. Run 35806125926 is setup-only evidence (26 support
 and 373 existing package tests passed), not causal observer red. The corrected
 fixture must pass setup before missing observer behavior can be credited.
+# #175 preimplementation receiver targets
+
+The fixture translations keep actual Core compilation, installed common SDK
+receivers, real gateway relay and same-app gateway bootstrap. Workload and gateway
+nodes carry their independently authored common public configuration artifacts
+and explicit environment path binding. The signer uses full receiver targets;
+the fixture retains independent `authority_context` for the observer rather than
+updating it implicitly when a signed request is changed.
+
+All existing workload/bootstrap methods and negatives remain. Authored revision
+checks now inspect the request authority context. Foreign scope cases include
+full receiver and gateway receiver identities plus authored and realized context.
+Two new methods show a retained installed target under explicitly changed current
+authority, and reject a valid foreign selected receiver artifact after recompiling
+its actual graph, so an obsolete graph digest cannot substitute for that check.
+Unsupported operations must not touch the new authority input. The connector
+fixture only adopts Core's canonical advertisement member; connector semantics
+are unchanged.
+
+These targets precede the observer implementation. Its designed additional
+keyword argument is `authority_context: NodeControlAuthorityContext`. It compares
+that independently supplied value with the original request and authored plan
+side; it selects exact common workload/gateway artifacts through the Core selector.
+It cannot infer the realized projection from topology or establish database
+authorization. The original causal-red checkpoint proves obsolete signer refusal
+only. All translated and new selection laws require real paired whole-green.

@@ -1,5 +1,23 @@
 # Selected signed gateway health transport (#147)
 
+## #175 preimplementation target interface
+
+Targets retain the same selected ingress/node/transit socket/runtime/alias
+projection and add mandatory `gateway_transit_protocol: GatewayTransitProtocol`.
+Only the typed canonical `RECEIVER_HEALTH_READ_V2` declaration is admissible;
+old or untyped string profiles refuse before DNS/HTTP. Own gateway receiver
+scope is independently carried by `HealthSigningContext.gateway_target` and
+checked by the original receiver transit grant; it does not name the transit
+socket. The observer additionally binds that full target to selected artifacts.
+
+The wire envelope becomes `cpk-gateway-health-relay-request.v2`. Requests,
+grants and results use actual receiver V2 codecs. Runtime is read from the full
+target, while endpoint observation provenance uses the original request's
+`authority_context.authored_graph_id`. The real fixture composes the actual
+common SDK wrapper and Servers relay; all semantic outcomes, denial counts,
+body/deadline bounds and closure laws below remain governing. Production/pins
+are unchanged at this target stage, so canonical execution is not yet credited.
+
 Design: [focused plan](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/147#issuecomment-5743167319),
 [independent review](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/147#issuecomment-5743180581),
 and [owner disposition](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/147#issuecomment-5743181523).
