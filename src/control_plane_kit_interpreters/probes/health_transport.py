@@ -18,18 +18,21 @@ import socket
 from typing import Protocol as TypingProtocol
 
 import httpx
-from control_plane_kit_core.node_control import NodeControlGraphReference, NodeControlGraphReferenceRole, workload_node_control_audience
-from control_plane_kit_core.node_health_reads import (
-    DelegatedWorkloadNodeHealthReadGrant, DelegatedWorkloadNodeHealthReadGrantCodec,
-    verify_workload_node_health_read_grant,
+from control_plane_kit_core.node_control import NodeControlGraphReference, NodeControlGraphReferenceRole
+from control_plane_kit_core.receiver_identity import receiver_node_control_audience
+from control_plane_kit_core.runtime_management import GatewayTransitProtocol
+from control_plane_kit_core.receiver_health_reads import (
+    DelegatedWorkloadReceiverHealthReadGrant, DelegatedWorkloadReceiverHealthReadGrantCodec,
+    verify_workload_receiver_health_read_grant,
 )
-from control_plane_kit_core.node_health_transit import (
-    DelegatedGatewayNodeHealthReadTransitGrant, DelegatedGatewayNodeHealthReadTransitGrantCodec,
-    verify_gateway_node_health_read_transit_grant,
+from control_plane_kit_core.receiver_health_transit import (
+    DelegatedGatewayReceiverHealthReadTransitGrant, DelegatedGatewayReceiverHealthReadTransitGrantCodec,
+    verify_gateway_receiver_health_read_transit_grant,
 )
-from control_plane_kit_core.node_health_read_results import (
-    MAX_NODE_HEALTH_READ_RESULT_BYTES, NodeHealthReadResult, NodeHealthReadResultCodec,
+from control_plane_kit_core.receiver_health_read_results import (
+    ReceiverHealthReadResult, ReceiverHealthReadResultCodec,
 )
+from control_plane_kit_core.node_health_read_results import MAX_NODE_HEALTH_READ_RESULT_BYTES
 from control_plane_kit_core.probe_intents import EndpointContext, LiteralEndpointMaterial, RuntimeEndpointObservation
 from control_plane_kit_core.public_ingress import NamedPublicIngress, NamedPublicIngressCodec, PublicIngressExposure
 from control_plane_kit_core.types import Protocol
@@ -54,11 +57,11 @@ class GatewayHealthTransportCode(StrEnum):
 @dataclass(frozen=True, slots=True)
 class GatewayHealthTransportResult:
     code: GatewayHealthTransportCode
-    result: NodeHealthReadResult | None = field(default=None, repr=False)
+    result: ReceiverHealthReadResult | None = field(default=None, repr=False)
 
     def __post_init__(self):
         if (type(self.code) is not GatewayHealthTransportCode
-                or (self.code is GatewayHealthTransportCode.RECEIVED and type(self.result) is not NodeHealthReadResult)
+                or (self.code is GatewayHealthTransportCode.RECEIVED and type(self.result) is not ReceiverHealthReadResult)
                 or (self.code is not GatewayHealthTransportCode.RECEIVED and self.result is not None)):
             raise ValueError("health transport result is invalid")
 
@@ -75,6 +78,7 @@ class SelectedManagementGateway:
     gateway_transit_provider_socket_name: str
     runtime_id: NodeControlGraphReference
     target_id: str
+    gateway_transit_protocol: GatewayTransitProtocol
 
 
 class AsyncPublicAddressResolver(TypingProtocol):
@@ -115,8 +119,8 @@ class SignedGatewayHealthClient:
 
     async def dispatch(self, context: HealthSigningContext, pair: SignedHealthCredentialPair,
                        destination: SelectedManagementGateway, *,
-                       transit_grant: DelegatedGatewayNodeHealthReadTransitGrant,
-                       workload_grant: DelegatedWorkloadNodeHealthReadGrant) -> GatewayHealthTransportResult:
+                       transit_grant: DelegatedGatewayReceiverHealthReadTransitGrant,
+                       workload_grant: DelegatedWorkloadReceiverHealthReadGrant) -> GatewayHealthTransportResult:
         try:
             context, transit, workload = _inputs(context, pair, transit_grant, workload_grant, self.clock)
         except Exception:
@@ -135,7 +139,7 @@ class SignedGatewayHealthClient:
                             or any(type(value) is not str or len(value) > 45 for value in answers)):
                         raise ValueError
                     endpoint = RuntimeEndpointObservation(selected.gateway_node_id.value,
-                        selected.gateway_transit_provider_socket_name, context.request.target.graph_revision.value,
+                        selected.gateway_transit_provider_socket_name, context.request.authority_context.authored_graph_id,
                         Protocol.HTTP, EndpointContext.PUBLIC,
                         LiteralEndpointMaterial(f"https://{selected.ingress.hostname}:443"))
                     target = authorize_probe_endpoint(endpoint,
@@ -146,7 +150,7 @@ class SignedGatewayHealthClient:
                 except Exception:
                     return _failure(GatewayHealthTransportCode.DESTINATION_REJECTED)
                 _deadline(deadline)
-                body = _wire({"profile":"cpk-gateway-health-relay-request.v1", "target_id":selected.target_id,
+                body = _wire({"profile":"cpk-gateway-health-relay-request.v2", "target_id":selected.target_id,
                     "attempt_id":context.attempt_id, "request":context.request.descriptor(),
                     "workload_credential":pair.workload_credential.decode("ascii")})
                 if len(body) > 16384:
@@ -197,22 +201,22 @@ def _window(clock, transit, workload):
 
 def _inputs(context, pair, transit, workload, clock):
     context = _context(context)
-    transit = _canonical(transit, DelegatedGatewayNodeHealthReadTransitGrant, DelegatedGatewayNodeHealthReadTransitGrantCodec())
-    workload = _canonical(workload, DelegatedWorkloadNodeHealthReadGrant, DelegatedWorkloadNodeHealthReadGrantCodec())
+    transit = _canonical(transit, DelegatedGatewayReceiverHealthReadTransitGrant, DelegatedGatewayReceiverHealthReadTransitGrantCodec())
+    workload = _canonical(workload, DelegatedWorkloadReceiverHealthReadGrant, DelegatedWorkloadReceiverHealthReadGrantCodec())
     if (type(pair) is not SignedHealthCredentialPair or type(pair.request) is not type(context.request)
             or pair.request != context.request or (transit.issued_at, transit.not_before, transit.expires_at)
                 != (workload.issued_at, workload.not_before, workload.expires_at)):
         raise ValueError
-    expected = dict(expected_target=context.request.target, expected_runtime_id=context.request.runtime_id,
+    expected = dict(expected_target=context.request.target,
         expected_declaration=context.declaration, expected_kind=context.request.kind, now=_window(clock, transit, workload))
-    if not verify_gateway_node_health_read_transit_grant(transit, context.request,
+    if not verify_gateway_receiver_health_read_transit_grant(transit, context.request,
             expected_issuer=context.transit_issuer, expected_key_id=transit.key_id,
-            expected_attempt_id=context.attempt_id, expected_gateway_node_id=context.gateway_node_id,
+            expected_attempt_id=context.attempt_id, expected_gateway_target=context.gateway_target,
             **expected).is_accepted:
         raise ValueError
-    if not verify_workload_node_health_read_grant(workload, context.request,
+    if not verify_workload_receiver_health_read_grant(workload, context.request,
             expected_issuer=context.workload_issuer, expected_key_id=workload.key_id,
-            expected_audience=workload_node_control_audience(context.request.target), **expected).is_accepted:
+            expected_audience=receiver_node_control_audience(context.request.target), **expected).is_accepted:
         raise ValueError
     _credential(pair.transit_credential, transit, "CPK-GATEWAY-NODE-HEALTH-READ-TRANSIT+JWT", "gateway_node_health_read_transit")
     _credential(pair.workload_credential, workload, "CPK-WORKLOAD-NODE-HEALTH-READ+JWT", "workload_node_health_read")
@@ -226,16 +230,18 @@ def _destination(value, context):
     if (ingress != value.ingress or ingress.exposure is not PublicIngressExposure.HTTPS
             or type(value.gateway_node_id) is not NodeControlGraphReference
             or value.gateway_node_id.role is not NodeControlGraphReferenceRole.NODE
-            or value.gateway_node_id != context.gateway_node_id
+            or value.gateway_node_id != context.gateway_target.node_id
             or type(value.runtime_id) is not NodeControlGraphReference
-            or value.runtime_id != context.request.runtime_id
+            or value.runtime_id != context.request.target.runtime_id
+            or value.gateway_transit_protocol is not GatewayTransitProtocol.RECEIVER_HEALTH_READ_V2
             or type(value.gateway_transit_provider_socket_name) is not str
             or ingress.target.node_id != value.gateway_node_id.value
             or ingress.target.provider_socket != value.gateway_transit_provider_socket_name
             or type(value.target_id) is not str or _TARGET_ID.fullmatch(value.target_id) is None):
         raise ValueError
     return SelectedManagementGateway(ingress, value.gateway_node_id,
-        value.gateway_transit_provider_socket_name, value.runtime_id, value.target_id)
+        value.gateway_transit_provider_socket_name, value.runtime_id, value.target_id,
+        value.gateway_transit_protocol)
 
 
 def _wire(value):
@@ -325,7 +331,7 @@ async def _result(response, context):
                 return _failure(GatewayHealthTransportCode.OVERSIZED_RESPONSE)
             body.extend(chunk)
     try:
-        result = NodeHealthReadResultCodec(context.request, context.declaration).decode(_json(bytes(body)))
+        result = ReceiverHealthReadResultCodec(context.request, context.declaration).decode(_json(bytes(body)))
         return GatewayHealthTransportResult(GatewayHealthTransportCode.RECEIVED, result)
     except (ValueError, TypeError, KeyError, RecursionError):
         return _failure(GatewayHealthTransportCode.MALFORMED_RESPONSE)

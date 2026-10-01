@@ -1,6 +1,20 @@
 Source: [pyproject.toml](../../pyproject.toml).
 
-Current #173 adoption selects Core `6b2d173bccbab9f8cb4fa4c35fef60d2ca27aa0e`
+Current #175 I-A selects accepted Core `250d65e19dc748ebe840f705be77eb732dab3cb3`
+and test-only Secrets `edfb8c0ebfc0cfcf3a667fb60d52b4a83bda1634`, which selects
+SDK `5dc93b92c27bb9bbe2af027f945a347e5e4131bc` and that identical Core URL.
+Existing exact metadata and installed-owner expectations advance together.
+The three health effect owners adopt receiver V2; this producer candidate is
+explicitly unvalidated. Its old test-only Servers pin remains until an actual
+reviewed S-B exists. Under the approved finite sequence, S-B resolves I-A as its
+runtime dependency and passes the whole Servers gate; I-C then changes only the
+test-only Servers coordinate to S-B and runs the unchanged whole Interpreter
+gate. There is no mixed-closure execution or independent-green claim for I-A.
+The existing test-only `--no-deps` witness does not prove Servers dependency
+resolution; the S-B gate owns that proof. No gate, runner or runtime fallback
+changes accompany these coordinates. Earlier selections below are historical.
+
+Historical #173 adoption selected Core `6b2d173bccbab9f8cb4fa4c35fef60d2ca27aa0e`
 and test-only Secrets `7a26fdc174ceb08657ed23062bf3323f62e48f4b`. That reviewed
 Secrets #40 merge selects SDK `e19b7ed205d492bdae3abe7c2449732bcc4d53dc`
 and the identical Core URL. Existing exact metadata/installed-provenance

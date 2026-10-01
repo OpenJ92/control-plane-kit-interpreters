@@ -1,8 +1,8 @@
 # Selected signed gateway health transport (#147)
 
-## #175 preimplementation target interface
+## #175 receiver implementation candidate
 
-Targets retain the same selected ingress/node/transit socket/runtime/alias
+The client retains the same selected ingress/node/transit socket/runtime/alias
 projection and add mandatory `gateway_transit_protocol: GatewayTransitProtocol`.
 Only the typed canonical `RECEIVER_HEALTH_READ_V2` declaration is admissible;
 old or untyped string profiles refuse before DNS/HTTP. Own gateway receiver
@@ -15,8 +15,9 @@ grants and results use actual receiver V2 codecs. Runtime is read from the full
 target, while endpoint observation provenance uses the original request's
 `authority_context.authored_graph_id`. The real fixture composes the actual
 common SDK wrapper and Servers relay; all semantic outcomes, denial counts,
-body/deadline bounds and closure laws below remain governing. Production/pins
-are unchanged at this target stage, so canonical execution is not yet credited.
+body/deadline bounds and closure laws below remain governing. This I-A producer
+candidate selects accepted K/U/Z; canonical execution awaits the real S-B/I-C
+paired gates and is not yet credited. Historical validation below predates #175.
 
 Design: [focused plan](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/147#issuecomment-5743167319),
 [independent review](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/147#issuecomment-5743180581),

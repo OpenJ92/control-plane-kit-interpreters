@@ -1,6 +1,13 @@
 Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py).
 Maintain this document alongside its source file. When the source or relevant imported contracts change, verify and update this companion in the same change.
 
+Current #175 I-A keeps reviewed targets at `a025135` and advances the exact
+installed Secrets/SDK provenance constants to accepted Z `edfb8c0` and U
+`5dc93b9`. The old Servers test-only coordinate remains until real S-B exists.
+Production now implements receiver V2, but no canonical execution is credited
+before S-B/I-C whole gates. Target-red/static-review history below records the
+preimplementation sequence; it is not source-green evidence.
+
 #175 target checkpoint preserves the complete accepted old dependency closure
 and all 403 existing package methods. One new migration method requires the
 actual signer to reject a lawful obsolete V1 pair before resolver, JWT signing
