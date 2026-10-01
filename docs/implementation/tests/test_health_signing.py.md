@@ -1,12 +1,21 @@
 Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py).
 Maintain this document alongside its source file. When the source or relevant imported contracts change, verify and update this companion in the same change.
 
-Current #175 I-A keeps reviewed targets at `a025135` and advances the exact
-installed Secrets/SDK provenance constants to accepted Z `edfb8c0` and U
-`5dc93b9`. The old Servers test-only coordinate remains until real S-B exists.
-Production now implements receiver V2, but no canonical execution is credited
-before S-B/I-C whole gates. Target-red/static-review history below records the
-preimplementation sequence; it is not source-green evidence.
+Current #175 I-C selects actual Servers S-B
+`9921911d3939855a4f7c1989acdf7683fc8961da` only in the existing Docker test
+stage and its exact installed-provenance expectation. Servers' unchanged whole
+gate 36938731434 passed and received independent complete-green review.
+Accepted Secrets Z `edfb8c0` and SDK U `5dc93b9` remain selected. All shipped
+Interpreter source, resources, entrypoints and runtime dependency metadata stay
+byte-equal to I-A `8c88dda505c1aa6c7490c0bb16c541bf524644fd`.
+
+The existing `--no-deps` installation preserves the local candidate Interpreter
+under test while exercising actual S-B gateway code; it is not evidence of
+normal Servers dependency resolution. S-B's own gate proves its I-A closure.
+The unchanged whole Interpreter gate must still validate this I-C candidate.
+Final Servers adoption must select actual accepted I-M and rerun its whole gate;
+the approved finite exception retains this S-B test witness. Target-red and
+static-review history below record prior stages, not current executable green.
 
 #175 target checkpoint preserves the complete accepted old dependency closure
 and all 403 existing package methods. One new migration method requires the
