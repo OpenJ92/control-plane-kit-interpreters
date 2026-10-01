@@ -1,5 +1,6 @@
 """#147 real signer/relay/SDK composition with synthetic selected inputs only."""
 from dataclasses import replace
+from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
@@ -70,13 +71,26 @@ class World:
         self.resolver = Resolver()
         self.callbacks = []
         self.outcome = core.NodeHealthReadOutcome.HEALTHY
-        self.workload_transport = Transport(httpx.ASGITransport(app=self.workload_app()))
+        self.workload_application = self.workload_app()
+        self.workload_transport = Transport(httpx.ASGITransport(app=self.workload_application))
         configuration = GatewayHealthRelayConfiguration(value.gateway_target,
             (GatewayHealthTargetBinding("workload-management", value.target,
                 value.declaration, "http://workload-a:8087"),))
         relay = GatewayHealthRelay(configuration, gateway_health_transit_verifier_from_artifact(
             gateway_artifact(value)), clock=lambda:self.now, transport=self.workload_transport)
-        self.gateway_transport = Transport(httpx.ASGITransport(app=create_app(health_relay=relay)))
+        self.gateway_app = create_app(health_relay=relay)
+        self.gateway_transport = Transport(httpx.ASGITransport(app=self.gateway_app))
+
+    @asynccontextmanager
+    async def workload_lifespan(self):
+        # ASGITransport does not start application lifespan. The separate real
+        # workload must be serving for its SDK readiness callback to execute.
+        # Same-app bootstrap keeps its existing caller-owned gateway lifespan.
+        if self.workload_application is self.gateway_app:
+            yield
+        else:
+            async with self.workload_application.router.lifespan_context(self.workload_application):
+                yield
 
     def workload_app(self):
         value = self.value
@@ -104,4 +118,5 @@ class World:
         values = dict(context=self.context, pair=self.pair, destination=self.destination(module),
             transit_grant=self.value.transit, workload_grant=self.value.workload)
         values.update(changes)
-        return await (client or self.client(module)).dispatch(**values)
+        async with self.workload_lifespan():
+            return await (client or self.client(module)).dispatch(**values)

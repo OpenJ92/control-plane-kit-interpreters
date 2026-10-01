@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
 import control_plane_kit_core as core
+from control_plane_kit_core.wrapper_configuration import NodeControlVerificationConfiguration
 from control_plane_kit_core.secrets import (
     SecretProviderEndpointReference, SecretReference, SecretResolutionGrant,
     SecretResolved, SecretUseIntent, SecretValue,
@@ -48,9 +49,9 @@ def provider_control():
             (roles.WORKSPACE, "workspace-a"), (roles.RUNTIME, "runtime-a"),
             (roles.NODE, "provider-a"), (roles.PROVIDER_SOCKET, "control"))), "c" * 32)
     return core.ReceiverNodeControlConfiguration(target, secrets_control_declaration(), (
-        core.NodeControlVerificationConfiguration(core.DelegationKeyPurpose.WORKLOAD_NODE_CONTROL_SURFACE_READ,
+        NodeControlVerificationConfiguration(core.DelegationKeyPurpose.WORKLOAD_NODE_CONTROL_SURFACE_READ,
             "surface-issuer", (key("surface")[1],)),
-        core.NodeControlVerificationConfiguration(core.DelegationKeyPurpose.WORKLOAD_NODE_HEALTH_READ,
+        NodeControlVerificationConfiguration(core.DelegationKeyPurpose.WORKLOAD_NODE_HEALTH_READ,
             "health-issuer", (key("health")[1],))))
 
 

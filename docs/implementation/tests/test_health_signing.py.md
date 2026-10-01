@@ -41,6 +41,11 @@ They require the actual K/U/Z + SB/IC whole gate; this target translation is
 reviewed before production and is not separately run against knowingly mixed
 dependencies.
 
+Static target review also corrected both configuration fixtures to import
+`NodeControlVerificationConfiguration` from its actual `wrapper_configuration`
+owner; accepted Core does not export it at the package root. No Core export or
+compatibility facade is added. This was caught before executable validation.
+
 The #173 dependency adoption touches only the existing installed-owner
 provenance expectations in HealthSigningPrerequisiteTests. Secrets now selects
 the reviewed #40 merge `7a26fdc174ceb08657ed23062bf3323f62e48f4b`; its SDK

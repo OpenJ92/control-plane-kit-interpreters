@@ -95,7 +95,8 @@ class ManagedWorld(World):
         self.artifacts = (gateway_artifact(value), gateway_health_relay_configuration_artifact(configuration),
             gateway_control_configuration_artifact(own))
         self.contract = gateway_health_source_runtime_contract(*self.artifacts)
-        self.workload_transport = Transport(httpx.ASGITransport(app=self.workload_app()))
+        self.workload_application = self.workload_app()
+        self.workload_transport = Transport(httpx.ASGITransport(app=self.workload_application))
         relay = GatewayHealthRelay(configuration, gateway_health_transit_verifier_from_artifact(self.artifacts[0]),
             clock=lambda:self.now, transport=self.workload_transport)
         self.gateway_app = create_app(health_relay=relay, control_configuration=own, clock=lambda:self.now)
@@ -152,7 +153,8 @@ class ManagedWorld(World):
             pair=self.pair, transit_grant=self.value.transit, workload_grant=self.value.workload,
             destination=self.destination(health_transport))
         values.update(changes)
-        return await module.DockerManagedHealthObserver(client or self.client(health_transport)).observe(**values)
+        async with self.workload_lifespan():
+            return await module.DockerManagedHealthObserver(client or self.client(health_transport)).observe(**values)
 
 
 class BootstrapWorld(ManagedWorld):
@@ -186,6 +188,7 @@ class BootstrapWorld(ManagedWorld):
         relay = GatewayHealthRelay(configuration, gateway_health_transit_verifier_from_artifact(self.artifacts[0]),
             clock=lambda:self.now, transport=self.workload_transport)
         self.gateway_app = create_app(health_relay=relay, control_configuration=own, clock=lambda:self.now)
+        self.workload_application = self.gateway_app
         self.workload_transport.inner = httpx.ASGITransport(app=self.gateway_app)
         self.gateway_transport = Transport(httpx.ASGITransport(app=self.gateway_app))
 

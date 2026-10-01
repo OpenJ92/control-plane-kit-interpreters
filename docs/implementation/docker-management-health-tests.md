@@ -102,6 +102,16 @@ and 373 existing package tests passed), not causal observer red. The corrected
 fixture must pass setup before missing observer behavior can be credited.
 # #175 preimplementation receiver targets
 
+Static review of target757ea88 caught a fixture lifecycle defect before any
+execution: ASGITransport alone does not start the actual common SDK wrapper's
+lifespan, so workload readiness would return unhealthy without invoking the
+test callback. The target correction retains the real workload app and enters
+and exits its actual lifespan around its dispatch/observer/direct prerequisite
+witness. Same-app bootstrap identifies the workload app with the gateway and
+keeps the existing caller-owned gateway lifespan, avoiding duplicate startup.
+No lifecycle internals or callback assertions are changed. This is a reviewed
+fixture correction, not evidence of a product failure or another test run.
+
 The fixture translations keep actual Core compilation, installed common SDK
 receivers, real gateway relay and same-app gateway bootstrap. Workload and gateway
 nodes carry their independently authored common public configuration artifacts

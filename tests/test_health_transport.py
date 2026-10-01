@@ -43,12 +43,13 @@ def corrupt_signature(token):
 class HealthTransportPrerequisiteTests(unittest.IsolatedAsyncioTestCase):
     async def test_actual_signer_pair_is_admitted_by_selected_relay_and_sdk(self):
         value = World()
-        async with httpx.AsyncClient(transport=value.gateway_transport, base_url="https://gateway.example.invalid") as client:
-            response = await client.post("/cpk/health/liveness", headers={
-                "Authorization":"Bearer " + value.pair.transit_credential.decode()}, json={
-                "profile":"cpk-gateway-health-relay-request.v2", "target_id":"workload-management",
-                "attempt_id":value.context.attempt_id, "request":value.pair.request.descriptor(),
-                "workload_credential":value.pair.workload_credential.decode()})
+        async with value.workload_lifespan():
+            async with httpx.AsyncClient(transport=value.gateway_transport, base_url="https://gateway.example.invalid") as client:
+                response = await client.post("/cpk/health/liveness", headers={
+                    "Authorization":"Bearer " + value.pair.transit_credential.decode()}, json={
+                    "profile":"cpk-gateway-health-relay-request.v2", "target_id":"workload-management",
+                    "attempt_id":value.context.attempt_id, "request":value.pair.request.descriptor(),
+                    "workload_credential":value.pair.workload_credential.decode()})
         self.assertEqual(response.status_code, 200)
         result = core.ReceiverHealthReadResultCodec(value.value.request, value.value.declaration).decode(response.json())
         self.assertIs(result.outcome, core.NodeHealthReadOutcome.HEALTHY)

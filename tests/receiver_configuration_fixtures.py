@@ -3,6 +3,7 @@ from dataclasses import replace
 import json
 
 import control_plane_kit_core as core
+from control_plane_kit_core.wrapper_configuration import NodeControlVerificationConfiguration
 from control_plane_kit_core.configuration import ConfigurationArtifact, ConfigurationMediaType
 from control_plane_kit_servers_cpk_local_gateway.health_transit_configuration import (
     ARTIFACT_ID, CONFIGURATION_PATH, PROFILE,
@@ -22,9 +23,9 @@ def gateway_artifact(value):
 def receiver_configuration(target, declaration, health_public):
     """Actual common value; installed targets come from fixture topology intent."""
     return core.ReceiverNodeControlConfiguration(target, declaration, (
-        core.NodeControlVerificationConfiguration(core.DelegationKeyPurpose.WORKLOAD_NODE_CONTROL_SURFACE_READ,
+        NodeControlVerificationConfiguration(core.DelegationKeyPurpose.WORKLOAD_NODE_CONTROL_SURFACE_READ,
             "surface-issuer", (key("surface-key")[1],)),
-        core.NodeControlVerificationConfiguration(core.DelegationKeyPurpose.WORKLOAD_NODE_HEALTH_READ,
+        NodeControlVerificationConfiguration(core.DelegationKeyPurpose.WORKLOAD_NODE_HEALTH_READ,
             "workload-issuer", (health_public,))))
 
 
