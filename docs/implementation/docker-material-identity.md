@@ -39,3 +39,9 @@ contract; the corrected target carries both. Request fingerprint inequality now
 compares two Reconcile intents differing only in graph/plan before changing the
 new result's event coordinate, so a changed operation cannot satisfy the law.
 No failing CI or application execution occurred before this correction.
+
+The same pre-CI review strengthened malformed graph/plan/digest refusal with
+changed material as well as equal material, proving the guard precedes the
+replacement branch and workload/image resolution/start. Digest negatives include
+wrong length, nonhex and uppercase64 evidence. These are the reviewed canonical
+evidence law; production scope and all opposing cases remain unchanged.

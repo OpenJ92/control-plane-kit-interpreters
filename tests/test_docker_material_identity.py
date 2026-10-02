@@ -120,25 +120,40 @@ class DockerMaterialIdentityTests(unittest.TestCase):
 
     def test_reconcile_refuses_malformed_creation_coordinates_and_material_digest(self):
         for field in ("plan", "desired-graph", "fingerprint"):
-            for malformed in (None, "", 9):
-                with self.subTest(field=field, malformed=malformed):
-                    raw, sdk, interpreter, original, container = _fixture()
-                    labels = dict(sdk.inspect_container(container.name).labels)
-                    labels.pop(_PREFIX + field)
-                    if malformed is not None:
-                        labels[_PREFIX + field] = malformed
-                    inspection = replace(sdk.inspect_container(container.name), labels=labels)
-                    current = replace(original, operation=ReconcileNode(NodeTarget("api")))
-                    with patch.object(sdk, "inspect_container", return_value=inspection), patch.object(
-                        sdk, "remove_container", wraps=sdk.remove_container,
-                    ) as remove, patch.object(sdk, "create_container", wraps=sdk.create_container) as create:
-                        result = interpreter.execute(current)
-                    self.assertIs(result.kind, EffectResultKind.FAILED)
-                    self.assertEqual(result.observations, ())
-                    remove.assert_not_called()
-                    create.assert_not_called()
-                    self.assertFalse(container.removed)
-                    self.assertEqual(len(_workload_container_records(raw)), 1)
+            malformed_values = (None, "", 9)
+            if field == "fingerprint":
+                malformed_values += ("abc", "z" * 64, "A" * 64)
+            for malformed in malformed_values:
+                for changed_material in (False, True):
+                    with self.subTest(field=field, malformed=malformed, changed_material=changed_material):
+                        raw, sdk, interpreter, original, container = _fixture()
+                        labels = dict(sdk.inspect_container(container.name).labels)
+                        labels.pop(_PREFIX + field)
+                        if malformed is not None:
+                            labels[_PREFIX + field] = malformed
+                        inspection = replace(sdk.inspect_container(container.name), labels=labels)
+                        current = replace(original, operation=ReconcileNode(NodeTarget("api")))
+                        if changed_material:
+                            current = replace(current, products=(replace(current.products[0],
+                                public_environment=(PublicStaticEnvironmentBinding("PORT", "9090"),)),))
+                        with patch.object(sdk, "inspect_container", return_value=inspection), patch.object(
+                            runtime_module, "_resolve_product_secret_deliveries",
+                            wraps=runtime_module._resolve_product_secret_deliveries,
+                        ) as secrets, patch.object(runtime_module, "_image_pull_auth_config",
+                            wraps=runtime_module._image_pull_auth_config,
+                        ) as image_auth, patch.object(sdk, "remove_container", wraps=sdk.remove_container) as remove, patch.object(
+                            sdk, "create_container", wraps=sdk.create_container,
+                        ) as create, patch.object(sdk, "start_container", wraps=sdk.start_container) as start:
+                            result = interpreter.execute(current)
+                        self.assertIs(result.kind, EffectResultKind.FAILED)
+                        self.assertEqual(result.observations, ())
+                        secrets.assert_not_called()
+                        image_auth.assert_not_called()
+                        remove.assert_not_called()
+                        create.assert_not_called()
+                        start.assert_not_called()
+                        self.assertFalse(container.removed)
+                        self.assertEqual(len(_workload_container_records(raw)), 1)
 
     def test_cross_graph_reconcile_still_refuses_foreign_scope(self):
         for field in ("workspace", "runtime", "node"):
