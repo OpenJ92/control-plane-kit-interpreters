@@ -59,7 +59,7 @@ lifecycle work:
 StartRuntime        -> create or verify owned Docker network
 StopRuntime         -> logical runtime barrier; no destructive network removal
 StartNode           -> pull digest image, create owned container, report observations
-ReconcileNode       -> same desired-container convergence path as StartNode
+ReconcileNode       -> converge owned material, preserving creation provenance on reuse
 StopNode            -> stop only the owned container
 RemoveNodeResource  -> remove only the owned container
 ```
@@ -133,10 +133,24 @@ separate #163 acceptance; no standalone live qualification fixture is introduced
 
 For an existing node with nonempty desired authority, a changed fingerprint is
 unsupported before mutation because the request has no trustworthy prior
-declaration. This includes image, environment and desired-graph changes. An
-unchanged Reconcile may correlate a different recorded plan while preserving
-all other identity/image/network/authority checks; Start retains exact plan
-identity. Approved Stop/Remove select no process authority and retain the
+declaration. This includes image and environment changes. The canonical
+`node-material.v1` fingerprint includes selected process material and owned
+scope, while graph and plan remain creation/request correlation. Active
+Reconcile may reuse equal material under a new approved graph/plan without
+rewriting the original labels. Missing/unknown material profiles, malformed
+digests or missing creation coordinates refuse before workload/image secret
+resolution or replacement; there is no legacy-label adoption path. Actual
+image/network/authority and final-running checks remain mandatory.
+
+Start keeps exact graph/plan correlation. Retrospective Reconcile observation
+retains its existing prior-plan-only rule; it cannot infer completion for a
+new graph from material equality. Native health lookup also retains its graph
+restriction. Operations owns receiver continuity/retirement admission; labels
+cannot prove it. This does not open managed Update or fix the existing
+remove-before-create path for real material changes, which remains I177/1886
+work. See the [material identity companion](docs/implementation/docker-material-identity.md).
+
+Approved Stop/Remove select no process authority and retain the
 material declaration for identification. A same-coordinate Stop preserves its
 fingerprint, but observation across changed plan/graph identities remains a
 conflict; this is not a historical-resource adoption mechanism.

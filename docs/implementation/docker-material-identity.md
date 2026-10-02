@@ -45,3 +45,37 @@ changed material as well as equal material, proving the guard precedes the
 replacement branch and workload/image resolution/start. Digest negatives include
 wrong length, nonhex and uppercase64 evidence. These are the reviewed canonical
 evidence law; production scope and all opposing cases remain unchanged.
+
+## Causal red and implementation candidate
+
+Corrected targets `84f0d62262fb85e5ff08c47eb55fcd0efb046763` reached exactly 28
+assertion failures in four methods, zero errors, in ordinary CI36949970812 /
+job110660512929 (26 policy green;414 methods;39 mock locations;0 skips).
+The other410 methods, including all four new opposing methods, passed.
+PR179 comment5943774549 records the 4 graph-recreation +18 malformed-evidence
++5 profile +1 authority-graph classification. Independent causal-red PASS:
+PR179 independent causal-red review (linked in the PR discussion). Later gate witnesses did not
+run in red and are not credited. Targets remain unchanged in implementation.
+
+`docker.runtime` now emits the closed `node-material.v1` profile and hashes the
+same selected material/scope without desired graph ID. Active Reconcile checks
+recognizable profile, canonical digest and nonempty typed creation coordinates
+before reuse or replacement, workload/image resolution or later mutation. It
+then tolerates prior graph/plan only in its own initial and final conformance
+checks. Creation labels stay unchanged; current endpoint results keep the
+current graph. Start, connector and retrospective observer defaults stay exact;
+the observer's existing prior-plan-only exception is unchanged. Native health
+explicitly retains its original graph/material requirement and plan independence.
+
+Canonicalization remains Core's normalized material tuples plus the existing
+contract descriptor/digest encoding; there is no new public representation or
+compatibility fallback. The full request/intent fingerprint is untouched.
+Image, environment, contract/configuration, retained mounts and delivered
+authority remain material. No raw secret or new secret-value hash enters labels.
+Missing/unknown evidence fails with a fixed bounded code; remote transport
+credentials may precede inspection as before, while workload/image resolution
+cannot precede rejection. Provider reads are not process attestation.
+
+This candidate still needs the complete unchanged owning gate and independent
+exact-head review. No configuration-bearing observer support, lifecycle registry,
+route update, automatic compensation, cleanup or provider/live proof is added.
