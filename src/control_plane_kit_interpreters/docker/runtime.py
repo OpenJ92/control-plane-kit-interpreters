@@ -105,6 +105,7 @@ _LOCAL_DOCKER_SOCKET_PATH = "/var/run/docker.sock"
 
 
 _LABEL_PREFIX = "org.openj92.cpk"
+_NODE_MATERIAL_PROFILE = "node-material.v1"
 _SEGMENT = re.compile(r"[^a-zA-Z0-9_.-]+")
 
 
@@ -555,6 +556,7 @@ class DockerRuntimeInterpreter:
         inspection = self.client.inspect_container(container_name)
         if inspection is not None:
             _require_node_owner(inspection.labels, labels, "container")
+            _require_node_material_evidence(inspection.labels)
             _require_node_network(inspection, network_name)
             _require_node_container_authority(inspection, authority_delivery, self.client)
             if request.authority_deliveries and not _fingerprint_matches(inspection.labels, labels):
@@ -565,7 +567,8 @@ class DockerRuntimeInterpreter:
                 )
             if _fingerprint_matches(inspection.labels, labels):
                 _require_node_container_correlation(
-                    inspection, labels, network_name, allow_prior_plan=True,
+                    inspection, labels, network_name,
+                    allow_prior_plan=True, allow_prior_graph=True,
                 )
         secrets = _resolve_product_secret_deliveries(
             material,
@@ -604,7 +607,8 @@ class DockerRuntimeInterpreter:
         elif _fingerprint_matches(inspection.labels, labels):
             _require_start_node_container(
                 inspection, labels=labels, admitted_image=admitted_image,
-                network_name=network_name, require_running=False, allow_prior_plan=True,
+                network_name=network_name, require_running=False,
+                allow_prior_plan=True, allow_prior_graph=True,
             )
             if inspection.running:
                 action = "reused"
@@ -630,7 +634,8 @@ class DockerRuntimeInterpreter:
             raise _DockerStartNodeUncertainError(_StartNodePhase.FINAL_INSPECT)
         _require_start_node_container(
             observed, labels=labels, admitted_image=admitted_image,
-            network_name=network_name, require_running=True, allow_prior_plan=True,
+            network_name=network_name, require_running=True,
+            allow_prior_plan=True, allow_prior_graph=True,
         )
         _require_node_container_authority(observed, authority_delivery, self.client, final=True)
         published = observed.published_ports
@@ -914,6 +919,15 @@ class DockerRuntimeInterpreter:
         inspection = self.client.inspect_container(container_name)
         if inspection is not None:
             _require_owned(inspection.labels, labels, "container")
+            # Health lookup retains graph correlation even though material
+            # equality no longer includes that authored coordinate.
+            if any(inspection.labels.get(key) != labels[key] for key in (
+                f"{_LABEL_PREFIX}.material-profile", f"{_LABEL_PREFIX}.desired-graph",
+            )):
+                raise _DockerInterpreterPreconditionError(
+                    "docker.container-ownership-conflict",
+                    "Docker container is not owned by this runtime effect",
+                )
         return inspection
 
     def _preflight_secret_files(
@@ -1580,6 +1594,7 @@ def _node_labels(
         f"{_LABEL_PREFIX}.product": material.reference.identity.key,
         f"{_LABEL_PREFIX}.descriptor": material.reference.descriptor_sha256.value,
         f"{_LABEL_PREFIX}.image": material.product.image.digest,
+        f"{_LABEL_PREFIX}.material-profile": _NODE_MATERIAL_PROFILE,
         f"{_LABEL_PREFIX}.fingerprint": _node_fingerprint(request, material),
     }
 
@@ -1622,14 +1637,34 @@ def _require_node_container_authority(
         )
 
 
+def _require_node_material_evidence(labels: Mapping[str, str]) -> None:
+    fingerprint = labels.get(f"{_LABEL_PREFIX}.fingerprint")
+    coordinates = tuple(labels.get(f"{_LABEL_PREFIX}.{key}") for key in ("plan", "desired-graph"))
+    if (
+        labels.get(f"{_LABEL_PREFIX}.material-profile") != _NODE_MATERIAL_PROFILE
+        or type(fingerprint) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+        or any(type(value) is not str or not value.strip() for value in coordinates)
+    ):
+        raise _DockerInterpreterPreconditionError(
+            "docker.container-material-evidence-unsupported",
+            "Docker container material evidence is unsupported",
+        )
+
+
 def _node_correlation_labels(
     labels: Mapping[str, str], *, allow_prior_plan: bool = False,
+    allow_prior_graph: bool = False,
 ) -> dict[str, str]:
     expected = _cpk_ownership_labels(labels)
     if allow_prior_plan:
         plan_key = f"{_LABEL_PREFIX}.plan"
         if isinstance(expected.get(plan_key), str) and expected[plan_key]:
             expected[plan_key] = "<recorded-plan>"
+    if allow_prior_graph:
+        graph_key = f"{_LABEL_PREFIX}.desired-graph"
+        if isinstance(expected.get(graph_key), str) and expected[graph_key]:
+            expected[graph_key] = "<recorded-graph>"
     return expected
 
 
@@ -1639,10 +1674,17 @@ def _require_node_container_correlation(
     network_name: str,
     *,
     allow_prior_plan: bool = False,
+    allow_prior_graph: bool = False,
 ) -> None:
+    if allow_prior_graph:
+        # This allowance belongs only to newly executed Reconcile. Preserve
+        # recognizable creation evidence on both initial and final inspection.
+        _require_node_material_evidence(inspection.labels)
     if _node_correlation_labels(
-        inspection.labels, allow_prior_plan=allow_prior_plan,
-    ) != _node_correlation_labels(labels, allow_prior_plan=allow_prior_plan):
+        inspection.labels, allow_prior_plan=allow_prior_plan, allow_prior_graph=allow_prior_graph,
+    ) != _node_correlation_labels(
+        labels, allow_prior_plan=allow_prior_plan, allow_prior_graph=allow_prior_graph,
+    ):
         raise _DockerInterpreterPreconditionError(
             "docker.container-ownership-conflict",
             "Docker container is not owned by this runtime effect",
@@ -1666,9 +1708,11 @@ def _require_start_node_container(
     network_name: str,
     require_running: bool,
     allow_prior_plan: bool = False,
+    allow_prior_graph: bool = False,
 ) -> None:
     _require_node_container_correlation(
         inspection, labels, network_name, allow_prior_plan=allow_prior_plan,
+        allow_prior_graph=allow_prior_graph,
     )
     if inspection.image_id != admitted_image.image_id:
         raise _DockerInterpreterPreconditionError(
@@ -1747,9 +1791,8 @@ def _node_fingerprint(
     product = material.product
     contract = product.runtime_contract
     return _digest(
-        "node",
+        _NODE_MATERIAL_PROFILE,
         request.source.workspace_id,
-        request.source.desired_graph_id,
         material.node_id,
         material.runtime_id,
         material.reference.identity.key,

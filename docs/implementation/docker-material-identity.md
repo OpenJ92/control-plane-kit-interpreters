@@ -1,0 +1,81 @@
+# Docker material identity and request correlation (#176)
+
+Target checkpoint; application implementation is not yet changed. Accepted base
+I-M is `bdbab01c0babaead958450b3c5e643317b2f4cd9`. The reviewed law/source dry run
+is issue176 comment5943683903; independent design PASS is comment5943684023.
+
+`test_docker_material_identity.py` adds seven methods using the existing fake
+Docker SDK and public execute/observe seams. Targets cover active graph/plan
+reuse (running and stopped), immutable creation labels with current effect and
+endpoint correlation, exact Start, unsupported profile even with changed
+material, malformed creation coordinates/digest, cross-graph foreign scope,
+retrospective Reconcile and native health's preserved graph restriction.
+The existing authority-delivery matrix changes only its graph-only case to
+reuse; image/environment changes still refuse without a prior declaration.
+
+Law provenance: existing canonical-environment reuse, real-material replacement,
+authority-change refusal, foreign ownership, final inspection and observer
+correlation laws remain. New graph equivalence supersedes only graph-as-material;
+unknown-profile refusal strengthens safety before mismatch can reach replacement.
+No skips, xfail, test gate, dependency or production source changes.
+
+Expected causal red: graph-bearing hash prevents active graph reuse; no closed
+profile/refusal exists; missing/malformed digest can reach replacement. All
+opposing Start/observer/health and ownership laws should remain green. Run only
+the unchanged ordinary pinned Docker `./test.sh` through PR CI; record actual
+results before implementation. Mocked provider boundaries prove interpreter
+semantics, not installed routing, Operations admission or provider acceptance.
+
+Core/Operations validates selected continuity/origin and retirement before effect
+attempts; see accepted-K receiver_lifecycle, effect_attempt_start_interpreter and
+advancement trace in the issue. Docker labels are not lifecycle authority.
+Managed Update remains closed. Future I177/1886 owns stage-before-replace and
+cleanup; this slice cannot promise configuration rollout safety or availability.
+No new listener, secret-value hash, raw credential or automatic recovery is added.
+
+Pre-CI target review caught two fixture/evidence defects at d0ece7b. The current
+result's effect_id must match source.intent_event_id under Core's request
+contract; the corrected target carries both. Request fingerprint inequality now
+compares two Reconcile intents differing only in graph/plan before changing the
+new result's event coordinate, so a changed operation cannot satisfy the law.
+No failing CI or application execution occurred before this correction.
+
+The same pre-CI review strengthened malformed graph/plan/digest refusal with
+changed material as well as equal material, proving the guard precedes the
+replacement branch and workload/image resolution/start. Digest negatives include
+wrong length, nonhex and uppercase64 evidence. These are the reviewed canonical
+evidence law; production scope and all opposing cases remain unchanged.
+
+## Causal red and implementation candidate
+
+Corrected targets `84f0d62262fb85e5ff08c47eb55fcd0efb046763` reached exactly 28
+assertion failures in four methods, zero errors, in ordinary CI36949970812 /
+job110660512929 (26 policy green;414 methods;39 mock locations;0 skips).
+The other410 methods, including all four new opposing methods, passed.
+PR179 comment5943774549 records the 4 graph-recreation +18 malformed-evidence
++5 profile +1 authority-graph classification. Independent causal-red PASS:
+PR179 independent causal-red review (linked in the PR discussion). Later gate witnesses did not
+run in red and are not credited. Targets remain unchanged in implementation.
+
+`docker.runtime` now emits the closed `node-material.v1` profile and hashes the
+same selected material/scope without desired graph ID. Active Reconcile checks
+recognizable profile, canonical digest and nonempty typed creation coordinates
+before reuse or replacement, workload/image resolution or later mutation. It
+then tolerates prior graph/plan only in its own initial and final conformance
+checks. Creation labels stay unchanged; current endpoint results keep the
+current graph. Start, connector and retrospective observer defaults stay exact;
+the observer's existing prior-plan-only exception is unchanged. Native health
+explicitly retains its original graph/material requirement and plan independence.
+
+Canonicalization remains Core's normalized material tuples plus the existing
+contract descriptor/digest encoding; there is no new public representation or
+compatibility fallback. The full request/intent fingerprint is untouched.
+Image, environment, contract/configuration, retained mounts and delivered
+authority remain material. No raw secret or new secret-value hash enters labels.
+Missing/unknown evidence fails with a fixed bounded code; remote transport
+credentials may precede inspection as before, while workload/image resolution
+cannot precede rejection. Provider reads are not process attestation.
+
+This candidate still needs the complete unchanged owning gate and independent
+exact-head review. No configuration-bearing observer support, lifecycle registry,
+route update, automatic compensation, cleanup or provider/live proof is added.

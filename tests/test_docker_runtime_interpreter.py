@@ -2143,7 +2143,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                         desired = replace(desired, products=(replace(material, product=replace(material.product, image=replace(material.product.image, digest="sha256:" + "c" * 64))),))
                     with patch.object(sdk, "pull_image") as pull, patch.object(sdk, "remove_container") as remove, patch.object(sdk, "create_container") as create:
                         result = interpreter.execute(desired)
-                self.assertIs(result.kind, EffectResultKind.SUCCEEDED if change in ("none", "plan") else EffectResultKind.UNSUPPORTED)
+                self.assertIs(result.kind, EffectResultKind.SUCCEEDED if change in ("none", "plan", "graph") else EffectResultKind.UNSUPPORTED)
                 pull.assert_not_called()
                 remove.assert_not_called()
                 create.assert_not_called()
