@@ -48,12 +48,14 @@ class DockerMaterialIdentityTests(unittest.TestCase):
                     source = replace(original.source,
                         desired_graph_id="graph-b" if changed != "plan" else original.source.desired_graph_id,
                         plan_id="plan-b" if changed != "graph" else original.source.plan_id)
-                    current = replace(original, source=source, effect_id="effect-b",
-                                      operation=ReconcileNode(NodeTarget("api")))
+                    prior_reconcile = replace(original, operation=ReconcileNode(NodeTarget("api")))
+                    current = replace(prior_reconcile, source=source)
                     self.assertNotEqual(
-                        runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(original)),
+                        runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(prior_reconcile)),
                         runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(current)),
                     )
+                    current = replace(current, effect_id="effect-b",
+                                      source=replace(source, intent_event_id="effect-b"))
                     with patch.object(sdk, "remove_container", wraps=sdk.remove_container) as remove, patch.object(
                         sdk, "create_container", wraps=sdk.create_container,
                     ) as create:

@@ -32,3 +32,10 @@ advancement trace in the issue. Docker labels are not lifecycle authority.
 Managed Update remains closed. Future I177/1886 owns stage-before-replace and
 cleanup; this slice cannot promise configuration rollout safety or availability.
 No new listener, secret-value hash, raw credential or automatic recovery is added.
+
+Pre-CI target review caught two fixture/evidence defects at d0ece7b. The current
+result's effect_id must match source.intent_event_id under Core's request
+contract; the corrected target carries both. Request fingerprint inequality now
+compares two Reconcile intents differing only in graph/plan before changing the
+new result's event coordinate, so a changed operation cannot satisfy the law.
+No failing CI or application execution occurred before this correction.
