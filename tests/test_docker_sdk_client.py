@@ -583,6 +583,8 @@ class DockerSdkClientTests(unittest.TestCase):
             },
             {
                 "configuration_artifact_digest",
+                "inspect_configuration_file",
+                "inspect_configuration_mount",
                 "close",
                 "create_network",
                 "create_volume",
