@@ -373,7 +373,8 @@ class DockerRuntimeInterpreter:
             unknown_created_resource=True)
         try:
             maximum.result(EffectResultKind.SUCCEEDED, observations=planned_observations,
-                extra={**common, "capacity_reserve": "x" * (1024 + 64 * len(ports))})
+                extra={**common, "capacity_reserve": ["x" * 256]
+                    * ((1024 + 64 * len(ports) + 255) // 256)})
         except RuntimeEffectContractError:
             raise _DockerInterpreterPreconditionError(
                 "docker.configuration-result-capacity", "Configuration result cannot fit its bounded envelope") from None
