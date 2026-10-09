@@ -66,3 +66,19 @@ the fake's normal immutable image corrects that fixture only; all behavioral
 assertions and production source stay unchanged. This error is recorded
 separately from the genuine missing-interface red and earns no installation
 success credit. The remaining 419 methods passed; the live witness had not run.
+
+## Creation identity prerequisite (I177-B1)
+
+`DockerSdkClient.create_container` now returns `str | None` from the existing
+canonical identity parser applied to the actual provider create result. It makes
+no subsequent lookup by logical name and adds no start, cleanup or retry. Existing
+callers that discard the return preserve their behavior. A canonical ID is a
+provider fact, not ownership, installed-material proof or completion evidence.
+
+None after a successful create response means the created resource's identity
+is unknown; it never means absence, known-not-attempted or safe retry. Provider
+exceptions retain the existing classified creation exception. B2 must preserve
+that distinction, follow the captured immutable ID through start and installed
+readback, and refuse terminal success unless the selected mount/material facts
+agree. B1's SDK-boundary tests protect these semantics; unchanged real witnesses
+provide regression evidence only until B2 wires the full replacement path.
