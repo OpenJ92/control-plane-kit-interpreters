@@ -1,7 +1,16 @@
 Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py).
 Maintain this document alongside its source file. When the source or relevant imported contracts change, verify and update this companion in the same change.
 
-Current #175 I-C selects actual Servers S-B
+Current #180 advances installed Secrets/SDK provenance expectations to accepted
+`4242953b8e1d33a0901645fb47ebc1b18b53375f` and
+`447a3c4c5a20b5c56402c813f6cfde1685eefda0`, selecting the same Core da17efb
+as package metadata. All existing provenance, candidate-origin, health signing,
+actual receiver composition and denial assertions stay unchanged. Servers
+`9921911d3939855a4f7c1989acdf7683fc8961da` and the existing fixture installation
+are unchanged. The whole owning gate must establish compatibility; metadata
+adoption is not configuration replacement/cleanup or live-provider evidence.
+
+Historical #175 I-C selected actual Servers S-B
 `9921911d3939855a4f7c1989acdf7683fc8961da` only in the existing Docker test
 stage and its exact installed-provenance expectation. Servers' unchanged whole
 gate 36938731434 passed and received independent complete-green review.

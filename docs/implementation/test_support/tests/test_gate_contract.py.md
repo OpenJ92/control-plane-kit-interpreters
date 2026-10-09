@@ -1,6 +1,14 @@
 Source: [test_support/tests/test_gate_contract.py](../../../../test_support/tests/test_gate_contract.py).
 
-Current #175 adoption changes only CORE_REQUIREMENT to the accepted Core
+Current #180 changes only CORE_REQUIREMENT to accepted Core
+`da17efb1303ed2176374548dd998d19a655055bf`. All five existing contract tests
+and assertions remain unchanged. The old metadata fails the coordinate assertion
+before adoption; package and real-witness phases are not reached in that red
+run. Green must come through the unchanged pinned Docker gate, including its
+final completion and cleanup marker. No new gate, installer or provider opt-in
+is introduced.
+
+Historical #175 adoption changed only CORE_REQUIREMENT to the accepted Core
 `250d65e19dc748ebe840f705be77eb732dab3cb3` archive. All five existing contract
 tests and their assertions remain intact; no installer, fixture, gate or
 provider-opt-in change. Earlier adoption coordinates below are historical.
