@@ -144,6 +144,9 @@ def run_configuration_witness(client, sdk, run_id, reader_image_id, helper_image
             assert volume.attrs.get("Labels", {}).get(LABEL) == run_id
             sdk.materialize_configuration_artifact(volume.name, chosen)
             assert sdk.configuration_artifact_digest(volume.name) == chosen.content_digest
+            staged = sdk.inspect_configuration_file(volume.name)
+            assert staged is not None and staged.regular_file
+            assert staged.content_digest == chosen.content_digest and staged.mode == int(chosen.file_mode.value, 8)
             mounts.append(DockerSdkConfigurationMount(chosen, volume.name))
             expected.append((chosen.target_path, chosen.content_digest, old.content_digest))
         name = f"cpk-config-reader-{token}"
@@ -158,12 +161,20 @@ def run_configuration_witness(client, sdk, run_id, reader_image_id, helper_image
         assert reader.attrs["Config"].get("Labels", {}).get(LABEL) == run_id
         reader.start()
         reader.reload()
+        observed_reader = sdk.inspect_container(reader.id)
+        assert observed_reader is not None and observed_reader.container_id == reader.id
         actual = reader.attrs["Mounts"]
         assert len(actual) == len(mounts)
         for mount in mounts:
             matching = [value for value in actual if value["Destination"] == mount.artifact.target_path]
             assert len(matching) == 1 and matching[0]["RW"] is False
             assert matching[0]["Type"] == "volume" and matching[0]["Name"] == mount.volume_name
+            installed = sdk.inspect_configuration_mount(reader.id, mount)
+            assert installed is not None and installed.container_id == reader.id
+            assert installed.volume_name == mount.volume_name and installed.target_path == mount.artifact.target_path
+            assert installed.subpath == "content" and installed.read_only is True
+            assert installed.file.regular_file and installed.file.mode == int(mount.artifact.file_mode.value, 8)
+            assert installed.file.content_digest == mount.artifact.content_digest
         result = reader.exec_run(["python", "-B", "-c", _numeric_read_script(expected)], user="10006:10008")
         assert result.exit_code == 0, "selected configuration numeric read failed"
         result = reader.exec_run(["python", "-B", "-c", _readonly_script([item[0] for item in expected])], user="0:0")
