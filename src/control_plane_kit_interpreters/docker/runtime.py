@@ -27,6 +27,7 @@ from control_plane_kit_core.runtime_authority import (
 )
 from control_plane_kit_core.runtime_effect_observation import runtime_effect_intent_for_request
 from control_plane_kit_core.runtime_effects import (
+    EffectResultKind,
     RuntimeEffectFailure,
     RuntimeEffectKind,
     RuntimeEffectRequest,
@@ -60,6 +61,10 @@ from control_plane_kit_interpreters.docker.authority import (
     DockerAuthorityConformance,
     docker_authority_conformance,
 )
+from control_plane_kit_interpreters.docker.configuration import (
+    ConfigurationAttempt, ConfigurationMaterialConflict, ConfigurationObservationUnknown,
+    installed_configuration_matches, stage_configuration,
+)
 from control_plane_kit_interpreters.docker.sdk import (
     _ContainerCreateSuboperation,
     _DockerContainerCreateError,
@@ -72,6 +77,7 @@ from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkResourceInspection,
     DockerTlsClientConfig,
     DockerSdkConfigurationMount,
+    DockerSdkConfigurationEvidenceError,
     DockerSdkPortBinding,
     DockerSdkSecretMount,
     DockerSdkSecretFileEvidenceError,
@@ -192,13 +198,15 @@ class DockerRuntimeInterpreter:
     def execute(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         if not isinstance(request, RuntimeEffectRequest):
             raise TypeError("DockerRuntimeInterpreter requires RuntimeEffectRequest")
-        if request.kind is not RuntimeEffectKind.REALIZE_ACTIVITY:
+        if request.kind not in (RuntimeEffectKind.REALIZE_ACTIVITY, RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1):
             return _unsupported(request, "docker.unsupported-effect-kind")
         if request.runtime_kind is not RuntimeKind.DOCKER:
             return _unsupported(request, "docker.unsupported-runtime-kind")
 
         try:
             runtime_effect_intent_for_request(request)
+            if request.kind is RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1:
+                return self._execute_configuration_node(request)
             match request.operation:
                 case StartRuntime():
                     return self._start_runtime(request)
@@ -257,7 +265,7 @@ class DockerRuntimeInterpreter:
     ) -> RuntimeEffectResult:
         if not isinstance(request, RuntimeEffectRequest):
             raise TypeError("DockerRuntimeInterpreter requires RuntimeEffectRequest")
-        if request.kind is not RuntimeEffectKind.REALIZE_ACTIVITY:
+        if request.kind not in (RuntimeEffectKind.REALIZE_ACTIVITY, RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1):
             return _unsupported(request, "docker.unsupported-effect-kind")
         if request.runtime_kind is not RuntimeKind.DOCKER:
             return _unsupported(request, "docker.unsupported-runtime-kind")
@@ -302,6 +310,13 @@ class DockerRuntimeInterpreter:
         if execution_error is not None:
             raise execution_error
         if close_error is not None:
+            if request.kind is RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1 and result is not None:
+                evidence = dict(result.evidence)
+                evidence.pop("configuration_invocation_completion", None)
+                return replace(result, kind=EffectResultKind.UNCERTAIN, evidence=evidence,
+                    observations=(), failure=RuntimeEffectFailure(
+                        "docker.runtime-authority-client-close-uncertain",
+                        "Docker runtime authority client cleanup failed"))
             return RuntimeEffectResult.uncertain(
                 request.effect_id,
                 RuntimeEffectFailure(
@@ -311,6 +326,157 @@ class DockerRuntimeInterpreter:
             )
         assert result is not None
         return result
+
+    def _execute_configuration_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
+        if type(request.operation) not in (StartNode, ReconcileNode):
+            return _unsupported(request, "docker.unsupported-activity-operation")
+        attempt = ConfigurationAttempt(request)
+        try:
+            return self._configuration_node(request, attempt)
+        except _DockerInterpreterUnsupportedAuthorityError as error:
+            return attempt.result(EffectResultKind.UNSUPPORTED, failure=RuntimeEffectFailure(
+                error.code, "Docker runtime authority does not support this replacement"))
+        except (ConfigurationMaterialConflict, _DockerInterpreterPreconditionError) as error:
+            return attempt.result(EffectResultKind.FAILED, failure=RuntimeEffectFailure(
+                getattr(error, "code", "docker.configuration-material-conflict"), str(error)))
+        except DockerSdkConfigurationEvidenceError:
+            if attempt.phase == "installed-verification":
+                return attempt.uncertain()
+            return attempt.result(EffectResultKind.FAILED, failure=RuntimeEffectFailure(
+                "docker.configuration-evidence-invalid", "Selected configuration evidence is invalid"))
+        except Exception:
+            # Includes ambiguous helper cleanup, remove/create/start and readback.
+            # Never convert an exception into a terminal invocation assertion.
+            return attempt.uncertain()
+
+    def _configuration_node(
+        self, request: RuntimeEffectRequest, attempt: ConfigurationAttempt,
+    ) -> RuntimeEffectResult:
+        material = _single_product(request)
+        container_name = _container_name(request, material.node_id)
+        network_name = _network_name(request, material.runtime_id)
+        labels = {**_node_labels(request, material),
+                  f"{_LABEL_PREFIX}.configuration.selection": attempt.selection_fingerprint}
+        common = {"node_id": material.node_id, "runtime_id": material.runtime_id,
+                  "container": container_name, "network": network_name,
+                  "image": material.product.image.execution_reference}
+        # Reserve the largest bounded attempt state, error envelope and IP-host
+        # growth before invoking any provider mutation. Final results are checked too.
+        ports = _private_provider_ports(material)
+        planned_observations = runtime_endpoint_observations(
+            subject_id=material.node_id, graph_id=request.source.desired_graph_id,
+            private_host=material.node_id, provider_ports=ports, published_ports=())
+        maximum = replace(attempt, phase="installed-verification",
+            attempted_indices=list(range(len(request.configuration_instances.instances))),
+            staged_indices=list(range(len(request.configuration_instances.instances))),
+            old_container_id="f" * 64, container_id="f" * 64,
+            unknown_created_resource=True)
+        try:
+            maximum.result(EffectResultKind.SUCCEEDED, observations=planned_observations,
+                extra={**common, "capacity_reserve": ["x" * 256]
+                    * ((1024 + 64 * len(ports) + 255) // 256)})
+        except RuntimeEffectContractError:
+            raise _DockerInterpreterPreconditionError(
+                "docker.configuration-result-capacity", "Configuration result cannot fit its bounded envelope") from None
+
+        attempt.phase = "authority-preflight"
+        authority_delivery = _authority_delivery_material(request, self.client)
+        inspection = self.client.inspect_container(container_name)
+        reconcile = type(request.operation) is ReconcileNode
+        same_installation = False
+        if inspection is not None:
+            if inspection.container_id is None:
+                raise ConfigurationObservationUnknown()
+            attempt.old_container_id = inspection.container_id
+            _require_node_owner(inspection.labels, labels, "container")
+            _require_node_material_evidence(inspection.labels)
+            _require_node_network(inspection, network_name)
+            _require_node_container_authority(inspection, authority_delivery, self.client)
+            same_installation = (_fingerprint_matches(inspection.labels, labels)
+                and inspection.labels.get(f"{_LABEL_PREFIX}.configuration.selection") == attempt.selection_fingerprint)
+            if not reconcile:
+                _require_node_container_correlation(inspection, labels, network_name)
+            elif request.authority_deliveries and not same_installation:
+                # Neither labels nor a new allocation supplies the missing pinned
+                # prior authority declaration needed to replace a privileged node.
+                raise _DockerInterpreterUnsupportedAuthorityError("docker.runtime-authority-change-unsupported")
+
+        secrets = _resolve_product_secret_deliveries(material, request,
+            self.authorized_secret_resolver, self.secret_resolver)
+        auth_config = _image_pull_auth_config(material, request,
+            self.authorized_secret_resolver, self.image_pull_credentials)
+        admitted_image = self._admit_start_node_image(material, auth_config)
+        owner_uid = self._preflight_secret_files(request, material, secrets, admitted_image)
+        attempt.phase = "network"
+        runtime_labels = _runtime_labels(request, material.runtime_id)
+        network = self.client.inspect_network(network_name)
+        if network is None:
+            self.client.create_network(name=network_name, labels=runtime_labels)
+        else:
+            _require_runtime_owner(network.labels, runtime_labels, "network")
+
+        mounts = stage_configuration(self.client, request, attempt)
+        if inspection is not None and same_installation:
+            attempt.container_id = inspection.container_id
+            _require_start_node_container(inspection, labels=labels, admitted_image=admitted_image,
+                network_name=network_name, require_running=False,
+                allow_prior_plan=reconcile, allow_prior_graph=reconcile)
+            attempt.phase = "installed-verification"
+            installed_configuration_matches(self.client, attempt.container_id, mounts)
+            if not inspection.running:
+                attempt.phase = "container-start"
+                self.client.start_container(attempt.container_id)
+                attempt.action = "started"
+            else:
+                attempt.action = "reused"
+        else:
+            attempt.phase = "container-preparation"
+            prepared = self._prepare_node_container(request, material, labels, secrets,
+                owner_uid=owner_uid, configuration_mounts=mounts)
+            if inspection is not None:
+                # Fresh exact-ID evidence must still equal the admitted old
+                # container before its destructive call; never remove by name.
+                current = self.client.inspect_container(inspection.container_id)
+                if current != inspection:
+                    raise ConfigurationObservationUnknown()
+                attempt.phase = "container-remove"
+                self.client.remove_container(inspection.container_id)
+                if self.client.inspect_container(inspection.container_id) is not None:
+                    raise ConfigurationObservationUnknown()
+                attempt.old_removed = True
+            attempt.phase = "container-create"
+            attempt.unknown_created_resource = True
+            identity = self.client.create_container(
+                name=container_name, image=material.product.image.execution_reference,
+                environment=prepared.environment, labels=labels, volumes=prepared.volumes,
+                configuration_mounts=prepared.configuration_mounts, secret_mounts=prepared.secret_mounts,
+                bind_mounts=authority_delivery.mounts,
+                supplementary_groups=authority_delivery.supplementary_groups,
+                port_bindings=(), network=network_name, aliases=(material.node_id,))
+            if type(identity) is not str or re.fullmatch(r"[0-9a-f]{64}", identity) is None:
+                raise ConfigurationObservationUnknown()
+            attempt.container_id = identity
+            attempt.unknown_created_resource = False
+            attempt.phase = "container-start"
+            self.client.start_container(identity)
+            attempt.action = "created" if inspection is None else "recreated"
+
+        attempt.phase = "installed-verification"
+        observed = self.client.inspect_container(attempt.container_id)
+        if observed is None or observed.container_id != attempt.container_id:
+            raise ConfigurationObservationUnknown()
+        _require_start_node_container(observed, labels=labels, admitted_image=admitted_image,
+            network_name=network_name, require_running=True,
+            allow_prior_plan=reconcile, allow_prior_graph=reconcile)
+        _require_node_container_authority(observed, authority_delivery, self.client, final=True)
+        installed_configuration_matches(self.client, attempt.container_id, mounts)
+        private_host = _private_host_for_runtime(request, material, observed)
+        if len(private_host) > max(64, len(material.node_id)):
+            raise ConfigurationObservationUnknown()
+        observations = runtime_endpoint_observations(subject_id=material.node_id,
+            graph_id=request.source.desired_graph_id, private_host=private_host,
+            provider_ports=ports, published_ports=verify_published_ports((), observed.published_ports))
+        return attempt.result(EffectResultKind.SUCCEEDED, observations=observations, extra=common)
 
     def _reconcile_runtime(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         runtime_id = _runtime_target(request.operation)
@@ -1044,14 +1210,15 @@ class DockerRuntimeInterpreter:
         secrets: ResolvedSecretDeliveries,
         *,
         owner_uid: int = 0,
+        configuration_mounts: tuple[DockerSdkConfigurationMount, ...] | None = None,
     ) -> _NodeContainerCreateMaterial:
         contract = material.product.runtime_contract
         retained_volumes = {
             _volume_name(request, material.node_id, mount.resource_id): mount.target_path
             for mount in contract.retained_data_mounts
         }
-        configuration_mounts = []
-        for artifact in contract.configuration_artifacts:
+        prepared_configuration_mounts = list(configuration_mounts or ())
+        for artifact in (() if configuration_mounts is not None else contract.configuration_artifacts):
             volume_name = _volume_name(request, material.node_id, artifact.artifact_id)
             volume_labels = {
                 **labels,
@@ -1079,7 +1246,7 @@ class DockerRuntimeInterpreter:
                     "docker.configuration-digest-conflict",
                     "owned configuration volume has unexpected digest",
                 )
-            configuration_mounts.append(
+            prepared_configuration_mounts.append(
                 DockerSdkConfigurationMount(artifact, volume_name)
             )
         for volume_name in retained_volumes:
@@ -1129,7 +1296,7 @@ class DockerRuntimeInterpreter:
                 secrets.environment,
             ),
             volumes=retained_volumes,
-            configuration_mounts=tuple(configuration_mounts),
+            configuration_mounts=tuple(prepared_configuration_mounts),
             secret_mounts=tuple(secret_mounts),
         )
 

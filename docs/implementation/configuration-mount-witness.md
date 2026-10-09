@@ -41,3 +41,14 @@ match exact configured/effective volume, target, content subpath and read-only
 facts. These checks supplement rather than replace numeric reading and EROFS.
 The helper tracking and exact owned cleanup remain unchanged. This is readback
 foundation evidence, not staged-replacement or production cleanup acceptance.
+
+I177-B2 creates the reader through the real SDK, records its returned immutable
+ID before subsequent reads, and starts that ID through the SDK. A test-only
+additive override of the existing kwargs builder preserves the reader's
+read-only root, dropped capabilities, DAC override and no-new-privileges; the
+original builder is restored immediately. Explicit network `none` preserves
+the disconnected reader and is checked in engine inspection. No creation,
+start, identity or installed readback is simulated. The cleanup fixture also
+tests recording the returned ID before a later read can fail. This extends
+the real SDK creation-to-installation witness, not full runtime replacement
+or live grandparent acceptance.
