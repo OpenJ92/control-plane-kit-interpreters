@@ -1,6 +1,23 @@
 Source: [pyproject.toml](../../pyproject.toml).
 
-Current #175 I-A selects accepted Core `250d65e19dc748ebe840f705be77eb732dab3cb3`
+Current #180 selects accepted Core `da17efb1303ed2176374548dd998d19a655055bf`
+and test-only Secrets `4242953b8e1d33a0901645fb47ebc1b18b53375f`, whose SDK
+`447a3c4c5a20b5c56402c813f6cfde1685eefda0` selects the identical Core URL.
+The existing metadata and installed Secrets/SDK provenance expectations advance
+together. SDK and Secrets runtime source are unchanged across this adoption.
+Core introduces configuration instance/invocation and cleanup contracts; legacy
+runtime requests retain their absent selection and existing kind. Interpreter
+dispatch and observer admission still refuse the new configuration effect kind.
+I177-B/C own its future replacement/cleanup interpretation.
+
+Existing Servers `9921911d3939855a4f7c1989acdf7683fc8961da` remains the test-only
+fixture under its established installation boundary. No Operations dependency,
+resolver bypass, source, gate, extra or provider-opt-in change is introduced.
+The unchanged pinned Docker gate must prove compatibility and existing real
+configuration/secret witnesses with final cleanup. This is separate from live
+G or image publication. Earlier selections below are historical.
+
+Historical #175 I-A selected accepted Core `250d65e19dc748ebe840f705be77eb732dab3cb3`
 and test-only Secrets `edfb8c0ebfc0cfcf3a667fb60d52b4a83bda1634`, which selects
 SDK `5dc93b92c27bb9bbe2af027f945a347e5e4131bc` and that identical Core URL.
 Existing exact metadata and installed-owner expectations advance together.
