@@ -709,7 +709,12 @@ class DockerSdkClient:
         port_bindings: Sequence[DockerSdkPortBinding] = (),
         network: str,
         aliases: Sequence[str],
-    ) -> None:
+    ) -> str | None:
+        """Return the created object's canonical ID, without a later name lookup.
+
+        None means creation returned without usable identity evidence. The
+        resource may exist: callers must not infer absence or safe retry.
+        """
         kwargs = _container_create_call(
             _ContainerCreateSuboperation.REQUEST,
             lambda: self._container_create_kwargs(
@@ -731,10 +736,11 @@ class DockerSdkClient:
         )
         kwargs["network"] = network
         kwargs["networking_config"] = {network: endpoint_config}
-        _container_create_call(
+        created = _container_create_call(
             _ContainerCreateSuboperation.CREATE,
             lambda: self._client().containers.create(image, **kwargs),
         )
+        return _container_identity(created)
 
     def run_container(
         self,
