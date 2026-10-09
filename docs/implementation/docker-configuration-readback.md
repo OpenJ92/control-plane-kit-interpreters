@@ -58,3 +58,11 @@ and compares them with its selected artifacts, alongside independent numeric
 file reads and EROFS checks. The legacy digest method is retained unchanged for
 compatibility; later B must use the bounded new observations. No runtime dispatch,
 cleanup operation, pin, authority guard or retrospective observer changed.
+
+The first implementation gate reached 420 methods with one error: the new
+installed-file success fixture omitted its image, so the existing general
+container inspection rejected it before the new identity assertion. Supplying
+the fake's normal immutable image corrects that fixture only; all behavioral
+assertions and production source stay unchanged. This error is recorded
+separately from the genuine missing-interface red and earns no installation
+success credit. The remaining 419 methods passed; the live witness had not run.

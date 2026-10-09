@@ -39,7 +39,7 @@ class DockerConfigurationReadbackTests(unittest.TestCase):
         raw, sdk = self.sdk()
         identity = "a" * 64
         mount = DockerSdkConfigurationMount(_artifact(), "selected-volume")
-        resource = FakeResource("logical-name", running=True)
+        resource = FakeResource("logical-name", image="fixture@sha256:" + "b" * 64, running=True)
         resource.attrs["Id"] = identity
         resource.attrs["HostConfig"]["Mounts"] = [dict(mount.docker_mount())]
         resource.attrs["Mounts"] = [{"Type": "volume", "Name": mount.volume_name,
