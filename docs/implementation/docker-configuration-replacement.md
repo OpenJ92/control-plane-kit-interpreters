@@ -3,7 +3,7 @@ Maintain this document alongside its source files. When source or relevant impor
 
 # Exact configuration replacement (I177-B2)
 
-Both execution entrypoints admit Core's configuration activity kind for StartNode and ReconcileNode only. Cleanup remains unsupported until C. Core validates the complete original selection; Operations owns approval, reservation and history. No new registry or policy is introduced here.
+B2's replacement path admits Core's configuration activity kind for StartNode and ReconcileNode. The separate [C cleanup path](docker-configuration-cleanup.md) consumes exact cleanup requests. Core validates the complete original selection; Operations owns approval, reservation and history. No new registry or policy is introduced here.
 
 Configuration names hash workspace/runtime/node/allocation ID into 63 characters. Ownership additionally compares exact scope, allocation, configuration kind/profile, artifact identity/digest and the canonical full reference digest. Conflicting material for the same allocation keeps the name and fails ownership. Graph/plan changes do not change allocation names. No populated volume is overwritten, adopted, relabelled or deleted. Exactly owned absent content may be filled and verified.
 

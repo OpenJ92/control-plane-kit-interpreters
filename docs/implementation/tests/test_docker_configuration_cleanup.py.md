@@ -1,0 +1,4 @@
+Source: [test_docker_configuration_cleanup.py](../../../tests/test_docker_configuration_cleanup.py).
+Maintain this document alongside its source file. When source or relevant imported contracts change, verify and update this companion in the same change.
+
+I177-C new/strengthened laws from plan6072737078 and scope release6072748650: exact unused deletion/absent replay, running/stopped holder refusal, full-reference ownership, local storage provenance, mixed known/unknown/not-attempted conservation, fresh incarnation/absence checks, typed 409 refusal, bounded results and TLS refusal before client/resolver/provider use. Real interpreter and SDK consume provider fixtures; Core owns conserved outcomes and Operations owns approvals/reservations. Existing owner tests are not copied. Genuine target red must precede implementation; no skip or weakened assertion.

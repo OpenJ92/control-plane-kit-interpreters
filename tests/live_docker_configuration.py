@@ -5,7 +5,15 @@ import json
 from uuid import uuid4
 
 from docker.errors import NotFound
-from control_plane_kit_interpreters.docker import DockerSdkConfigurationMount
+from control_plane_kit_core.configuration_instances import ConfigurationInstanceRef
+from control_plane_kit_core.operations import RunId
+from control_plane_kit_core.planning import ActivityId, CleanupConfigurationInstances
+from control_plane_kit_core.runtime_effects import (
+    RuntimeEffectRequest, RuntimeEffectSource, RuntimeEffectKind, configuration_cleanup_outcomes,
+)
+from control_plane_kit_core.types import RuntimeKind
+from control_plane_kit_interpreters.docker import DockerSdkConfigurationMount, DockerRuntimeInterpreter
+from control_plane_kit_interpreters.docker.configuration import configuration_volume_name, configuration_volume_labels
 from health_signing_fixtures import world
 from receiver_configuration_fixtures import receiver_artifacts
 
@@ -125,11 +133,15 @@ def run_configuration_witness(client, sdk, run_id, reader_image_id, helper_image
         assert client.images.get(helper_image_id).id == helper_image_id
         assert sdk.configuration_helper_image == helper_image_id
         original, selected = receiver_artifacts(world()), receiver_artifacts(world())
-        expected, mounts = [], []
+        expected, mounts, references = [], [], []
         token = uuid4().hex
         for index, (old, chosen) in enumerate(zip(original, selected, strict=True)):
             assert chosen.target_path == old.target_path and chosen.content_digest != old.content_digest
-            name = f"cpk-config-volume-{token}-{index}"
+            reference = ConfigurationInstanceRef(f"{token}-{index}", "configuration-witness",
+                "docker", "reader", chosen.artifact_id, chosen.target_path,
+                chosen.media_type, chosen.file_mode, chosen.content_digest)
+            references.append(reference)
+            name = configuration_volume_name(reference)
             try:
                 client.volumes.get(name)
             except NotFound:
@@ -139,7 +151,8 @@ def run_configuration_witness(client, sdk, run_id, reader_image_id, helper_image
             if exists:
                 raise RuntimeError("configuration fixture volume already exists")
             volume = resources.create("volume", name,
-                lambda: client.volumes.create(name=name, labels={LABEL: run_id}))
+                lambda: client.volumes.create(name=name,
+                    labels={**configuration_volume_labels(reference), LABEL: run_id}))
             assert volume.name == name
             volume.reload()
             assert volume.attrs.get("Labels", {}).get(LABEL) == run_id
@@ -200,9 +213,37 @@ def run_configuration_witness(client, sdk, run_id, reader_image_id, helper_image
         assert result.exit_code == 0, "selected configuration numeric read failed"
         result = reader.exec_run(["python", "-B", "-c", _readonly_script([item[0] for item in expected])], user="0:0")
         assert result.exit_code == 0, "configuration mount did not prove EROFS"
+
+        def require_cleanup(phase, expected_status):
+            event = f"cleanup-{phase}-{token}"
+            request = RuntimeEffectRequest(event, RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1,
+                RuntimeKind.DOCKER, RuntimeEffectSource("configuration-witness", "fixture-request",
+                    RunId("fixture-run"), "fixture-plan", "fixture-base", "fixture-desired", event),
+                ActivityId("fixture-cleanup"), CleanupConfigurationInstances(tuple(references)))
+            result = DockerRuntimeInterpreter(sdk).execute(request)
+            rows = configuration_cleanup_outcomes(request, result).outcomes
+            assert tuple(row.ref for row in rows) == request.operation.instances
+            assert all(row.status.value == expected_status for row in rows)
+
+        require_cleanup("running", "retained-in-use")
+        sdk.stop_container(reader_id)
+        stopped = sdk.inspect_container(reader_id)
+        assert stopped is not None and stopped.container_id == reader_id and not stopped.running
+        require_cleanup("stopped", "retained-in-use")
+        # Recheck the same exact owned reader before its already-authorized
+        # fixture removal. All volume deletion below uses the real interpreter.
+        reader.reload()
+        assert reader.id == reader_id and reader.attrs["Image"] == reader_image_id
+        assert reader.attrs["Config"].get("Labels", {}).get(LABEL) == run_id
+        sdk.remove_container(reader_id)
+        assert sdk.inspect_container(reader_id) is None
+        require_cleanup("unused", "removed")
+        require_cleanup("absent", "already-absent")
     finally:
         sdk._create_configuration_helper = original_helper
         resources.cleanup()
     print(json.dumps({"configuration_mounts": "passed", "slots": 2, "selected_not_default": True,
         "numeric_reader": True, "mode": "0444", "engine_readonly": True,
-        "write_errno": "EROFS", "sdk_creation_identity": True, "residue": "absent"}, sort_keys=True))
+        "write_errno": "EROFS", "sdk_creation_identity": True, "residue": "absent",
+        "cleanup_running_stopped_refused": True, "cleanup_exact_unused_removed": True,
+        "cleanup_absent_replay": True}, sort_keys=True))
