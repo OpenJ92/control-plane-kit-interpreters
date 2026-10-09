@@ -16,7 +16,7 @@ import tempfile
 from typing import Any, Callable, Mapping, Sequence
 from uuid import uuid4
 
-from control_plane_kit_core.configuration import ConfigurationArtifact
+from control_plane_kit_core.configuration import ConfigurationArtifact, MAX_CONFIGURATION_BYTES
 from control_plane_kit_core.products import OciImageReference, OciImageReferenceError
 from control_plane_kit_core.probe_intents import (
     EndpointContext,
@@ -214,6 +214,28 @@ class DockerSdkResourceInspection:
     bind_mounts: tuple["DockerSdkBindMount", ...] | None = None
     supplementary_groups: tuple[str, ...] | None = None
     configured_bind_mounts: tuple["DockerSdkConfiguredBindMount", ...] | None = None
+    container_id: str | None = None
+
+
+@dataclass(frozen=True)
+class DockerSdkConfigurationFileInspection:
+    content_digest: str
+    mode: int
+    regular_file: bool
+
+
+@dataclass(frozen=True)
+class DockerSdkConfigurationMountInspection:
+    container_id: str
+    volume_name: str
+    target_path: str
+    subpath: str
+    read_only: bool
+    file: DockerSdkConfigurationFileInspection
+
+
+class DockerSdkConfigurationEvidenceError(RuntimeError):
+    """Provider material cannot establish the selected configuration facts."""
 
 
 @dataclass(frozen=True)
@@ -847,6 +869,54 @@ class DockerSdkClient:
             helper.remove(force=True)
         return digest
 
+    def inspect_configuration_file(
+        self, volume_name: str,
+    ) -> DockerSdkConfigurationFileInspection | None:
+        """Read staged file facts; helper/provider failures are not absence."""
+        helper = self._create_configuration_helper(volume_name, readonly=True)
+        try:
+            helper.start()
+            try:
+                archive, _metadata = helper.get_archive("/artifact/content")
+            except Exception as error:
+                if self._is_not_found(error):
+                    return None
+                raise
+            return _configuration_file_inspection(archive, expected_name="content")
+        finally:
+            helper.remove(force=True)
+
+    def inspect_configuration_mount(
+        self, container_id: str, mount: DockerSdkConfigurationMount,
+    ) -> DockerSdkConfigurationMountInspection | None:
+        """Inspect installed material on a captured provider ID, never a name."""
+        if type(container_id) is not str or re.fullmatch(r"[0-9a-f]{64}", container_id) is None:
+            raise ValueError("configuration inspection requires a canonical container identity")
+        if type(mount) is not DockerSdkConfigurationMount:
+            raise ValueError("configuration inspection requires selected mount material")
+        try:
+            container = self._client().containers.get(container_id)
+        except Exception as error:
+            if self._is_not_found(error):
+                return None
+            raise
+        if _container_identity(container) != container_id:
+            _invalid_configuration_evidence()
+        volume, target, subpath = _configuration_mount_facts(container, mount)
+        try:
+            archive, _metadata = container.get_archive(target)
+        except Exception as error:
+            if self._is_not_found(error):
+                return None
+            raise
+        observed = _configuration_file_inspection(archive, expected_name=target.rsplit("/", 1)[-1])
+        if (_container_identity(container) != container_id
+                or _configuration_mount_facts(container, mount) != (volume, target, subpath)):
+            _invalid_configuration_evidence()
+        return DockerSdkConfigurationMountInspection(
+            container_id, volume, target, subpath, True, observed,
+        )
+
     def materialize_secret_file(
         self,
         volume_name: str,
@@ -1081,6 +1151,7 @@ class DockerSdkClient:
                 _configured_bind_mounts(getattr(resource, "attrs", None))
                 if include_runtime_identity else None
             ),
+            container_id=_container_identity(resource) if include_runtime_identity else None,
         )
 
     def _labels(self, resource: Any) -> Mapping[str, str]:
@@ -1600,6 +1671,80 @@ def _validate_absolute_path(value: str, label: str) -> None:
 def _validate_port(value: int, label: str) -> None:
     if type(value) is not int or value < 1 or value > 65_535:
         raise ValueError(f"{label} port must be between 1 and 65535")
+
+
+def _invalid_configuration_evidence() -> None:
+    raise DockerSdkConfigurationEvidenceError("configuration inspection evidence is invalid")
+
+
+def _container_identity(resource: Any) -> str | None:
+    attrs = getattr(resource, "attrs", None)
+    identity = attrs.get("Id") if isinstance(attrs, Mapping) else None
+    if type(identity) is str and re.fullmatch(r"[0-9a-f]{64}", identity) is not None:
+        return identity
+    return None
+
+
+def _configuration_mount_facts(
+    resource: Any, mount: DockerSdkConfigurationMount,
+) -> tuple[str, str, str]:
+    attrs = getattr(resource, "attrs", None)
+    host = attrs.get("HostConfig") if isinstance(attrs, Mapping) else None
+    configured = host.get("Mounts") if isinstance(host, Mapping) else None
+    observed = attrs.get("Mounts") if isinstance(attrs, Mapping) else None
+    for values in (configured, observed):
+        if (type(values) is not list or len(values) > 64
+                or any(not isinstance(value, Mapping) for value in values)):
+            _invalid_configuration_evidence()
+    selected = [value for value in configured if value.get("Target") == mount.artifact.target_path]
+    effective = [value for value in observed if value.get("Destination") == mount.artifact.target_path]
+    if len(selected) != 1 or len(effective) != 1:
+        _invalid_configuration_evidence()
+    selected, effective = selected[0], effective[0]
+    options = selected.get("VolumeOptions")
+    if (selected.get("Type") != "volume" or selected.get("Source") != mount.volume_name
+            or selected.get("ReadOnly") is not True or not isinstance(options, Mapping)
+            or options.get("Subpath") != "content" or effective.get("Type") != "volume"
+            or effective.get("Name") != mount.volume_name or effective.get("RW") is not False):
+        _invalid_configuration_evidence()
+    return effective["Name"], effective["Destination"], options["Subpath"]
+
+
+def _configuration_file_inspection(
+    chunks: Any, *, expected_name: str,
+) -> DockerSdkConfigurationFileInspection:
+    archive = BytesIO()
+    # Provider stream failures deliberately escape parsing: they are uncertain
+    # observations, not malformed complete archives or established absence.
+    for index, chunk in enumerate(chunks):
+        if (index >= 1024 or type(chunk) is not bytes
+                or archive.tell() + len(chunk) > 1_048_576):
+            _invalid_configuration_evidence()
+        archive.write(chunk)
+    result = None
+    try:
+        archive.seek(0)
+        with tarfile.open(fileobj=archive, mode="r:") as tar:
+            members = tar.getmembers()
+            if len(members) != 1:
+                raise ValueError("member count")
+            member = members[0]
+            if (member.name != expected_name or not member.isfile() or member.sparse is not None
+                    or not 1 <= member.size <= MAX_CONFIGURATION_BYTES
+                    or type(member.mode) is not int or not 0 <= member.mode <= 0o7777):
+                raise ValueError("file metadata")
+            stream = tar.extractfile(member)
+            if stream is None:
+                raise ValueError("file body")
+            content = stream.read(MAX_CONFIGURATION_BYTES + 1)
+            if len(content) != member.size:
+                raise ValueError("incomplete body")
+            result = DockerSdkConfigurationFileInspection(hashlib.sha256(content).hexdigest(), member.mode, True)
+    except (ValueError, TypeError, OSError, tarfile.TarError):
+        pass
+    if result is None:
+        _invalid_configuration_evidence()
+    return result
 
 
 def _content_digest(archive_chunks: Any) -> str:

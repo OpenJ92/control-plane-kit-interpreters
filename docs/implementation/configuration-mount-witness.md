@@ -33,3 +33,11 @@ feature. Actual execution requires reviewed source plus North's ordinary-CI
 release; no local retry or alternate harness. The composed evidence proves
 selected bytes and readonly mounts, not production graph/lifecycle/receiver
 health, a full cluster, published images or the #158 generation-client gap.
+
+I177-A additionally exercises the SDK's bounded staged-file observation and
+installed-file observation on the captured reader container ID. Both must report
+the selected digest, actual mode and regularity. Installed evidence must also
+match exact configured/effective volume, target, content subpath and read-only
+facts. These checks supplement rather than replace numeric reading and EROFS.
+The helper tracking and exact owned cleanup remain unchanged. This is readback
+foundation evidence, not staged-replacement or production cleanup acceptance.
