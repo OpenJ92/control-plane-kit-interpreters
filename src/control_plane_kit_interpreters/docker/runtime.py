@@ -10,6 +10,7 @@ from typing import Callable, Mapping, TypeVar
 
 from control_plane_kit_core.planning import (
     ActivityOperation,
+    CleanupConfigurationInstances,
     ReconcileNode,
     ReconcileRuntime,
     RemoveNodeResource,
@@ -64,6 +65,9 @@ from control_plane_kit_interpreters.docker.authority import (
 from control_plane_kit_interpreters.docker.configuration import (
     ConfigurationAttempt, ConfigurationMaterialConflict, ConfigurationObservationUnknown,
     installed_configuration_matches, stage_configuration,
+)
+from control_plane_kit_interpreters.docker.configuration_cleanup import (
+    cleanup_configuration, refused_cleanup_authority,
 )
 from control_plane_kit_interpreters.docker.sdk import (
     _ContainerCreateSuboperation,
@@ -205,6 +209,8 @@ class DockerRuntimeInterpreter:
 
         try:
             runtime_effect_intent_for_request(request)
+            if type(request.operation) is CleanupConfigurationInstances:
+                return cleanup_configuration(self.client, request)
             if request.kind is RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1:
                 return self._execute_configuration_node(request)
             match request.operation:
@@ -271,6 +277,12 @@ class DockerRuntimeInterpreter:
             return _unsupported(request, "docker.unsupported-runtime-kind")
         try:
             runtime_effect_intent_for_request(request)
+            if type(request.operation) is CleanupConfigurationInstances:
+                # Refuse before resolver/client construction. Per-call TLS
+                # custody failure has no separate canonical cleanup carrier.
+                if (_authority_value(getattr(authority, "runtime_kind", None)) != RuntimeKind.DOCKER.value
+                        or _authority_value(getattr(authority, "authority_kind", None)) != "local-docker-socket"):
+                    return refused_cleanup_authority(request)
             client_binding = _client_for_runtime_authority(
                 self.client,
                 authority,

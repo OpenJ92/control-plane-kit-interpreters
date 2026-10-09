@@ -218,6 +218,18 @@ class DockerSdkResourceInspection:
 
 
 @dataclass(frozen=True)
+class DockerSdkConfigurationVolumeInspection:
+    name: str
+    created_at: str
+    labels: Mapping[str, str]
+    local_storage: bool
+
+
+class DockerSdkConfigurationVolumeInUse(RuntimeError):
+    """The volume-delete endpoint returned its typed in-use conflict."""
+
+
+@dataclass(frozen=True)
 class DockerSdkConfigurationFileInspection:
     content_digest: str
     mode: int
@@ -638,6 +650,48 @@ class DockerSdkClient:
 
     def create_volume(self, *, name: str, labels: Mapping[str, str]) -> None:
         self._client().volumes.create(name=name, labels=dict(labels))
+
+    def inspect_configuration_volume(self, name: str) -> DockerSdkConfigurationVolumeInspection | None:
+        try:
+            volume = self._client().volumes.get(name)
+        except Exception as error:
+            if self._is_not_found(error):
+                return None
+            raise
+        return _configuration_volume_inspection(volume, name)
+
+    def configuration_volume_in_use(self, name: str) -> bool:
+        # The daemon applies the exact volume filter and limits matching rows.
+        # all=True includes stopped/created containers, which still own mounts.
+        rows = self._client().api.containers(all=True, limit=1, filters={"volume": name})
+        if type(rows) is not list or len(rows) > 1:
+            _invalid_configuration_evidence()
+        if not rows:
+            return False
+        row = rows[0]
+        if (type(row) is not dict or type(row.get("Id")) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", row["Id"]) is None):
+            _invalid_configuration_evidence()
+        mounts = row.get("Mounts")
+        if (type(mounts) is not list or len(mounts) > 256
+                or not any(type(mount) is dict and mount.get("Type") == "volume"
+                    and mount.get("Name") == name for mount in mounts)):
+            _invalid_configuration_evidence()
+        return True
+
+    def remove_configuration_volume(self, expected: DockerSdkConfigurationVolumeInspection) -> None:
+        if type(expected) is not DockerSdkConfigurationVolumeInspection or not expected.local_storage:
+            _invalid_configuration_evidence()
+        volume = self._client().volumes.get(expected.name)
+        if _configuration_volume_inspection(volume, expected.name) != expected:
+            _invalid_configuration_evidence()
+        try:
+            volume.remove(force=False)
+        except Exception as error:
+            api_error = getattr(getattr(self.docker_module, "errors", None), "APIError", None)
+            if api_error is not None and isinstance(error, api_error) and error.status_code == 409:
+                raise DockerSdkConfigurationVolumeInUse("configuration volume is in use") from None
+            raise
 
     def pull_image(
         self,
@@ -1677,6 +1731,31 @@ def _validate_absolute_path(value: str, label: str) -> None:
 def _validate_port(value: int, label: str) -> None:
     if type(value) is not int or value < 1 or value > 65_535:
         raise ValueError(f"{label} port must be between 1 and 65535")
+
+
+def _configuration_volume_inspection(volume, name: str) -> DockerSdkConfigurationVolumeInspection:
+    attrs = getattr(volume, "attrs", None)
+    if type(attrs) is not dict or attrs.get("Name") != name:
+        _invalid_configuration_evidence()
+    for key in ("Name", "CreatedAt", "Driver", "Scope"):
+        value = attrs.get(key)
+        if type(value) is not str or not 1 <= len(value) <= 128 or "\x00" in value:
+            _invalid_configuration_evidence()
+    labels = attrs.get("Labels")
+    if labels is None:
+        labels = {}
+    if (type(labels) is not dict or len(labels) > 128 or any(
+            type(key) is not str or type(value) is not str or len(key) > 512 or len(value) > 512
+            for key, value in labels.items())):
+        _invalid_configuration_evidence()
+    options = attrs.get("Options")
+    if options is not None and type(options) is not dict:
+        _invalid_configuration_evidence()
+    local = (attrs["Driver"] == "local" and attrs["Scope"] == "local"
+        and not options and attrs.get("ClusterVolume") is None)
+    # Snapshot the labels: later provider metadata mutation must not mutate
+    # the admitted comparison value through a shared dictionary alias.
+    return DockerSdkConfigurationVolumeInspection(name, attrs["CreatedAt"], dict(labels), local)
 
 
 def _invalid_configuration_evidence() -> None:

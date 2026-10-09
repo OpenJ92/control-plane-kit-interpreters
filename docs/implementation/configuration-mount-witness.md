@@ -52,3 +52,15 @@ start, identity or installed readback is simulated. The cleanup fixture also
 tests recording the returned ID before a later read can fail. This extends
 the real SDK creation-to-installation witness, not full runtime replacement
 or live grandparent acceptance.
+
+I177-C uses the same two disposable volumes with explicit Core allocation refs
+and B2 names/full-reference labels, retaining the existing test-run ownership
+label. After all original numeric, selected-material and EROFS assertions, real
+interpreter cleanup must retain them with the exact reader running and stopped.
+The witness rechecks the reader's ID/image/run label, removes that exact reader,
+then requires real interpreter removal and a subsequent already-absent result
+for both original refs. The outer fixture cleanup still verifies every recorded
+resource is absent and handles partial failures. No new resources, runner,
+privileges or TLS credentials are introduced. This proves the direct local
+interpreter/SDK cleanup path, not Operations approval/reservation or public-API
+managed/live deployment.

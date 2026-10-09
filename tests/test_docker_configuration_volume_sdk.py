@@ -62,3 +62,14 @@ class DockerConfigurationVolumeSdkTests(unittest.TestCase):
             sdk.remove_configuration_volume(observed)
         self.assertEqual(type(raised.exception).__name__, "DockerSdkConfigurationVolumeInUse")
         self.assertNotIn("private", str(raised.exception))
+
+    def test_admitted_labels_are_an_independent_snapshot(self):
+        raw, sdk, interpreter, request, resources, holders, events = cleanup_fixture()
+        self.methods(sdk)
+        observed = sdk.inspect_configuration_volume(resources[0].name)
+        original_labels = dict(observed.labels)
+        resources[0].attrs["Labels"]["org.openj92.cpk.node"] = "foreign"
+        self.assertEqual(observed.labels, original_labels)
+        with self.assertRaises(Exception):
+            sdk.remove_configuration_volume(observed)
+        self.assertFalse(any(event[0] == "remove-volume" for event in events))
