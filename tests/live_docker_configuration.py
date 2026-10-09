@@ -23,7 +23,8 @@ class ConfigurationFixtureResources:
     def create(self, kind, coordinate, operation, *, volume=None, readonly=None):
         try:
             resource = operation()
-            identity = resource.name if kind == "volume" else resource.id
+            identity = (resource if kind == "reader" and type(resource) is str
+                        else resource.name if kind == "volume" else resource.id)
             if type(identity) is not str or not identity:
                 raise ValueError
             self.entries.append((kind, identity, volume, readonly))
@@ -150,16 +151,36 @@ def run_configuration_witness(client, sdk, run_id, reader_image_id, helper_image
             mounts.append(DockerSdkConfigurationMount(chosen, volume.name))
             expected.append((chosen.target_path, chosen.content_digest, old.content_digest))
         name = f"cpk-config-reader-{token}"
-        reader = resources.create("reader", name, lambda: client.containers.create(
-            reader_image_id, name=name, labels={LABEL: run_id}, network_disabled=True,
-            command=["python", "-B", "-c", "import time; time.sleep(120)"],
-            mounts=[dict(mount.docker_mount()) for mount in mounts], read_only=True,
-            cap_drop=["ALL"], cap_add=["DAC_OVERRIDE"], security_opt=["no-new-privileges"]))
+        original_kwargs = sdk._container_create_kwargs
+
+        def hardened_kwargs(**arguments):
+            # Test-only additive protection, preserving the existing reader's
+            # hardening while exercising the real SDK create implementation.
+            return {**original_kwargs(**arguments), "read_only": True,
+                    "cap_drop": ["ALL"], "cap_add": ["DAC_OVERRIDE"],
+                    "security_opt": ["no-new-privileges"]}
+
+        sdk._container_create_kwargs = hardened_kwargs
+        try:
+            reader_id = resources.create("reader", name, lambda: sdk.create_container(
+                image=reader_image_id, name=name, environment={}, labels={LABEL: run_id},
+                volumes={}, network="none", aliases=(), configuration_mounts=mounts,
+                command=["python", "-B", "-c", "import time; time.sleep(120)"]))
+        finally:
+            sdk._container_create_kwargs = original_kwargs
+        # Record the returned ID before this read, so a failed read cannot erase
+        # a known cleanup candidate. No logical-name fallback is used.
+        reader = client.containers.get(reader_id)
+        assert reader.id == reader_id
         reader.reload()
         assert reader.attrs["Image"] == reader_image_id
         assert reader.attrs["Config"]["User"] == "10006:10008"
         assert reader.attrs["Config"].get("Labels", {}).get(LABEL) == run_id
-        reader.start()
+        assert reader.attrs["HostConfig"]["ReadonlyRootfs"] is True
+        assert reader.attrs["HostConfig"]["NetworkMode"] == "none"
+        assert reader.attrs["HostConfig"]["CapDrop"] == ["ALL"]
+        assert "no-new-privileges" in reader.attrs["HostConfig"]["SecurityOpt"]
+        sdk.start_container(reader_id)
         reader.reload()
         observed_reader = sdk.inspect_container(reader.id)
         assert observed_reader is not None and observed_reader.container_id == reader.id
@@ -184,4 +205,4 @@ def run_configuration_witness(client, sdk, run_id, reader_image_id, helper_image
         resources.cleanup()
     print(json.dumps({"configuration_mounts": "passed", "slots": 2, "selected_not_default": True,
         "numeric_reader": True, "mode": "0444", "engine_readonly": True,
-        "write_errno": "EROFS", "residue": "absent"}, sort_keys=True))
+        "write_errno": "EROFS", "sdk_creation_identity": True, "residue": "absent"}, sort_keys=True))

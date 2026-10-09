@@ -11,10 +11,14 @@ from control_plane_kit_core.configuration_invocation import (
 )
 from control_plane_kit_core.planning import NodeTarget, ReconcileNode
 from control_plane_kit_core.runtime_effect_observation import runtime_effect_result_fingerprint
-from control_plane_kit_core.runtime_effects import EffectResultKind
+from control_plane_kit_core.runtime_effects import EffectResultKind, RuntimeEffectKind
+from control_plane_kit_core.runtime_authority import (
+    RuntimeAuthorityAccessDelivery, RuntimeAuthorityAccessDeliveryKind, RuntimeAuthorityReference,
+)
 from control_plane_kit_interpreters.docker.sdk import DockerSdkConfigurationFileInspection
 from configuration_replacement_fixtures import fixture, legacy_start, selected_request
 from test_docker_sdk_client import FakeResource
+from test_docker_runtime_interpreter import _local_socket_transport
 
 
 class DockerConfigurationReplacementTests(unittest.TestCase):
@@ -259,3 +263,29 @@ class DockerConfigurationReplacementTests(unittest.TestCase):
         self.assertEqual(result.evidence["configuration_attempt"]["staged_indices"], list(range(32)))
         self.assertIsNotNone(self.completed(request, result))
         self.assertLessEqual(len(json.dumps(result.descriptor(), separators=(",", ":")).encode()), 8192)
+
+    def test_changed_material_retains_authority_delivery_refusal_before_staging(self):
+        raw, sdk, interpreter, events = fixture()
+        _local_socket_transport(raw)
+        reference = RuntimeAuthorityReference("local-docker")
+        delivery = RuntimeAuthorityAccessDelivery(reference,
+            RuntimeAuthorityAccessDeliveryKind.LOCAL_DOCKER_SOCKET_MOUNT)
+
+        def privileged(request):
+            return replace(request, authority_ref=reference, authority_deliveries=(delivery,),
+                products=(replace(request.products[0], runtime_authority_deliveries=(delivery,)),))
+
+        original = privileged(selected_request())
+        legacy = replace(original, kind=RuntimeEffectKind.REALIZE_ACTIVITY, configuration_instances=None)
+        with patch("control_plane_kit_interpreters.docker.runtime.os.stat",
+                   return_value=SimpleNamespace(st_gid=987)):
+            first = interpreter.execute(legacy)
+            self.succeeded(first)
+            old = raw.containers.resources[first.evidence["container"]]
+            before = len(raw.volumes.created), len(raw.containers.created_containers)
+            changed = privileged(selected_request(reconcile=True, generation="b", content='{"route":"new"}'))
+            result = interpreter.execute(changed)
+        self.assertIs(result.kind, EffectResultKind.UNSUPPORTED)
+        self.assertEqual(result.failure.code, "docker.runtime-authority-change-unsupported")
+        self.assertFalse(old.removed)
+        self.assertEqual((len(raw.volumes.created), len(raw.containers.created_containers)), before)

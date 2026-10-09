@@ -74,6 +74,14 @@ class ConfigurationFixtureCleanupTests(unittest.TestCase):
         self.assertEqual(self.client.volumes.values, {})
         self.assertEqual(self.resources.uncertain, [{"kind": "volume", "coordinate": "volume-b"}])
 
+    def test_returned_reader_id_is_recorded_before_subsequent_readback(self):
+        reader = Resource(self.client.containers, "reader-id", {
+            "Image": "reader-image", "Config": {"Labels": {LABEL: "run-a"}}})
+        self.assertEqual(self.resources.create("reader", "logical-name", lambda: reader.id), "reader-id")
+        self.assertEqual(self.resources.entries, [("reader", "reader-id", None, None)])
+        self.resources.cleanup()
+        self.assertEqual(self.client.containers.values, {})
+
     def test_foreign_label_or_helper_image_or_binding_never_authorizes_deletion(self):
         self.volume(owner="foreign")
         self.helper(volume="foreign-volume")

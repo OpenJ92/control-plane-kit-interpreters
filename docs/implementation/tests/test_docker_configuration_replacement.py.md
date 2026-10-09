@@ -23,3 +23,5 @@ from the bytes actually written through the SDK helper. It does not reconstruct
 desired content to satisfy inspection. Package tests establish effect semantics;
 the existing owning gate's real-engine witness must separately establish numeric,
 read-only delivery and the integrated creation/readback path.
+
+Implementation adds an opposing test of the existing nonempty authority-delivery guard through the new request kind, before staging or replacement. The original 12 target methods and assertions remain unchanged from genuine unsupported-kind red. This guard test is preservation evidence, not additional missing-behavior red.
