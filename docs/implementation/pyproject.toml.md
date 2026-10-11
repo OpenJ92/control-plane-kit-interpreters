@@ -1,6 +1,15 @@
 Source: [pyproject.toml](../../pyproject.toml).
 
-Current #180 selects accepted Core `da17efb1303ed2176374548dd998d19a655055bf`
+Current I186 selects accepted Core `ba0bd45e7fa7673b837366f7f5da5f9159b0dee8`
+and Secrets `d8849bbfe12b9c613ace71ed86531baab2695236`, whose SDK
+`23500b1445dc6a748bd92a441e781d7f9ed90299` selects the identical Core URL.
+This makes the accepted shared installation receipt available to target tests.
+Metadata and exact installed-provenance expectations advance together; no extra,
+installer override, test-only Servers pin or gate change. I177 already implements
+configuration Start/Reconcile and cleanup. I186's new receipt production is
+pending target-red and source implementation. Historical checkpoints follow.
+
+Historical #180 selects accepted Core `da17efb1303ed2176374548dd998d19a655055bf`
 and test-only Secrets `4242953b8e1d33a0901645fb47ebc1b18b53375f`, whose SDK
 `447a3c4c5a20b5c56402c813f6cfde1685eefda0` selects the identical Core URL.
 The existing metadata and installed Secrets/SDK provenance expectations advance

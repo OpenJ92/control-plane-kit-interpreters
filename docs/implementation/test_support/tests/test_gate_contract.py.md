@@ -1,6 +1,11 @@
 Source: [test_support/tests/test_gate_contract.py](../../../../test_support/tests/test_gate_contract.py).
 
-Current #180 changes only CORE_REQUIREMENT to accepted Core
+Current I186 advances only CORE_REQUIREMENT to accepted shared Core
+`ba0bd45e7fa7673b837366f7f5da5f9159b0dee8`, alongside actual metadata.
+All gate assertions and the owning runner remain unchanged. This mechanical
+prerequisite supports causal missing-receipt targets; it is not itself red evidence.
+
+Historical #180 changes only CORE_REQUIREMENT to accepted Core
 `da17efb1303ed2176374548dd998d19a655055bf`. All five existing contract tests
 and assertions remain unchanged. The old metadata fails the coordinate assertion
 before adoption; package and real-witness phases are not reached in that red
