@@ -3,6 +3,35 @@ Maintain this document alongside its source files. When source or relevant impor
 
 # Exact configuration replacement (I177-B2)
 
+## Shared installation receipts (I186)
+
+The final configured Start/Reconcile seam now emits Core's
+`configuration-installation-receipt.v1` only after all existing actual
+running/image/network/authority and selected mounted-file checks. Original
+request/full-selection correlation is unchanged. Created has no prior; unchanged
+or stopped/restarted compute is reused with equal prior/current commitments;
+replacement requires distinct actual immutable IDs and verified old removal.
+
+The private derivation hashes canonical ASCII JSON with fixed profile
+`docker-container-incarnation.v1`, provider `docker`, resource kind `container`
+and actual full64-hex `container_id`. Fixed sorted ASCII keys/strings yield
+RFC8785 canonical bytes. No request, graph, plan, selection, address, logical
+name, credential or secret value enters this preimage. This is a Docker
+container-ID commitment, not standalone daemon identity or cross-authority
+adoption proof; original request/runtime correlation remains essential.
+
+The builder does not infer installed truth from success/phase/labels: its sole
+returned-evidence call is after final installed verification. Existing failure
+paths never add a receipt. Later owned-client close failure strips both receipt
+and invocation completion. Capacity preflight includes a maximum valid replaced
+receipt strictly as sizing data; synthetic sizing evidence is never returned.
+Whole-result bounds remain enforced. No cleanup, retry or authority changes.
+
+Reviewed targets at7f72226 produced six intended missing-receipt assertions,
+zero errors, with all453 prior methods green in run38106190718. Original targets
+remain unchanged. Final acceptance additionally requires one real configured
+runtime created/reused/replaced witness; see [resource and evidence boundaries](configuration-mount-witness.md).
+
 B2's replacement path admits Core's configuration activity kind for StartNode and ReconcileNode. The separate [C cleanup path](docker-configuration-cleanup.md) consumes exact cleanup requests. Core validates the complete original selection; Operations owns approval, reservation and history. No new registry or policy is introduced here.
 
 Configuration names hash workspace/runtime/node/allocation ID into 63 characters. Ownership additionally compares exact scope, allocation, configuration kind/profile, artifact identity/digest and the canonical full reference digest. Conflicting material for the same allocation keeps the name and fails ownership. Graph/plan changes do not change allocation names. No populated volume is overwritten, adopted, relabelled or deleted. Exactly owned absent content may be filled and verified.

@@ -23,4 +23,10 @@ production or real-engine receipt claim. One separately reviewed minimal actual
 runtime created/reused/replaced witness is planned for final acceptance, subject
 to its explicit resource plan and authority.
 
+That first run38106190718 executed461 methods with exactly six intended
+missing-receipt assertion failures across five methods, zero errors, and all453
+prior methods passing. The original eight methods remain byte-for-byte unchanged
+at implementation. Actual target-red evidence supersedes forecast subcase counts.
+Final green/source/provider acceptance is still required.
+
 Maintain this companion alongside its test source.

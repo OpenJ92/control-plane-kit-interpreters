@@ -6,8 +6,9 @@ and Secrets `d8849bbfe12b9c613ace71ed86531baab2695236`, whose SDK
 This makes the accepted shared installation receipt available to target tests.
 Metadata and exact installed-provenance expectations advance together; no extra,
 installer override, test-only Servers pin or gate change. I177 already implements
-configuration Start/Reconcile and cleanup. I186's new receipt production is
-pending target-red and source implementation. Historical checkpoints follow.
+configuration Start/Reconcile and cleanup. I186's producer now consumes Core's
+receipt at the final verified installation seam; required final package/provider
+acceptance remains pending. Historical checkpoints follow.
 
 Historical #180 selects accepted Core `da17efb1303ed2176374548dd998d19a655055bf`
 and test-only Secrets `4242953b8e1d33a0901645fb47ebc1b18b53375f`, whose SDK

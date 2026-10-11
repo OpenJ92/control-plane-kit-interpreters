@@ -41,7 +41,7 @@ class Manager:
 class ConfigurationFixtureCleanupTests(unittest.TestCase):
     def setUp(self):
         self.events = []
-        self.client = SimpleNamespace(volumes=Manager(self.events), containers=Manager(self.events))
+        self.client = SimpleNamespace(volumes=Manager(self.events), containers=Manager(self.events), networks=Manager(self.events))
         self.resources = ConfigurationFixtureResources(self.client, "run-a", "reader-image", "helper-image")
 
     def volume(self, name="volume-a", owner="run-a"):
@@ -119,3 +119,26 @@ class ConfigurationFixtureCleanupTests(unittest.TestCase):
         self.assertEqual(self.events, ["reader-id", "helper-id", "volume-a"])
         self.assertEqual(self.client.volumes.values, {})
         self.assertEqual(self.client.containers.values, {})
+
+    def test_network_acknowledgement_is_recorded_and_deleted_after_exact_volume(self):
+        labels = {LABEL: "run-a", "org.openj92.cpk.workspace": "isolated-workspace"}
+        resource = self.resources.create("network", "network-name",
+            lambda: Resource(self.client.networks, "network-id", {"Labels": labels}), labels=labels)
+        self.assertEqual(resource.id, "network-id")
+        self.assertIn(("network", "network-id", None, None), self.resources.entries)
+        self.volume()
+        self.resources.cleanup()
+        self.assertEqual(self.events, ["volume-a", "network-id"])
+        self.assertEqual(self.client.networks.values, {})
+
+    def test_full_expected_labels_and_immutable_id_are_required_before_deletion(self):
+        labels = {LABEL: "run-a", "org.openj92.cpk.workspace": "isolated-workspace"}
+        resource = self.resources.create("network", "network-name",
+            lambda: Resource(self.client.networks, "network-id", {"Labels": dict(labels)}), labels=labels)
+        resource.attrs["Labels"]["org.openj92.cpk.workspace"] = "other"
+        self.hold()
+        self.assertEqual(self.client.networks.removals, [])
+        resource.attrs["Labels"] = labels
+        resource.id = "other-id"
+        self.hold()
+        self.assertEqual(self.client.networks.removals, [])

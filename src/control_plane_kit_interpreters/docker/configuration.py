@@ -2,8 +2,12 @@
 from dataclasses import dataclass, field
 from hashlib import sha256
 import json
+import re
 
 from control_plane_kit_core.configuration_instances import ConfigurationInstanceRefCodec
+from control_plane_kit_core.configuration_installation import (
+    ConfigurationInstallationDisposition, ConfigurationInstallationReceipt,
+)
 from control_plane_kit_core.configuration_invocation import (
     ConfigurationInvocationCompletion, configuration_invocation_correlation_for_request,
     configuration_invocation_selection_fingerprint,
@@ -146,3 +150,33 @@ def installed_configuration_matches(client, identity, mounts):
             raise ConfigurationMaterialConflict()
         require_configuration_file(observed.file, mount.artifact)
     return True
+
+
+def _container_incarnation_fingerprint(identity):
+    if type(identity) is not str or re.fullmatch(r"[0-9a-f]{64}", identity) is None:
+        raise ConfigurationObservationUnknown()
+    # This closed ASCII-string-only document has RFC8785 canonical bytes.
+    # Request/runtime correlation remains in the receipt; this commitment alone
+    # supplies neither daemon identity nor cross-authority adoption permission.
+    document = {"profile": "docker-container-incarnation.v1", "provider": "docker",
+                "resource_kind": "container", "container_id": identity}
+    return sha256(json.dumps(document, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
+
+
+def _installation_receipt(attempt):
+    """Build only at the runtime's final verified seam, never from a success flag."""
+    if attempt.unknown_created_resource:
+        raise ConfigurationObservationUnknown()
+    current = _container_incarnation_fingerprint(attempt.container_id)
+    old = attempt.old_container_id
+    prior = None if old is None else _container_incarnation_fingerprint(old)
+    if old is None and not attempt.old_removed:
+        disposition = ConfigurationInstallationDisposition.CREATED
+    elif old == attempt.container_id and not attempt.old_removed:
+        disposition = ConfigurationInstallationDisposition.REUSED
+    elif old is not None and old != attempt.container_id and attempt.old_removed:
+        disposition = ConfigurationInstallationDisposition.REPLACED
+    else:
+        raise ConfigurationObservationUnknown()
+    return ConfigurationInstallationReceipt(attempt.correlation.request_fingerprint,
+        attempt.selection_fingerprint, disposition, prior, current)
