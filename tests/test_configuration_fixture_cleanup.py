@@ -142,3 +142,27 @@ class ConfigurationFixtureCleanupTests(unittest.TestCase):
         resource.id = "other-id"
         self.hold()
         self.assertEqual(self.client.networks.removals, [])
+
+    def test_alternate_existing_workspace_label_keeps_exact_owner_and_default_unchanged(self):
+        self.assertEqual(self.resources.ownership_label, LABEL)
+        key = "org.openj92.cpk.workspace"
+        for actual_owner in ("run-a", "foreign", None):
+            with self.subTest(actual_owner=actual_owner):
+                events = []
+                manager = Manager(events)
+                client = SimpleNamespace(volumes=manager, containers=Manager(events), networks=Manager(events))
+                resources = ConfigurationFixtureResources(client, "run-a", "reader-image", "helper-image",
+                    ownership_label=key)
+                # A familiar old fixture marker cannot substitute for the selected owner key.
+                labels = {LABEL: "run-a", "allocation": "exact"}
+                if actual_owner is not None:
+                    labels[key] = actual_owner
+                resources.create("volume", "volume-a", lambda: Resource(manager, "volume-a", {"Labels": labels}),
+                    labels={key: "run-a", "allocation": "exact"})
+                if actual_owner == "run-a":
+                    resources.cleanup()
+                    self.assertEqual(manager.removals, ["volume-a"])
+                else:
+                    with redirect_stdout(StringIO()), self.assertRaises(RuntimeError):
+                        resources.cleanup()
+                    self.assertEqual(manager.removals, [])

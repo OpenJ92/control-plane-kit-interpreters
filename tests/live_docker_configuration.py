@@ -22,12 +22,13 @@ LABEL = "org.openj92.cpk.test-run"
 
 class ConfigurationFixtureResources:
     """Finite bookkeeping for this witness, including unacknowledged creates."""
-    def __init__(self, client, run_id, reader_image, helper_image):
+    def __init__(self, client, run_id, reader_image, helper_image, *, ownership_label=LABEL):
         self.client, self.run_id = client, run_id
         self.reader_image, self.helper_image = reader_image, helper_image
         self.entries = []
         self.uncertain = []
         self.expected_labels = {}
+        self.ownership_label = ownership_label
 
     def create(self, kind, coordinate, operation, *, volume=None, readonly=None, labels=None):
         try:
@@ -69,7 +70,7 @@ class ConfigurationFixtureResources:
                             and mounts[0].get("RW") is (not readonly))
                     else:
                         labels = attrs.get("Labels") if kind in ("volume", "network") else attrs.get("Config", {}).get("Labels")
-                        owned = (labels or {}).get(LABEL) == self.run_id
+                        owned = (labels or {}).get(self.ownership_label) == self.run_id
                         expected = self.expected_labels.get((kind, identity), {})
                         owned = owned and all((labels or {}).get(key) == value for key, value in expected.items())
                         owned = owned and (resource.name if kind == "volume" else resource.id) == identity

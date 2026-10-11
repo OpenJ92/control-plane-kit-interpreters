@@ -37,6 +37,30 @@ allow one final hosted owning gate after independent source PASS and candidate/j
 recording. No user daemon or retained environment is in scope. Provider success
 is not established until the actual terminal gate and cleanup evidence exist.
 
+The first provider run38106830894 passed463 package methods and the original
+configuration witness, then stopped on an unlogged nonsuccess runtime result.
+Neither its sequence step nor provider root cause is established. Source review
+subsequently found a deterministic fixture incompatibility: its added
+`org.openj92.cpk.test-run` key falls inside the runtime's exact reserved-label
+comparison but is absent from the original expected labels. The fixture now
+preserves original labels and selects the already-present unique workspace key
+for its ledger ownership check. The ledger's default key remains unchanged for
+older witnesses. Full original labels, actual ID/image/mount checks and exact
+absence still govern cleanup. Production ownership comparison is unchanged.
+
+Diagnostic correction records each expected sequence step, actual closed result
+kind, finite known failure code/private phase, validated indices/booleans and
+attempted-call counters. Unknown strings/payloads are never emitted; exceeded
+ceilings are explicit markers. Cleanup started/passed/HOLD records refer only to
+the existing acknowledged-resource predicate, with unresolved creates separate.
+Formatting/output failure cannot skip cleanup or yield overall success.
+`test_installation_witness_diagnostics.py` protects actual recording-runtime
+projection, opposing redaction, output failure and reserved-label refusal versus
+faithful fixture hardening. Additional cleanup tests retain default ownership
+and protect positive/foreign/missing alternate workspace keys. These local
+corrections require independent review and a fresh hosted-run disposition;
+the failed run remains recorded and is not green evidence.
+
 The ordinary gate's existing daemon-authorized secret controller calls
 `run_configuration_witness` after its numeric secret checks. Package tests retain
 no daemon socket. The controller and engine/image identities, outer cleanup and
