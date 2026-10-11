@@ -64,7 +64,7 @@ from control_plane_kit_interpreters.docker.authority import (
 )
 from control_plane_kit_interpreters.docker.configuration import (
     ConfigurationAttempt, ConfigurationMaterialConflict, ConfigurationObservationUnknown,
-    installed_configuration_matches, stage_configuration,
+    _installation_receipt, installed_configuration_matches, stage_configuration,
 )
 from control_plane_kit_interpreters.docker.configuration_cleanup import (
     cleanup_configuration, refused_cleanup_authority,
@@ -325,6 +325,7 @@ class DockerRuntimeInterpreter:
             if request.kind is RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1 and result is not None:
                 evidence = dict(result.evidence)
                 evidence.pop("configuration_invocation_completion", None)
+                evidence.pop("configuration_installation_receipt", None)
                 return replace(result, kind=EffectResultKind.UNCERTAIN, evidence=evidence,
                     observations=(), failure=RuntimeEffectFailure(
                         "docker.runtime-authority-client-close-uncertain",
@@ -381,11 +382,15 @@ class DockerRuntimeInterpreter:
         maximum = replace(attempt, phase="installed-verification",
             attempted_indices=list(range(len(request.configuration_instances.instances))),
             staged_indices=list(range(len(request.configuration_instances.instances))),
-            old_container_id="f" * 64, container_id="f" * 64,
-            unknown_created_resource=True)
+            old_container_id="e" * 64, container_id="f" * 64,
+            old_removed=True, unknown_created_resource=False)
         try:
+            # Sizing only: the largest valid (replaced) receipt is never returned.
+            maximum_receipt = _installation_receipt(maximum).descriptor()
+            maximum.unknown_created_resource = True
             maximum.result(EffectResultKind.SUCCEEDED, observations=planned_observations,
-                extra={**common, "capacity_reserve": ["x" * 256]
+                extra={**common, "configuration_installation_receipt": maximum_receipt,
+                    "capacity_reserve": ["x" * 256]
                     * ((1024 + 64 * len(ports) + 255) // 256)})
         except RuntimeEffectContractError:
             raise _DockerInterpreterPreconditionError(
@@ -488,7 +493,8 @@ class DockerRuntimeInterpreter:
         observations = runtime_endpoint_observations(subject_id=material.node_id,
             graph_id=request.source.desired_graph_id, private_host=private_host,
             provider_ports=ports, published_ports=verify_published_ports((), observed.published_ports))
-        return attempt.result(EffectResultKind.SUCCEEDED, observations=observations, extra=common)
+        return attempt.result(EffectResultKind.SUCCEEDED, observations=observations,
+            extra={**common, "configuration_installation_receipt": _installation_receipt(attempt).descriptor()})
 
     def _reconcile_runtime(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         runtime_id = _runtime_target(request.operation)

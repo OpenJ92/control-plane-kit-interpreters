@@ -41,7 +41,7 @@ class Manager:
 class ConfigurationFixtureCleanupTests(unittest.TestCase):
     def setUp(self):
         self.events = []
-        self.client = SimpleNamespace(volumes=Manager(self.events), containers=Manager(self.events))
+        self.client = SimpleNamespace(volumes=Manager(self.events), containers=Manager(self.events), networks=Manager(self.events))
         self.resources = ConfigurationFixtureResources(self.client, "run-a", "reader-image", "helper-image")
 
     def volume(self, name="volume-a", owner="run-a"):
@@ -119,3 +119,50 @@ class ConfigurationFixtureCleanupTests(unittest.TestCase):
         self.assertEqual(self.events, ["reader-id", "helper-id", "volume-a"])
         self.assertEqual(self.client.volumes.values, {})
         self.assertEqual(self.client.containers.values, {})
+
+    def test_network_acknowledgement_is_recorded_and_deleted_after_exact_volume(self):
+        labels = {LABEL: "run-a", "org.openj92.cpk.workspace": "isolated-workspace"}
+        resource = self.resources.create("network", "network-name",
+            lambda: Resource(self.client.networks, "network-id", {"Labels": labels}), labels=labels)
+        self.assertEqual(resource.id, "network-id")
+        self.assertIn(("network", "network-id", None, None), self.resources.entries)
+        self.volume()
+        self.resources.cleanup()
+        self.assertEqual(self.events, ["volume-a", "network-id"])
+        self.assertEqual(self.client.networks.values, {})
+
+    def test_full_expected_labels_and_immutable_id_are_required_before_deletion(self):
+        labels = {LABEL: "run-a", "org.openj92.cpk.workspace": "isolated-workspace"}
+        resource = self.resources.create("network", "network-name",
+            lambda: Resource(self.client.networks, "network-id", {"Labels": dict(labels)}), labels=labels)
+        resource.attrs["Labels"]["org.openj92.cpk.workspace"] = "other"
+        self.hold()
+        self.assertEqual(self.client.networks.removals, [])
+        resource.attrs["Labels"] = labels
+        resource.id = "other-id"
+        self.hold()
+        self.assertEqual(self.client.networks.removals, [])
+
+    def test_alternate_existing_workspace_label_keeps_exact_owner_and_default_unchanged(self):
+        self.assertEqual(self.resources.ownership_label, LABEL)
+        key = "org.openj92.cpk.workspace"
+        for actual_owner in ("run-a", "foreign", None):
+            with self.subTest(actual_owner=actual_owner):
+                events = []
+                manager = Manager(events)
+                client = SimpleNamespace(volumes=manager, containers=Manager(events), networks=Manager(events))
+                resources = ConfigurationFixtureResources(client, "run-a", "reader-image", "helper-image",
+                    ownership_label=key)
+                # A familiar old fixture marker cannot substitute for the selected owner key.
+                labels = {LABEL: "run-a", "allocation": "exact"}
+                if actual_owner is not None:
+                    labels[key] = actual_owner
+                resources.create("volume", "volume-a", lambda: Resource(manager, "volume-a", {"Labels": labels}),
+                    labels={key: "run-a", "allocation": "exact"})
+                if actual_owner == "run-a":
+                    resources.cleanup()
+                    self.assertEqual(manager.removals, ["volume-a"])
+                else:
+                    with redirect_stdout(StringIO()), self.assertRaises(RuntimeError):
+                        resources.cleanup()
+                    self.assertEqual(manager.removals, [])

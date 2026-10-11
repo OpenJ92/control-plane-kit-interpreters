@@ -1,4 +1,11 @@
 Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py).
+
+Current I186 advances only installed-owner expectations to accepted Secrets
+`d8849bbfe12b9c613ace71ed86531baab2695236` and SDK
+`23500b1445dc6a748bd92a441e781d7f9ed90299`, both selecting Core
+`ba0bd45e7fa7673b837366f7f5da5f9159b0dee8`. Existing assertion and real
+composition semantics stay intact. Test-only Servers selection is unchanged.
+
 Maintain this document alongside its source file. When the source or relevant imported contracts change, verify and update this companion in the same change.
 
 Current #180 advances installed Secrets/SDK provenance expectations to accepted

@@ -1,5 +1,66 @@
 # Selected configuration delivery witness (#156)
 
+## I186 configured runtime receipt witness
+
+`tests/live_docker_installation.py` runs one additional finite sequence in the
+same existing daemon-authorized controller after the unchanged selected-material
+witness. It constructs real Core product descriptors/digests, requests and
+selections, then invokes actual configured Start and two Reconciles. Returned
+receipts are read by Core's correlation parser, linked independently to actual
+container IDs, and checked against actual old absence and both successor mounts.
+Reuse changes request/plan/graph while preserving incarnation. Replacement
+changes one public artifact and selects two new allocations. Health/Operations
+advancement and live deployment are not claimed.
+
+The bound is one fresh internal network, two sequential workload containers,
+four configuration volumes and14 SDK staging helpers. No workload port, bind
+mount, secret, authority delivery or persistent application data. The already
+available official Python image is used by its observed RepoDigest and actual
+ID, with an enforced no-pull guard. Fixture-only kwargs add a sleep command,
+numeric user, read-only root, dropped capabilities and no-new-privileges while
+calling the actual SDK builder; they replace no lifecycle decisions/evidence.
+
+Underlying Docker manager create wrappers capture the returned network ID and
+volume name before later reads (public SDK methods return None). The SDK's
+actual workload create ID and helper identities are recorded without name
+fallback. Full original expected labels are retained in the existing
+`ConfigurationFixtureResources` ledger. Optional exact-label checking and a
+network cleanup stage extend that ledger; containers precede volumes, and the
+network is last. Exact identity, image, original labels/mounts and authoritative
+absence govern deletion. Unacknowledged creates and cleanup uncertainty stay
+HOLD; no prune/retry is permitted. Added package tests protect network return
+capture/order and refusal when original labels/immutable identity change.
+
+The concrete [resource plan](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/186#issuecomment-6104727860)
+and [North disposition](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/186#issuecomment-6104735674)
+allow one final hosted owning gate after independent source PASS and candidate/job
+recording. No user daemon or retained environment is in scope. Provider success
+is not established until the actual terminal gate and cleanup evidence exist.
+
+The first provider run38106830894 passed463 package methods and the original
+configuration witness, then stopped on an unlogged nonsuccess runtime result.
+Neither its sequence step nor provider root cause is established. Source review
+subsequently found a deterministic fixture incompatibility: its added
+`org.openj92.cpk.test-run` key falls inside the runtime's exact reserved-label
+comparison but is absent from the original expected labels. The fixture now
+preserves original labels and selects the already-present unique workspace key
+for its ledger ownership check. The ledger's default key remains unchanged for
+older witnesses. Full original labels, actual ID/image/mount checks and exact
+absence still govern cleanup. Production ownership comparison is unchanged.
+
+Diagnostic correction records each expected sequence step, actual closed result
+kind, finite known failure code/private phase, validated indices/booleans and
+attempted-call counters. Unknown strings/payloads are never emitted; exceeded
+ceilings are explicit markers. Cleanup started/passed/HOLD records refer only to
+the existing acknowledged-resource predicate, with unresolved creates separate.
+Formatting/output failure cannot skip cleanup or yield overall success.
+`test_installation_witness_diagnostics.py` protects actual recording-runtime
+projection, opposing redaction, output failure and reserved-label refusal versus
+faithful fixture hardening. Additional cleanup tests retain default ownership
+and protect positive/foreign/missing alternate workspace keys. These local
+corrections require independent review and a fresh hosted-run disposition;
+the failed run remains recorded and is not green evidence.
+
 The ordinary gate's existing daemon-authorized secret controller calls
 `run_configuration_witness` after its numeric secret checks. Package tests retain
 no daemon socket. The controller and engine/image identities, outer cleanup and
