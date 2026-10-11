@@ -1,6 +1,16 @@
 Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py).
 
-Current I186 advances only installed-owner expectations to accepted Secrets
+The current Servers #237 declared-slot alignment advances only installed-owner
+expectations to accepted Secrets `fc018b091ac880f7120c71281e8b781cdde61a90`
+and SDK `f1bc730a7b244d7a713eb4a6531a5fb5fb76eee0`, selecting Core
+`a3f212063b0eb83f08599fc729c05c473aa5a1ef`. The actual signing/composition,
+provenance, denial and candidate-origin assertions are unchanged. Test-only
+Servers `9921911d3939855a4f7c1989acdf7683fc8961da` remains under its existing
+fixture installation boundary. No override or new harness is introduced.
+The owning gate proves Interpreter package compatibility; normal Servers
+dependency resolution and live deployment remain separate evidence.
+
+Historical I186 advances only installed-owner expectations to accepted Secrets
 `d8849bbfe12b9c613ace71ed86531baab2695236` and SDK
 `23500b1445dc6a748bd92a441e781d7f9ed90299`, both selecting Core
 `ba0bd45e7fa7673b837366f7f5da5f9159b0dee8`. Existing assertion and real
@@ -8,7 +18,7 @@ composition semantics stay intact. Test-only Servers selection is unchanged.
 
 Maintain this document alongside its source file. When the source or relevant imported contracts change, verify and update this companion in the same change.
 
-Current #180 advances installed Secrets/SDK provenance expectations to accepted
+Historical #180 advances installed Secrets/SDK provenance expectations to accepted
 `4242953b8e1d33a0901645fb47ebc1b18b53375f` and
 `447a3c4c5a20b5c56402c813f6cfde1685eefda0`, selecting the same Core da17efb
 as package metadata. All existing provenance, candidate-origin, health signing,
