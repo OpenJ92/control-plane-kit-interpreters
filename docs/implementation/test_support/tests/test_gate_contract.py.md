@@ -1,6 +1,12 @@
 Source: [test_support/tests/test_gate_contract.py](../../../../test_support/tests/test_gate_contract.py).
 
-Current I186 advances only CORE_REQUIREMENT to accepted shared Core
+The current Servers #237 declared-slot alignment advances only CORE_REQUIREMENT
+to accepted Core `a3f212063b0eb83f08599fc729c05c473aa5a1ef`, matching package
+metadata. All existing gate assertions, normal pinned resolution and provider
+opt-in semantics are unchanged. Mechanical pin alignment needs no artificial
+red; the unchanged owning gate must establish package compatibility.
+
+Historical I186 advances only CORE_REQUIREMENT to accepted shared Core
 `ba0bd45e7fa7673b837366f7f5da5f9159b0dee8`, alongside actual metadata.
 All gate assertions and the owning runner remain unchanged. This mechanical
 prerequisite supports causal missing-receipt targets; it is not itself red evidence.

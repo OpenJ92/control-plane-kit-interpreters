@@ -1,6 +1,21 @@
 Source: [pyproject.toml](../../pyproject.toml).
 
-Current I186 selects accepted Core `ba0bd45e7fa7673b837366f7f5da5f9159b0dee8`
+Maintain this document alongside its source and selected dependencies.
+
+The current Servers #237 declared-slot alignment selects accepted Core #1969
+`a3f212063b0eb83f08599fc729c05c473aa5a1ef` and Secrets #48
+`fc018b091ac880f7120c71281e8b781cdde61a90`. Secrets selects accepted SDK #50
+`f1bc730a7b244d7a713eb4a6531a5fb5fb76eee0` and the identical Core archive.
+Core adds only the declared-slot selector and export against the prior pin;
+SDK and Secrets production source are unchanged. Interpreters source, extras,
+gate and existing test-only Servers fixture remain unchanged. Exact metadata
+and installed-provenance assertions move together; normal pinned owning-gate
+validation must establish compatibility. The provider opt-in remains off.
+Acceptance supplies the Interpreters coordinate for existing Servers PR #248;
+it does not prove joined #237 or grandparent/live behavior. Earlier checkpoint
+coordinates and pending statements below describe their historical stages.
+
+Historical I186 selects accepted Core `ba0bd45e7fa7673b837366f7f5da5f9159b0dee8`
 and Secrets `d8849bbfe12b9c613ace71ed86531baab2695236`, whose SDK
 `23500b1445dc6a748bd92a441e781d7f9ed90299` selects the identical Core URL.
 This makes the accepted shared installation receipt available to target tests.
