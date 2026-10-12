@@ -2,16 +2,16 @@ Source: [pyproject.toml](../../pyproject.toml).
 
 Maintain this document alongside its source and selected dependencies.
 
-The current Servers #237 declared-slot alignment selects accepted Core #1969
-`a3f212063b0eb83f08599fc729c05c473aa5a1ef` and Secrets #48
-`fc018b091ac880f7120c71281e8b781cdde61a90`. Secrets selects accepted SDK #50
-`f1bc730a7b244d7a713eb4a6531a5fb5fb76eee0` and the identical Core archive.
-Core adds only the declared-slot selector and export against the prior pin;
+The current Servers #249 retained-update alignment selects accepted Core/O1 #1981
+`fe8d44fa09eed7d0d3df70f7782203f3045f9c15` and Secrets #49
+`d190172379adfc8ea9aafaf9e689e095228552fb`. Secrets selects accepted SDK #51
+`a35e3a50b0beb6043284847a2dde4f7eaa2f945c` and the identical Core archive.
+Core expands its common managed-update compiler against the prior `a3f21206` pin;
 SDK and Secrets production source are unchanged. Interpreters source, extras,
 gate and existing test-only Servers fixture remain unchanged. Exact metadata
 and installed-provenance assertions move together; normal pinned owning-gate
 validation must establish compatibility. The provider opt-in remains off.
-Acceptance supplies the Interpreters coordinate for existing Servers PR #248;
+Acceptance supplies the Interpreters coordinate for Servers #249;
 it does not prove joined #237 or grandparent/live behavior. Earlier checkpoint
 coordinates and pending statements below describe their historical stages.
 

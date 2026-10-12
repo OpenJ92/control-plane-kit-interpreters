@@ -1,7 +1,7 @@
 Source: [test_support/tests/test_gate_contract.py](../../../../test_support/tests/test_gate_contract.py).
 
-The current Servers #237 declared-slot alignment advances only CORE_REQUIREMENT
-to accepted Core `a3f212063b0eb83f08599fc729c05c473aa5a1ef`, matching package
+The current Servers #249 retained-update alignment advances only CORE_REQUIREMENT
+to accepted Core `fe8d44fa09eed7d0d3df70f7782203f3045f9c15`, matching package
 metadata. All existing gate assertions, normal pinned resolution and provider
 opt-in semantics are unchanged. Mechanical pin alignment needs no artificial
 red; the unchanged owning gate must establish package compatibility.
