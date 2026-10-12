@@ -1,9 +1,9 @@
 Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py).
 
-The current Servers #237 declared-slot alignment advances only installed-owner
-expectations to accepted Secrets `fc018b091ac880f7120c71281e8b781cdde61a90`
-and SDK `f1bc730a7b244d7a713eb4a6531a5fb5fb76eee0`, selecting Core
-`a3f212063b0eb83f08599fc729c05c473aa5a1ef`. The actual signing/composition,
+The current Servers #249 retained-update alignment advances only installed-owner
+expectations to accepted Secrets `d190172379adfc8ea9aafaf9e689e095228552fb`
+and SDK `a35e3a50b0beb6043284847a2dde4f7eaa2f945c`, selecting Core
+`fe8d44fa09eed7d0d3df70f7782203f3045f9c15`. The actual signing/composition,
 provenance, denial and candidate-origin assertions are unchanged. Test-only
 Servers `9921911d3939855a4f7c1989acdf7683fc8961da` remains under its existing
 fixture installation boundary. No override or new harness is introduced.
