@@ -63,6 +63,8 @@ from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkResourceInspection,
     DockerTlsClientConfig,
     _is_canonical_sha256_image_id,
+    _network_attachments,
+    _network_identity,
     matches_image_reference,
 )
 from control_plane_kit_interpreters.secrets import secret_resolution_grant_for
@@ -120,6 +122,7 @@ _TLS_USES = (
     ("client_key", SecretUseIntent.DOCKER_REMOTE_TLS_CLIENT_KEY),
 )
 _MALFORMED_INSPECTIONS = frozenset({
+    "Docker network identity inspection was malformed",
     "Docker image inspection was malformed",
     "Docker container image inspection was malformed",
     "Docker container state inspection was malformed",
@@ -128,6 +131,8 @@ _MALFORMED_INSPECTIONS = frozenset({
     "Docker private address inspection was malformed",
 })
 _SDK_INSPECTION_ORIGINS = frozenset({
+    _network_identity.__code__,
+    _network_attachments.__code__,
     DockerSdkClient.inspect_image.__code__,
     DockerSdkClient._image_id.__code__,
     DockerSdkClient._container_running.__code__,

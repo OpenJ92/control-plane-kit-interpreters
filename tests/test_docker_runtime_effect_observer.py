@@ -932,7 +932,8 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
         self.assertEqual(self.assert_observation(result, request), "absent")
 
     def test_actual_sdk_malformed_inspections_are_bounded_not_programming_errors(self):
-        for corruption in ("network-ports", "container-image", "container-networks", "container-address", "image-id", "image-digests"):
+        for corruption in ("network-ports", "network-identity", "container-image", "container-networks",
+                "container-membership-identity", "container-address", "image-id", "image-digests"):
             with self.subTest(corruption=corruption):
                 request = _hello_request()
                 sdk, raw, calls = _sdk_fixture(request)
@@ -975,14 +976,18 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
     def test_same_state_error_text_outside_sdk_preserves_programming_exception(self):
         request = _plain_node_request(StopNode)
         client = _ReadClient(request)
-        error = RuntimeError("Docker container state inspection was malformed")
-        with patch.object(client, "inspect_container", side_effect=error):
-            with self.assertRaises(RuntimeError) as caught:
-                self.observer(client).observe(RuntimeEffectObservationRequest(request), None)
-        self.assertIs(caught.exception, error)
-        self.assertIsNone(error.__cause__)
-        self.assertIsNone(error.__context__)
-        self.assertEqual(client.mutations, [])
+        for message in ("Docker container state inspection was malformed",
+                "Docker network identity inspection was malformed",
+                "Docker network membership inspection was malformed"):
+            with self.subTest(message=message):
+                error = RuntimeError(message)
+                with patch.object(client, "inspect_container", side_effect=error):
+                    with self.assertRaises(RuntimeError) as caught:
+                        self.observer(client).observe(RuntimeEffectObservationRequest(request), None)
+                self.assertIs(caught.exception, error)
+                self.assertIsNone(error.__cause__)
+                self.assertIsNone(error.__context__)
+                self.assertEqual(client.mutations, [])
 
     def test_execute_unknown_preaction_state_blocks_all_later_mutation(self):
         for operation_type in (StartNode, StopNode, RemoveNodeResource):
@@ -1143,10 +1148,14 @@ def _malform_sdk(raw, request, corruption):
     image = raw.images.resources[material.product.image.execution_reference]
     if corruption == "network-ports":
         network.attrs["NetworkSettings"]["Ports"] = ["private-provider-body"]
+    elif corruption == "network-identity":
+        network.attrs["Id"] = "private-provider-body"
     elif corruption == "container-image":
         container.image.id = "sha256:bad"
     elif corruption == "container-networks":
         container.attrs["NetworkSettings"]["Networks"] = ["private-provider-body"]
+    elif corruption == "container-membership-identity":
+        container.attrs["NetworkSettings"]["Networks"][_network_name(request, material.runtime_id)]["NetworkID"] = "private-provider-body"
     elif corruption == "container-address":
         container.attrs["NetworkSettings"]["Networks"][_network_name(request, material.runtime_id)]["IPAddress"] = "not-an-address"
     elif corruption == "image-id":

@@ -199,6 +199,27 @@ class DockerRegistryAuthConfig:
         return "DockerRegistryAuthConfig(<redacted>)"
 
 
+@dataclass(frozen=True, slots=True)
+class DockerSdkNetworkAttachment:
+    """One observed membership, not route authority or a readiness result."""
+
+    network_id: str
+    private_address: str | None = field(repr=False)
+
+    def __post_init__(self) -> None:
+        valid = _is_docker_identity(self.network_id)
+        if self.private_address is not None:
+            address = self.private_address
+            valid = valid and type(address) is str and 1 <= len(address) <= 45 and "%" not in address
+            if valid:
+                try:
+                    valid = str(ip_address(address)) == address
+                except ValueError:
+                    valid = False
+        if not valid:
+            raise ValueError("Docker network attachment is invalid")
+
+
 @dataclass(frozen=True)
 class DockerSdkResourceInspection:
     name: str
@@ -215,6 +236,8 @@ class DockerSdkResourceInspection:
     supplementary_groups: tuple[str, ...] | None = None
     configured_bind_mounts: tuple["DockerSdkConfiguredBindMount", ...] | None = None
     container_id: str | None = None
+    network_id: str | None = None
+    network_attachments: tuple[DockerSdkNetworkAttachment, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -633,7 +656,7 @@ class DockerSdkClient:
                 return None
             raise
 
-        return self._inspection(network, running=False, image=None)
+        return self._inspection(network, running=False, image=None, include_network_identity=True)
 
     def create_network(self, *, name: str, labels: Mapping[str, str]) -> None:
         self._client().networks.create(name=name, labels=dict(labels))
@@ -1185,7 +1208,13 @@ class DockerSdkClient:
         running: bool,
         image: str | None,
         include_runtime_identity: bool = False,
+        include_network_identity: bool = False,
     ) -> DockerSdkResourceInspection:
+        # All new identity/address facts come from this already-fetched payload.
+        # No second resource lookup or reconstruction through name-keyed maps.
+        attrs = getattr(resource, "attrs", None)
+        network_id = _network_identity(attrs) if include_network_identity else None
+        attachments = _network_attachments(attrs) if include_runtime_identity else None
         return DockerSdkResourceInspection(
             name=str(getattr(resource, "name", "")),
             running=running,
@@ -1211,7 +1240,9 @@ class DockerSdkClient:
                 _configured_bind_mounts(getattr(resource, "attrs", None))
                 if include_runtime_identity else None
             ),
-            container_id=_container_identity(resource) if include_runtime_identity else None,
+            container_id=_resource_identity(attrs) if include_runtime_identity else None,
+            network_id=network_id,
+            network_attachments=attachments,
         )
 
     def _labels(self, resource: Any) -> Mapping[str, str]:
@@ -1762,12 +1793,60 @@ def _invalid_configuration_evidence() -> None:
     raise DockerSdkConfigurationEvidenceError("configuration inspection evidence is invalid")
 
 
-def _container_identity(resource: Any) -> str | None:
-    attrs = getattr(resource, "attrs", None)
+def _is_docker_identity(identity: object) -> bool:
+    return type(identity) is str and re.fullmatch(r"[0-9a-f]{64}", identity) is not None
+
+
+def _network_identity(attrs: Any) -> str | None:
+    if not isinstance(attrs, Mapping) or "Id" not in attrs:
+        return None
+    identity = attrs["Id"]
+    if not _is_docker_identity(identity):
+        raise RuntimeError("Docker network identity inspection was malformed")
+    return identity
+
+
+def _network_attachments(attrs: Any) -> tuple[DockerSdkNetworkAttachment, ...] | None:
+    if not isinstance(attrs, Mapping) or "NetworkSettings" not in attrs:
+        return None
+    settings = attrs["NetworkSettings"]
+    if isinstance(settings, Mapping) and "Networks" not in settings:
+        return None
+    networks = settings.get("Networks") if isinstance(settings, Mapping) else None
+    if not isinstance(networks, Mapping) or len(networks) > 64:
+        raise RuntimeError("Docker network membership inspection was malformed")
+    values, identities, unavailable = [], set(), False
+    for details in networks.values():
+        if not isinstance(details, Mapping):
+            raise RuntimeError("Docker network membership inspection was malformed")
+        if "NetworkID" not in details:
+            unavailable = True
+            continue
+        address = details.get("IPAddress")
+        if address == "":
+            address = None
+        try:
+            value = DockerSdkNetworkAttachment(details["NetworkID"], address)
+        except ValueError:
+            raise RuntimeError("Docker network membership inspection was malformed") from None
+        if value.network_id in identities:
+            raise RuntimeError("Docker network membership inspection was malformed")
+        identities.add(value.network_id)
+        values.append(value)
+    if unavailable:
+        return None
+    return tuple(sorted(values, key=lambda value: value.network_id))
+
+
+def _resource_identity(attrs: Any) -> str | None:
     identity = attrs.get("Id") if isinstance(attrs, Mapping) else None
-    if type(identity) is str and re.fullmatch(r"[0-9a-f]{64}", identity) is not None:
+    if _is_docker_identity(identity):
         return identity
     return None
+
+
+def _container_identity(resource: Any) -> str | None:
+    return _resource_identity(getattr(resource, "attrs", None))
 
 
 def _configuration_mount_facts(
