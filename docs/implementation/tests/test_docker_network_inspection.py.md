@@ -19,5 +19,15 @@ redacted errors. Missing identity keys yield unavailable evidence; a present
 malformed identity (including null) is invalid. This adds no provider call,
 mutation, client ownership, route/health claim, dependency or authority.
 
-Owning validation is unchanged pinned ./test.sh. Targets await exact review and
-causal red; no implementation or executable validation has run for #194.
+Owning validation is unchanged pinned ./test.sh. The initial target-only
+checkpoint contained no implementation; its executed evidence follows.
+
+Target checkpoint f7f480238e7f8bb1de0c44d808b84a11d2fd6fb7, ordinary CI38329144383,
+establishes causal red: 26 support tests passed; the package ran 484 methods in
+27.362 seconds with 18 assertion failures across six new methods/subcases and no
+errors. All 477 existing methods and the new absence/lifetime method passed.
+Failures expose missing fields/export, unchanged identity equality and accepted
+invalid membership inputs. There was no setup/import failure. Some later
+assertions were not reached; red is not evidence those later checks passed.
+Kepler independently corroborated this terminal classification. Implementation
+keeps the seven target methods unchanged; source-green remains pending.
