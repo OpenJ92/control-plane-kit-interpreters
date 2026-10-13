@@ -1815,11 +1815,19 @@ def _network_attachments(attrs: Any) -> tuple[DockerSdkNetworkAttachment, ...] |
     networks = settings.get("Networks") if isinstance(settings, Mapping) else None
     if not isinstance(networks, Mapping) or len(networks) > 64:
         raise RuntimeError("Docker network membership inspection was malformed")
+    state = attrs.get("State")
+    nonrunning = isinstance(state, Mapping) and state.get("Running") is False
     values, identities, unavailable = [], set(), False
     for details in networks.values():
         if not isinstance(details, Mapping):
             raise RuntimeError("Docker network membership inspection was malformed")
         if "NetworkID" not in details:
+            unavailable = True
+            continue
+        # Docker may expose an unassigned attachment before container start.
+        # Keep the whole projection unknown, but validate all other entries.
+        if (nonrunning and type(details["NetworkID"]) is str and details["NetworkID"] == ""
+                and type(details.get("IPAddress")) is str and details["IPAddress"] == ""):
             unavailable = True
             continue
         address = details.get("IPAddress")
