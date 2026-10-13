@@ -30,3 +30,10 @@ selects LOCAL_READY from the actual compiler's nonfresh workload-add plan. It
 rebinds the original request/attempt signing context and invokes the real
 resolver; no operation is invented or stage assertion removed. The existing
 469 package tests and 26 support tests passed in the failed run.
+
+Corrected checkpoint `eec3cc7d`, CI `38325771922`, establishes causal red:
+26 support tests passed; the package ran 477 tests in 33.753 seconds with eight
+failures and zero errors. Each new method constructed the corrected real fixture
+then failed on the missing managed-health composition assertion. All 469 existing
+tests passed. The new bodies and socket witnesses had not yet executed; source
+green remains pending. The eight target methods are unchanged for implementation.

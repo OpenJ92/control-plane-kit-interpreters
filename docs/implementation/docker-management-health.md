@@ -1,5 +1,9 @@
 # Pinned Docker workload and bootstrap health (#162, #164)
 
+The later [I189 composition](managed-health-reader.md) reuses this observer's pure
+selection guard before signing and adds a separate opt-in local reader. This
+observer's accepted operation set and signed public transport remain unchanged.
+
 `docker.management_health.DockerManagedHealthObserver` is an opt-in effect adapter
 between existing Core selection and the original signed gateway transport. It is
 not connected to the selected production coordinator by this issue.
