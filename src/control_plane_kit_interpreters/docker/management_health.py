@@ -69,77 +69,88 @@ class DockerManagedHealthObserver:
         workload_grant: DelegatedWorkloadReceiverHealthReadGrant,
         destination: SelectedManagementGateway,
     ) -> DockerHealthObservationResult:
-        bootstrap = type(operation) is ObserveManagementBootstrap
-        if (type(operation) is not ObserveNodeHealth and not (bootstrap and operation.stage in (
-                ManagementBootstrapStage.AUTHENTICATED_MANAGEMENT_PATH,
-                ManagementBootstrapStage.GATEWAY_INGRESS_READY))):
-            return DockerHealthObservationRefused(DockerHealthObservationRefusalCode.UNSUPPORTED_OPERATION)
-        # Unsupported local/native/legacy requests never read protected inputs.
-        try:
-            if (type(plan) is not ActivityPlan or type(activity_id) is not ActivityId
-                    or type(source) is not RuntimeEffectSource
-                    or type(context) is not HealthSigningContext
-                    or type(destination) is not SelectedManagementGateway):
-                raise ValueError
-            source.__post_init__()
-            expected = plan.activity(activity_id).operation
-            resolved = resolve_management_observation(operation, current, desired,
-                expected_operation=expected)
-            runtime = resolved.selected_graph.graph.runtimes[operation.target.runtime_id]
-            if runtime.kind is not RuntimeKind.DOCKER:
-                return DockerHealthObservationRefused(DockerHealthObservationRefusalCode.UNSUPPORTED_RUNTIME)
-            roles = NodeControlGraphReferenceRole
-            revision = (source.base_graph_id if operation.target.graph_side is PlanGraphSide.BASE_GRAPH
-                else source.desired_graph_id)
-            # Operations supplies current authority independently of the signed
-            # request and installed receiver. This adapter owns no projection store.
-            authority = NodeControlAuthorityContextCodec().decode(
-                NodeControlAuthorityContextCodec().encode(authority_context))
-            if authority != authority_context or authority.authored_graph_id != revision:
-                raise ValueError
-            if bootstrap:
-                node = resolved.gateway_node
-                socket = resolved.gateway_readiness_socket
-                health_kind = NodeHealthReadKind.READINESS
-                surfaces = tuple(surface for surface in node.block_spec.control_surfaces
-                    if surface.provider_socket_name.value == socket and health_kind in surface.health_reads)
-                if len(surfaces) != 1:
-                    raise ValueError
-                surface, = surfaces
-            else:
-                node, surface = resolved.workload_node, resolved.workload_surface
-                socket, health_kind = operation.provider_socket_name, operation.health_kind
-            runtime_id = NodeControlGraphReference(roles.RUNTIME, operation.target.runtime_id)
-            gateway = NodeControlGraphReference(roles.NODE, resolved.gateway_node.node_id)
-            installed = _receiver(node, source.workspace_id, runtime_id, socket)
-            gateway_surfaces = tuple(surface for surface in resolved.gateway_node.block_spec.control_surfaces
-                if NodeHealthReadKind.READINESS in surface.health_reads)
-            if len(gateway_surfaces) != 1:
-                raise ValueError
-            gateway_installed = _receiver(resolved.gateway_node, source.workspace_id,
-                runtime_id, gateway_surfaces[0].provider_socket_name.value)
-            declaration = WorkloadNodeControlSurfaceDeclaration(surface,
-                WorkloadNodeControlSurfaceDeclarationProfile.V2)
-            request = context.request
-            transit = resolved.gateway_node.block_spec.gateway_transit
-            if (request.target != installed.target or request.authority_context != authority
-                    or request.kind is not health_kind
-                    or request.declaration_identity != declaration.identity()
-                    or installed.declaration != declaration or context.declaration != declaration
-                    or context.gateway_target != gateway_installed.target
-                    or destination.ingress != resolved.ingress
-                    or destination.gateway_node_id != gateway or destination.runtime_id != runtime_id
-                    or destination.gateway_transit_provider_socket_name != transit.provider_socket_name
-                    or transit.protocol is not GatewayTransitProtocol.RECEIVER_HEALTH_READ_V2
-                    or destination.gateway_transit_protocol is not transit.protocol):
-                raise ValueError
-        except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
-            return DockerHealthObservationRefused(DockerHealthObservationRefusalCode.INVALID_SELECTION)
+        refused = _selection_refusal(operation, plan=plan, activity_id=activity_id,
+            source=source, current=current, desired=desired, authority_context=authority_context,
+            context=context, destination=destination)
+        if refused is not None:
+            return refused
 
         # #147 validates the complete original pair/window before DNS/HTTP, and
         # receivers authenticate it. No retry, renewal, signing or private fallback.
         return await self.client.dispatch(context, pair, destination,
             transit_grant=transit_grant, workload_grant=workload_grant)
+
+
+def _selection_refusal(operation, *, plan, activity_id, source, current, desired,
+                       authority_context, context, destination, allow_local=False):
+    """Pure pinned selection shared by signed-pair and pre-signing composition."""
+    bootstrap = type(operation) is ObserveManagementBootstrap
+    local = bootstrap and operation.stage is ManagementBootstrapStage.GATEWAY_LOCAL_READY and allow_local
+    if (type(operation) is not ObserveNodeHealth and not (bootstrap and operation.stage in (
+            ManagementBootstrapStage.AUTHENTICATED_MANAGEMENT_PATH,
+            ManagementBootstrapStage.GATEWAY_INGRESS_READY)) and not local):
+        return DockerHealthObservationRefused(DockerHealthObservationRefusalCode.UNSUPPORTED_OPERATION)
+    # Local is opt-in for the composition; native/legacy never read protected inputs.
+    try:
+        if (type(plan) is not ActivityPlan or type(activity_id) is not ActivityId
+                or type(source) is not RuntimeEffectSource
+                or type(context) is not HealthSigningContext
+                or (not local and type(destination) is not SelectedManagementGateway)):
+            raise ValueError
+        source.__post_init__()
+        expected = plan.activity(activity_id).operation
+        resolved = resolve_management_observation(operation, current, desired,
+            expected_operation=expected)
+        runtime = resolved.selected_graph.graph.runtimes[operation.target.runtime_id]
+        if runtime.kind is not RuntimeKind.DOCKER:
+            return DockerHealthObservationRefused(DockerHealthObservationRefusalCode.UNSUPPORTED_RUNTIME)
+        roles = NodeControlGraphReferenceRole
+        revision = (source.base_graph_id if operation.target.graph_side is PlanGraphSide.BASE_GRAPH
+            else source.desired_graph_id)
+        # Operations supplies current authority independently of the signed
+        # request and installed receiver. This adapter owns no projection store.
+        authority = NodeControlAuthorityContextCodec().decode(
+            NodeControlAuthorityContextCodec().encode(authority_context))
+        if authority != authority_context or authority.authored_graph_id != revision:
+            raise ValueError
+        if bootstrap:
+            node = resolved.gateway_node
+            socket = resolved.gateway_readiness_socket
+            health_kind = NodeHealthReadKind.READINESS
+            surfaces = tuple(surface for surface in node.block_spec.control_surfaces
+                if surface.provider_socket_name.value == socket and health_kind in surface.health_reads)
+            if len(surfaces) != 1:
+                raise ValueError
+            surface, = surfaces
+        else:
+            node, surface = resolved.workload_node, resolved.workload_surface
+            socket, health_kind = operation.provider_socket_name, operation.health_kind
+        runtime_id = NodeControlGraphReference(roles.RUNTIME, operation.target.runtime_id)
+        gateway = NodeControlGraphReference(roles.NODE, resolved.gateway_node.node_id)
+        installed = _receiver(node, source.workspace_id, runtime_id, socket)
+        gateway_surfaces = tuple(surface for surface in resolved.gateway_node.block_spec.control_surfaces
+            if NodeHealthReadKind.READINESS in surface.health_reads)
+        if len(gateway_surfaces) != 1:
+            raise ValueError
+        gateway_installed = _receiver(resolved.gateway_node, source.workspace_id,
+            runtime_id, gateway_surfaces[0].provider_socket_name.value)
+        declaration = WorkloadNodeControlSurfaceDeclaration(surface,
+            WorkloadNodeControlSurfaceDeclarationProfile.V2)
+        request = context.request
+        transit = resolved.gateway_node.block_spec.gateway_transit
+        if (request.target != installed.target or request.authority_context != authority
+                or request.kind is not health_kind
+                or request.declaration_identity != declaration.identity()
+                or installed.declaration != declaration or context.declaration != declaration
+                or context.gateway_target != gateway_installed.target
+                or transit.protocol is not GatewayTransitProtocol.RECEIVER_HEALTH_READ_V2
+                or (not local and (destination.ingress != resolved.ingress
+                    or destination.gateway_node_id != gateway or destination.runtime_id != runtime_id
+                    or destination.gateway_transit_provider_socket_name != transit.provider_socket_name
+                    or destination.gateway_transit_protocol is not transit.protocol))):
+            raise ValueError
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+        return DockerHealthObservationRefused(DockerHealthObservationRefusalCode.INVALID_SELECTION)
 
 
 def _receiver(node, workspace_id, runtime_id, socket):
