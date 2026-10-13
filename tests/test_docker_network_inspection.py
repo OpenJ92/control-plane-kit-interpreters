@@ -129,6 +129,63 @@ class DockerNetworkInspectionTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.sdk.inspect_network("runtime")
 
+    def test_nonrunning_unassigned_membership_preserves_other_inspection_facts(self):
+        self.container.attrs["State"]["Running"] = False
+        self.container.attrs["Config"]["User"] = "10001"
+        self.container.attrs["HostConfig"]["Mounts"] = [dict(
+            public.DockerSdkSecretMount("/run/secrets/client", "owned-secret").docker_mount())]
+        self.container.attrs["Mounts"] = [{"Type": "volume", "Name": "owned-secret",
+            "Destination": "/run/secrets/client", "RW": False}]
+        result, values = self.attachments({"runtime": {"NetworkID": "", "IPAddress": ""}})
+        self.assertIsNone(values)
+        self.assertFalse(result.running)
+        self.assertEqual(result.container_id, CONTAINER)
+        self.assertEqual(result.image_id, "sha256:" + "b" * 64)
+        self.assertEqual(result.configured_user, "10001")
+        self.assertEqual(result.readonly_secret_mounts,
+            (public.DockerSdkSecretMount("/run/secrets/client", "owned-secret"),))
+        self.assertEqual(self.raw.containers.calls, [CONTAINER])
+        self.assertEqual(self.raw.networks.calls, [])
+        self.assertFalse(self.container.started or self.container.stopped or self.container.removed)
+        self.assertEqual(self.raw.close_calls, 0)
+
+    def test_unassigned_companion_makes_whole_membership_unknown_in_either_order(self):
+        self.container.attrs["State"]["Running"] = False
+        items = (("unassigned", {"NetworkID": "", "IPAddress": ""}),
+            ("known", {"NetworkID": NETWORK_A, "IPAddress": "172.18.0.2"}))
+        for entries in (items, items[::-1]):
+            with self.subTest(unassigned_first=entries[0][0] == "unassigned"):
+                _, values = self.attachments(dict(entries))
+                self.assertIsNone(values)
+
+    def test_unassigned_shape_requires_explicit_false_state_and_both_empty_strings(self):
+        for state in ({"Running": True}, {}, {"Running": None}, {"Running": 0}, None):
+            with self.subTest(state=state):
+                self.container.attrs["State"] = state
+                with self.assertRaises(RuntimeError):
+                    self.attachments({"runtime": {"NetworkID": "", "IPAddress": ""}})
+        self.container.attrs["State"] = {"Running": False}
+        for details in ({"NetworkID": "", "IPAddress": "172.18.0.2"},
+                {"NetworkID": "", "IPAddress": None}, {"NetworkID": ""},
+                {"NetworkID": None, "IPAddress": ""}, {"NetworkID": 0, "IPAddress": ""}):
+            with self.subTest(details=details):
+                with self.assertRaises(RuntimeError):
+                    self.attachments({"runtime": details})
+
+    def test_unassigned_entry_never_hides_malformed_duplicate_or_excessive_companions(self):
+        self.container.attrs["State"]["Running"] = False
+        unassigned = ("unassigned", {"NetworkID": "", "IPAddress": ""})
+        cases = [(("bad", {"NetworkID": "not-an-id", "IPAddress": ""}),),
+            (("bad", {"NetworkID": NETWORK_A, "IPAddress": "not-an-address"}),),
+            (("one", {"NetworkID": NETWORK_A}), ("two", {"NetworkID": NETWORK_A})),
+            tuple((f"known-{index}", {"NetworkID": f"{index:064x}"}) for index in range(64))]
+        for index, entries in enumerate(cases):
+            for ordered in ((unassigned, *entries), (*entries, unassigned)):
+                with self.subTest(case=index, unassigned_first=ordered[0] == unassigned):
+                    with self.assertRaises(RuntimeError) as caught:
+                        self.attachments(dict(ordered))
+                    self.assertEqual(str(caught.exception), "Docker network membership inspection was malformed")
+
     def test_public_attachment_value_is_immutable_and_validated(self):
         attachment = getattr(public, "DockerSdkNetworkAttachment", None)
         self.assertIsNotNone(attachment, "public network attachment value is missing")
