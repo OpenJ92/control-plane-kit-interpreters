@@ -22,6 +22,29 @@ from control_plane_kit_servers_cpk_local_gateway.health_transit_verification imp
 from control_plane_kit_servers_cpk_local_gateway.server import create_app
 from health_signing_fixtures import RecordingResolver
 from health_transport_fixtures import Transport
+from docker_management_health_fixtures import BootstrapWorld
+
+
+class LocalWorld(BootstrapWorld):
+    """Real nonfresh workload introduction retains gateway/connector/ingress."""
+    def __init__(self):
+        super().__init__(core.ManagementBootstrapStage.AUTHENTICATED_MANAGEMENT_PATH)
+        retained = {self.value.gateway.value, self.ingress.connector_node_id}
+        graph = self.desired.graph
+        self.current = validate_graph(replace(graph,
+            nodes={key:node for key, node in graph.nodes.items() if key in retained},
+            runtimes={key:replace(runtime, children=tuple(node for node in runtime.children if node in retained))
+                for key, runtime in graph.runtimes.items()}))
+        self.current.require_valid()
+        self.plan = core.compile_graph_activity_plan(self.current, self.desired)
+        assert self.plan.ready_for_execution
+        activity, = (item for item in self.plan.activities
+            if type(item.operation) is core.ObserveManagementBootstrap
+            and item.operation.stage is core.ManagementBootstrapStage.GATEWAY_LOCAL_READY)
+        self.activity_id, self.operation = activity.activity_id, activity.operation
+        self.resign(request_id="request-gateway-local-ready", attempt_id="attempt-gateway-local-ready")
+        core.resolve_management_observation(self.operation, self.current, self.desired,
+            expected_operation=self.plan.activity(self.activity_id).operation)
 
 
 @asynccontextmanager

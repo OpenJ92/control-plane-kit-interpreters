@@ -19,3 +19,14 @@ asserting that the new composition module exists. Initial red may therefore
 establish missing interface only; it does not execute the new target bodies.
 No owner admission state machine, journal or runtime mutation is emulated.
 The owning gate is the unchanged pinned `./test.sh`.
+
+Initial checkpoint `e128b998`, run `38325318834`, failed during fixture setup:
+the existing fresh-deployment BootstrapWorld cannot select LOCAL_READY because
+the actual compiler emits INGRESS_READY for that branch. All eight new methods
+errored before the missing-interface assertion; this is not causal red. The
+bounded LocalWorld correction keeps the desired graph, supplies a valid current
+snapshot retaining gateway/connector/ingress but not the ordinary workload, and
+selects LOCAL_READY from the actual compiler's nonfresh workload-add plan. It
+rebinds the original request/attempt signing context and invokes the real
+resolver; no operation is invented or stage assertion removed. The existing
+469 package tests and 26 support tests passed in the failed run.

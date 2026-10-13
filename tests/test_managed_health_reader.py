@@ -13,7 +13,7 @@ from control_plane_kit_interpreters.probes import health_transport
 from control_plane_kit_interpreters.probes.security import ProbeAddressPolicy
 from docker_management_health_fixtures import BootstrapWorld, ManagedWorld
 from health_transport_fixtures import Transport
-from managed_health_reader_fixtures import serving, local_destination, make_reader, read, socket_relay
+from managed_health_reader_fixtures import LocalWorld, serving, local_destination, make_reader, read, socket_relay
 from test_health_transport import Stream
 
 MODULE = "control_plane_kit_interpreters.docker.managed_health"
@@ -23,7 +23,7 @@ class ManagedHealthReaderTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         # Existing Core compiler, selected gateway and signer must construct before
         # the target-red assertion; dependency failures cannot stand in for absence.
-        self.value = BootstrapWorld(core.ManagementBootstrapStage.GATEWAY_LOCAL_READY)
+        self.value = LocalWorld()
         self.assertIsNotNone(importlib.util.find_spec(MODULE), "I189 managed health composition is missing")
         self.module = importlib.import_module(MODULE)
 
