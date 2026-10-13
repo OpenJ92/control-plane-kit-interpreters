@@ -9,6 +9,7 @@ import httpx
 import control_plane_kit_core as core
 from control_plane_kit_core.planning import ActivityPlan
 from control_plane_kit_core.probe_intents import LiteralEndpointMaterial
+from control_plane_kit_core.types import Protocol, RuntimeKind
 from control_plane_kit_interpreters.probes import health_transport
 from control_plane_kit_interpreters.probes.security import ProbeAddressPolicy
 from docker_management_health_fixtures import BootstrapWorld, ManagedWorld
@@ -82,7 +83,7 @@ class ManagedHealthReaderTests(unittest.IsolatedAsyncioTestCase):
                 ("graph_id", "other")):
             candidates.append(replace(selected, endpoint=replace(selected.endpoint, **{field:replacement})))
         candidates.append(replace(selected, endpoint=replace(selected.endpoint,
-            protocol=core.Protocol.TCP, address=LiteralEndpointMaterial("tcp://127.0.0.1:18000"))))
+            protocol=Protocol.TCP, address=LiteralEndpointMaterial("tcp://127.0.0.1:18000"))))
         for candidate in candidates:
             with self.subTest(candidate=repr(candidate)):
                 transport = Transport(httpx.MockTransport(lambda request: httpx.Response(200, content=b"{}")))
@@ -97,7 +98,7 @@ class ManagedHealthReaderTests(unittest.IsolatedAsyncioTestCase):
             if "source" in changes:
                 from control_plane_kit_core.runtime_effects import RuntimeEffectRequest, RuntimeEffectKind
                 changes = {"request": RuntimeEffectRequest("event-a", RuntimeEffectKind.REALIZE_ACTIVITY,
-                    core.RuntimeKind.DOCKER, changes["source"], value.activity_id, value.operation)}
+                    RuntimeKind.DOCKER, changes["source"], value.activity_id, value.operation)}
             self.refusal(await read(reader, value, local=selected, **changes), value, keys)
 
     async def test_public_selection_mismatches_refuse_before_key_resolution(self):

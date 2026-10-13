@@ -37,3 +37,20 @@ failures and zero errors. Each new method constructed the corrected real fixture
 then failed on the missing managed-health composition assertion. All 469 existing
 tests passed. The new bodies and socket witnesses had not yet executed; source
 green remains pending. The eight target methods are unchanged for implementation.
+
+First source checkpoint `8f7b581`, CI `38326577592`, reached the new bodies but
+encountered 18 errors across eight methods/subcases: the targets accessed
+`core.Protocol` and `core.RuntimeKind`, which are not lightweight root exports.
+The canonical types live in `control_plane_kit_core.types`; production already
+uses those imports. All 469 existing methods and 26 support tests passed. This
+run establishes no new adapter or socket success. The bounded correction imports
+those two types from their canonical module in the target/helper and updates four
+uses. Assertions, pins and runner are unchanged.
+
+The subsequent bounded API inspection also found that `Protocol` is a frozen
+product value, not an enum singleton. The local guard must compare HTTP by value,
+so its identity comparison is corrected to equality. The existing local endpoint
+fixture supplies `replace(Protocol.HTTP)`, an equal independently constructed
+value, preserving its protocol while making the positive socket witness protect
+this law. This is one production comparison correction; the preceding failed
+run did not exercise it. No additional health outcome or assertion is removed.

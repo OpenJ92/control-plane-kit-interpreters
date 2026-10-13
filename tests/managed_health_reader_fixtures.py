@@ -10,6 +10,7 @@ import control_plane_kit_core as core
 from control_plane_kit_core.probe_intents import EndpointContext, LiteralEndpointMaterial, RuntimeEndpointObservation
 from control_plane_kit_core.runtime_effects import RuntimeEffectKind, RuntimeEffectRequest
 from control_plane_kit_core.topology import validate_graph
+from control_plane_kit_core.types import Protocol, RuntimeKind
 from control_plane_kit_interpreters.probes.health_signing import Ed25519HealthCredentialPairSigner, HealthSigningKey
 from control_plane_kit_interpreters.probes.health_transport import SignedGatewayHealthClient
 from control_plane_kit_interpreters.probes.security import ProbeAddressPolicy
@@ -83,7 +84,7 @@ async def serving(app):
 
 def local_destination(module, value, origin="http://127.0.0.1:18000"):
     endpoint = RuntimeEndpointObservation(value.value.gateway.value,
-        value.value.gateway_target.provider_socket_name.value, "revision-a", core.Protocol.HTTP,
+        value.value.gateway_target.provider_socket_name.value, "revision-a", replace(Protocol.HTTP),
         EndpointContext.RUNTIME_PRIVATE, LiteralEndpointMaterial(origin))
     return module.SelectedLocalGateway(endpoint, ProbeAddressPolicy(runtime_private_authorities=frozenset({origin})))
 
@@ -99,7 +100,7 @@ def make_reader(module, value, *, transport=None, timeout=5):
 
 
 async def read(reader, value, *, destination=None, local=None, **changes):
-    request = RuntimeEffectRequest("event-a", RuntimeEffectKind.REALIZE_ACTIVITY, core.RuntimeKind.DOCKER,
+    request = RuntimeEffectRequest("event-a", RuntimeEffectKind.REALIZE_ACTIVITY, RuntimeKind.DOCKER,
         value.source, value.activity_id, value.operation)
     values = dict(request=request, plan=value.plan, current=value.current, desired=value.desired,
         authority_context=value.authority_context, context=value.context,

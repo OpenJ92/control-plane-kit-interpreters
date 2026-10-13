@@ -43,7 +43,7 @@ def _local_target(context: HealthSigningContext, selected: SelectedLocalGateway)
             or endpoint.subject_id != request.target.node_id.value
             or endpoint.socket_name != request.target.provider_socket_name.value
             or endpoint.graph_id != request.authority_context.authored_graph_id
-            or endpoint.protocol is not Protocol.HTTP
+            or endpoint.protocol != Protocol.HTTP
             or endpoint.context is not EndpointContext.RUNTIME_PRIVATE
             or type(endpoint.address) is not LiteralEndpointMaterial):
         raise ValueError("local gateway selection is invalid")
