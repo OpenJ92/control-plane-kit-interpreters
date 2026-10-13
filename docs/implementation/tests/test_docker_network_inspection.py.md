@@ -31,3 +31,14 @@ invalid membership inputs. There was no setup/import failure. Some later
 assertions were not reached; red is not evidence those later checks passed.
 Kepler independently corroborated this terminal classification. Implementation
 keeps the seven target methods unchanged; source-green remains pending.
+
+First source checkpoint a7c5243, CI38329592389, passed all seven new methods and
+26 support tests but found one existing observer integration error in the
+484-method package run (33.136 seconds). The observer recognizes malformed SDK
+reads by both fixed message and exact originating parser code. The new membership
+parser was not registered, so its bounded error incorrectly escaped as a
+programming exception. Implementation and source review both missed this seam.
+The correction registers only the two new SDK parser origins and new fixed
+network-identity message. Existing malformed-observer cases gain actual bad
+network/member IDs; the lookalike-message test gains both messages and retains
+programming-error propagation. No assertion or SDK target is removed or weakened.

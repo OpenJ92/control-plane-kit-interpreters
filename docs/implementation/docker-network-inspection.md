@@ -37,6 +37,11 @@ behavior. Client creation, selected authority, ownership and close/TLS cleanup
 are unchanged. No enumeration, network mutation, secret resolution, retry,
 helper or persistent state is introduced.
 
+The existing runtime observer recognizes the two new SDK parsers' exact code
+origins and fixed malformed messages as unavailable provider observations.
+Identical error text raised elsewhere still propagates as a programming error;
+no broad RuntimeError normalization is added.
+
 These are provider facts, not route authorization, reachability or readiness.
 Servers #250 may use the accepted fields to correlate the exact selected
 controller/gateway/network and derive a destination from the matched member IP
