@@ -1,9 +1,9 @@
 Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py).
 
-The current Servers #249 retained-update alignment advances only installed-owner
-expectations to accepted Secrets `d190172379adfc8ea9aafaf9e689e095228552fb`
-and SDK `a35e3a50b0beb6043284847a2dde4f7eaa2f945c`, selecting Core
-`fe8d44fa09eed7d0d3df70f7782203f3045f9c15`. The actual signing/composition,
+Interpreters #198 / Servers #251 advances only installed-owner
+expectations to actual accepted Secrets `28c9045c5d0aecf7471c151cae90ebb9ac88a123`
+and SDK `9aa01ef7b2df6106f6ad87c1625a7feb93394b88`, selecting Core
+`05b5f28a624e6e03f1dadbe6ad77ece2bec09601`. The actual signing/composition,
 provenance, denial and candidate-origin assertions are unchanged. Test-only
 Servers `9921911d3939855a4f7c1989acdf7683fc8961da` remains under its existing
 fixture installation boundary. No override or new harness is introduced.
