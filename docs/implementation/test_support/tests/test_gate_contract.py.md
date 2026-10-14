@@ -1,7 +1,7 @@
 Source: [test_support/tests/test_gate_contract.py](../../../../test_support/tests/test_gate_contract.py).
 
-The current Servers #249 retained-update alignment advances only CORE_REQUIREMENT
-to accepted Core `fe8d44fa09eed7d0d3df70f7782203f3045f9c15`, matching package
+Interpreters #198 / Servers #251 advances only CORE_REQUIREMENT
+to accepted Core `05b5f28a624e6e03f1dadbe6ad77ece2bec09601`, matching package
 metadata. All existing gate assertions, normal pinned resolution and provider
 opt-in semantics are unchanged. Mechanical pin alignment needs no artificial
 red; the unchanged owning gate must establish package compatibility.

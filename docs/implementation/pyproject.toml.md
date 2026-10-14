@@ -2,18 +2,24 @@ Source: [pyproject.toml](../../pyproject.toml).
 
 Maintain this document alongside its source and selected dependencies.
 
-The current Servers #249 retained-update alignment selects accepted Core/O1 #1981
-`fe8d44fa09eed7d0d3df70f7782203f3045f9c15` and Secrets #49
-`d190172379adfc8ea9aafaf9e689e095228552fb`. Secrets selects accepted SDK #51
-`a35e3a50b0beb6043284847a2dde4f7eaa2f945c` and the identical Core archive.
-Core expands its common managed-update compiler against the prior `a3f21206` pin;
+Interpreters #198 / Servers #251 selects accepted Core
+`05b5f28a624e6e03f1dadbe6ad77ece2bec09601` and actual Secrets #51 merge
+`28c9045c5d0aecf7471c151cae90ebb9ac88a123`. Secrets selects accepted SDK #53 merge
+`9aa01ef7b2df6106f6ad87c1625a7feb93394b88` and the identical Core archive.
+Core adds the closed immutable-image transition to its managed-update compiler
+against the prior `fe8d44fa` pin; receiver/signing/receipt contracts are unchanged.
 SDK and Secrets production source are unchanged. Interpreters source, extras,
 gate and existing test-only Servers fixture remain unchanged. Exact metadata
 and installed-provenance assertions move together; normal pinned owning-gate
 validation must establish compatibility. The provider opt-in remains off.
-Acceptance supplies the Interpreters coordinate for Servers #249;
+Acceptance supplies the Interpreters coordinate for Servers #251;
 it does not prove joined #237 or grandparent/live behavior. Earlier checkpoint
 coordinates and pending statements below describe their historical stages.
+
+The production native observer still rejects retained runtimes and independently
+requires a complete fresh-creation plan. This pin does not expand its supported
+native topology. The normal pinned gate retains the existing local Docker
+secret/configuration witness; the separately opted-in StartNode phase stays off.
 
 Historical I186 selects accepted Core `ba0bd45e7fa7673b837366f7f5da5f9159b0dee8`
 and Secrets `d8849bbfe12b9c613ace71ed86531baab2695236`, whose SDK
