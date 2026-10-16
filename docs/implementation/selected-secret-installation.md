@@ -1,5 +1,14 @@
 # Selected secret installation checkpoint (#191)
 
+Current Interpreters #201 dependency adoption selects Core #1991 merge
+`5b66dcac4bf2cf76219efaf05fa5ff06588bd16a`, test Secrets #55 merge
+`56e6d3211a847efd98434ba2dd4093d29bf4b375` and its SDK #57 merge
+`d4cbbb16a4ce47bae0b791adab5de8940355ea99`. Consumed secret selection,
+grant, request and receipt contracts are unchanged; only Core's managed-update
+compiler production module changes. Installation code and witnesses are unchanged.
+The original #191 checkpoints and evidence below retain their coordinates;
+new dependency compatibility requires the unchanged owning gate.
+
 The reviewed target is Docker installation of an exact consumer-selected version,
 using the accepted Core contract at `87e231c661879e44816ba71ff9320c040c868d60`.
 Metadata and exact-version resolution source is separately checkpointed in #190.
