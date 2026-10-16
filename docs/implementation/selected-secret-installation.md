@@ -53,6 +53,16 @@ runner, local-Core substitution, or provider-contract opt-in was used. Resume
 only with an accepted compatible Secrets coordinate and the unchanged owning
 gate; establish genuine missing-behavior evidence before implementation.
 
+Dependency stop resolution: accepted SDK #55 merge
+`ad0582937d7e41f1e7a41295fa1de58c2ce4cba2` selects the same Core, with 24 support
+and 207 package tests plus all installed probes passing. Accepted Secrets #53
+merge `b3e6d21f1f53c3ad2fe9ec33900ddde0611e2b5a` adopts that SDK and Core, with
+21 support and 99 package tests, compilation and clean import passing in its
+hosted owning gate. Both received independent review. The Interpreter test-extra
+and exact installed-owner expectations now select those actual accepted merges.
+The earlier failed-run classifications remain unchanged; the resumed Interpreter
+gate still must establish genuine missing-behavior evidence.
+
 Independent review passed the source-free design and focused target shape.
 The public Operations-port bridge remains Servers #252 work. No metadata or
 installation result in this checkpoint grants execution authorization, proves
