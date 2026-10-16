@@ -2,7 +2,22 @@ Source: [pyproject.toml](../../pyproject.toml).
 
 Maintain this document alongside its source and selected dependencies.
 
-Interpreters #198 / Servers #251 selects accepted Core
+Interpreters #190/#191 selects accepted Core/Operations #1988
+`87e231c661879e44816ba71ff9320c040c868d60` and actual Secrets #53 merge
+`b3e6d21f1f53c3ad2fe9ec33900ddde0611e2b5a`. Secrets selects actual SDK #55 merge
+`ad0582937d7e41f1e7a41295fa1de58c2ce4cba2`, which requires the identical Core
+archive. The prerequisite SDK/Secrets adoptions changed dependency metadata,
+strict expectations and companions only; both passed their normal owning gates
+and independent reviews before acceptance. This resolves the pre-package
+dependency conflict recorded in the selected-secret installation checkpoint.
+The existing installed-owner expectations move with the test-extra pin; extras,
+runner, provider opt-in and test-only Servers fixture remain unchanged. The
+Interpreter gate still needs to establish target behavior and eventual package
+compatibility. Metadata/resolver implementation and Docker installation have
+separate evidence in their implementation companions; no downstream deployment
+or recipient success is inferred from this dependency adoption.
+
+Historical Interpreters #198 / Servers #251 selects accepted Core
 `05b5f28a624e6e03f1dadbe6ad77ece2bec09601` and actual Secrets #51 merge
 `28c9045c5d0aecf7471c151cae90ebb9ac88a123`. Secrets selects accepted SDK #53 merge
 `9aa01ef7b2df6106f6ad87c1625a7feb93394b88` and the identical Core archive.

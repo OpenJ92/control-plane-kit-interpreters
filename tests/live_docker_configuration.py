@@ -79,6 +79,10 @@ class ConfigurationFixtureResources:
                     if not owned:
                         failed.append({"kind": kind, "identity": identity, "reason": "ownership"})
                         continue
+                    if ((kind == "volume" and self.client.containers.list(all=True, filters={"volume": identity}))
+                            or (kind == "network" and attrs.get("Containers"))):
+                        failed.append({"kind": kind, "identity": identity, "reason": "attached"})
+                        continue
                     if kind in ("volume", "network"):
                         resource.remove()
                     else:

@@ -17,6 +17,7 @@ class ConfigurationContainers(FakeManager):
         super().__init__()
         self.events = events
         self.after_create = None
+        self.after_reload = None
 
     def get(self, identity):
         self.events.append(("get", identity))
@@ -30,6 +31,10 @@ class ConfigurationContainers(FakeManager):
 
     def create_container(self, image, **kwargs):
         resource = super().create_container(image, **kwargs)
+        resource.attrs["Config"]["Env"] = [
+            f"{key}={value}" for key, value in kwargs.get("environment", {}).items()]
+        if resource.image is not None:
+            resource.attrs["Image"] = resource.image.id
         identity = format(len(self.created_containers), "064x")
         resource.attrs["Id"] = identity
         is_workload = "org.openj92.cpk.node" in kwargs.get("labels", {})
@@ -44,6 +49,13 @@ class ConfigurationContainers(FakeManager):
         def started():
             self.events.append(("start", kind, identity))
             return start()
+
+        def reloaded():
+            # Fixture attrs are the in-memory provider truth; expose the SDK
+            # refresh boundary and allow independent between-read changes.
+            self.events.append(("reload", kind, identity))
+            if self.after_reload is not None:
+                self.after_reload(resource)
 
         def archive(path):
             self.events.append(("read", kind, identity, path))
@@ -62,10 +74,11 @@ class ConfigurationContainers(FakeManager):
             with tarfile.open(fileobj=output, mode="w") as target:
                 observed = tarfile.TarInfo(PurePosixPath(path).name)
                 observed.mode, observed.size = member.mode, len(body)
+                observed.uid, observed.gid = member.uid, member.gid
                 target.addfile(observed, BytesIO(body))
             return [output.getvalue()], {}
 
-        resource.remove, resource.start, resource.get_archive = removed, started, archive
+        resource.remove, resource.start, resource.get_archive, resource.reload = removed, started, archive, reloaded
         if is_workload and self.after_create is not None:
             self.after_create(resource)
         return resource

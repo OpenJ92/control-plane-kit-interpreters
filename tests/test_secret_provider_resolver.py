@@ -8,6 +8,9 @@ import unittest
 
 import httpx
 
+from control_plane_kit_core.secret_selections import SecretVersionSelection
+from control_plane_kit_core.secret_version_grants import SecretVersionResolutionGrant
+
 from control_plane_kit_core.secrets import (
     SecretDenied,
     SecretMissing,
@@ -28,6 +31,69 @@ from control_plane_kit_interpreters.secret_provider import (
 
 
 class SecretProviderResolverTests(unittest.TestCase):
+    def test_consumer_version_grant_forwards_exact_version_and_original_correlation(self):
+        reference = SecretReference("secret://provider-a/postgres/password")
+        calls = []
+        def handler(request):
+            calls.append(json.loads(request.content))
+            return _resolved_response(reference, "selected-material")
+        with _resolver(handler) as resolver:
+            grant = _version_grant(reference)
+            result = resolver.resolve(grant)
+        self.assertIs(type(result), SecretResolved)
+        self.assertEqual(result.value.reveal(), "selected-material")
+        self.assertEqual(calls, [{"caller_subject": "worker-1", "correlation_id": "correlation-version-1",
+            "intent": "postgres.password", "version_id": "version-1"}])
+        self.assertNotIn("selected-material", repr(result))
+
+    def test_consumer_version_mismatch_never_returns_material_or_retries(self):
+        reference = SecretReference("secret://provider-a/postgres/password")
+        for changed in ({"version_id": "version-other"}, {"labels": {"intent": "cloudflare.tunnel-token"}}):
+            with self.subTest(changed=changed):
+                calls = []
+                def handler(request):
+                    calls.append(request)
+                    payload = _resolved_response(reference, "unapproved-material").json()
+                    payload["metadata"].update(changed)
+                    return httpx.Response(200, headers={"content-type": "application/json"}, json=payload)
+                with _resolver(handler) as resolver:
+                    with self.assertRaises(SecretProviderClientError) as raised:
+                        resolver.resolve(_version_grant(reference))
+                self.assertEqual(len(calls), 1)
+                self.assertIs(raised.exception.code, SecretProviderClientCode.MALFORMED_RESPONSE)
+                self.assertNotIn("unapproved-material", str(raised.exception))
+
+    def test_malformed_consumer_grant_refuses_before_bootstrap_or_transport(self):
+        reference = SecretReference("secret://provider-a/postgres/password")
+        for field_name, bad in (("request_fingerprint", "bad"), ("selection", None), ("run_id", None)):
+            with self.subTest(field=field_name):
+                calls = []
+                grant = _version_grant(reference)
+                object.__setattr__(grant, field_name, bad)
+                # Unknown endpoint would produce BootstrapError if grant validation were late.
+                object.__setattr__(grant, "endpoint_reference", SecretProviderEndpointReference("unknown-provider"))
+                with _resolver(lambda request: calls.append(request)) as resolver:
+                    with self.assertRaises(SecretProviderClientError) as raised:
+                        resolver.resolve(grant)
+                self.assertIs(raised.exception.code, SecretProviderClientCode.MALFORMED_REQUEST)
+                self.assertEqual(calls, [])
+
+    def test_consumer_missing_and_revoked_do_not_fall_back_to_operational_resolution(self):
+        reference = SecretReference("secret://provider-a/postgres/password")
+        for status, outcome, expected in ((404, "missing", SecretMissing), (409, "revoked", SecretDenied)):
+            with self.subTest(outcome=outcome):
+                calls = []
+                def handler(request):
+                    calls.append(json.loads(request.content))
+                    return httpx.Response(status, headers={"content-type": "application/json"},
+                        json=_error(outcome, "secret-" + outcome))
+                with _resolver(handler) as resolver:
+                    result = resolver.resolve(_version_grant(reference))
+                self.assertIs(type(result), expected)
+                self.assertEqual(result.reference, reference)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0]["version_id"], "version-1")
+
     def test_resolves_exact_grant_and_preserves_provider_correlation(self) -> None:
         reference = SecretReference("secret://provider-a/team/postgres/password")
         observed: dict[str, object] = {}
@@ -195,7 +261,7 @@ def _resolved_response(
                 "algorithm": "aes-256-gcm",
                 "key_fingerprint": "a" * 64,
                 "key_version": "master-v1",
-                "labels": {},
+                "labels": {"intent": "postgres.password"},
                 "created_at": "2026-07-30T00:00:00Z",
                 "revoked_at": None,
             },
@@ -206,6 +272,20 @@ def _resolved_response(
 
 def _error(outcome: str, code: str) -> dict[str, object]:
     return {"detail": {"outcome": outcome, "code": code}}
+
+
+def _version_grant(reference):
+    original = _grant(reference=reference)
+    return SecretVersionResolutionGrant(
+        authorization_id=original.authorization_id, workspace_id=original.workspace_id,
+        reference_registration_id=original.reference_registration_id,
+        provider_registration_id=original.provider_registration_id,
+        endpoint_reference=original.endpoint_reference, credential_reference=original.credential_reference,
+        selection=SecretVersionSelection(reference, SecretUseIntent.POSTGRES_PASSWORD, "version-1"),
+        actor_subject=original.actor_subject, correlation_id="correlation-version-1",
+        intent_fingerprint=original.intent_fingerprint, operation_id="operation-1",
+        run_id="run-1", activity_id="activity-1", effect_id="effect-1",
+        request_fingerprint="e" * 64, selection_fingerprint="f" * 64)
 
 
 if __name__ == "__main__":

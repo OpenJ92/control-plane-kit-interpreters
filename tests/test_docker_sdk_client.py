@@ -522,8 +522,23 @@ class DockerSdkClientTests(unittest.TestCase):
                                 "missing protected-file recipient admission")
                 self.assertEqual(inspected.secret_file_owner_uid(), expected)
 
+    def test_image_user_omission_uses_documented_provider_default_only(self) -> None:
+        raw = FakeDockerClient()
+        observed = FakeImage([])
+        observed.attrs["Config"] = {}
+        raw.images.resources["fixture"] = observed
+        sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+        inspected = sdk.inspect_image("fixture")
+        self.assertEqual(inspected.configured_user, "")
+        self.assertEqual(inspected.secret_file_owner_uid(), 0)
+        del observed.attrs["Config"]
+        self.assertIsNone(sdk.inspect_image("fixture").configured_user)
+        with self.assertRaises(ValueError):
+            sdk.inspect_image("fixture").secret_file_owner_uid()
+        self.assertEqual(raw.containers.created, [])
+
     def test_protected_file_recipient_rejects_unsupported_or_missing_evidence(self) -> None:
-        for config in (None, {}, {"User": None}, {"User": 0}, {"User": "secrets"},
+        for config in (None, [], "", {"User": None}, {"User": 0}, {"User": "secrets"},
                        {"User": "00"}, {"User": "+1"}, {"User": " 1"},
                        {"User": "2147483648"}, {"User": "١"},
                        *({"User": value} for value in ("1:", ":1", "1:2:3", "1:group", "user:1",
@@ -600,6 +615,7 @@ class DockerSdkClientTests(unittest.TestCase):
                 "inspect_network",
                 "inspect_volume",
                 "inspect_secret_file",
+                "verify_secret_recipient",
                 "materialize_configuration_artifact",
                 "materialize_secret_file",
                 "pull_image",
@@ -1994,7 +2010,7 @@ class ProviderContractObservationTests(unittest.TestCase):
         self.assertEqual(len(product.runtime_contract.secret_deliveries), 2)
         for delivery in product.runtime_contract.secret_deliveries:
             self.assertEqual(delivery.file_mode.value, "0400")
-        values = {grant.intent.value: fixture.resolver.resolve(grant).value.reveal()
+        values = {grant.selection.intent.value: fixture.resolver.resolve(grant).value.reveal()
                   for grant in fixture.grants}
         self.assertTrue(len(base64.urlsafe_b64decode(values["secrets.custody-root-key"])) == 32)
         document = json.loads(values["secrets.provider-credentials-document"])

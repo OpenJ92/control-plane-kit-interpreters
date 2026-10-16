@@ -48,7 +48,7 @@ from test_docker_start_node_phase_total import (
 )
 from test_docker_runtime_interpreter import (
     _grant, _local_runtime_authority, _material, _product_with_secret_delivery,
-    _remote_tls_runtime_authority, _request, _unsupported_runtime_authority,
+    _remote_tls_runtime_authority, _request, _selected_request, _unsupported_runtime_authority,
     _product_with_retained_data,
 )
 from test_docker_sdk_client import (
@@ -445,14 +445,12 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
 
     def test_product_secret_and_registry_credentials_are_never_resolved(self):
         authority = ImagePullAuthority("ghcr.io", "openj92/control-plane-kit-servers/hello-server", SecretReference("secret://test/registry"))
-        for request in (_hello_request(pull_authority=authority), _request(StartNode(NodeTarget("api")), products=(_material(_product_with_secret_delivery()),))):
+        for request in (_hello_request(pull_authority=authority), _selected_request(StartNode(NodeTarget("api")), products=(_material(_product_with_secret_delivery()),))):
             with self.subTest(secret=bool(request.products[0].product.runtime_contract.secret_deliveries)):
                 contract = request.products[0].product.runtime_contract
                 delivery = contract.secret_deliveries[0] if contract.secret_deliveries else None
-                grant = _grant_for(
-                    request, authority.credential_reference if delivery is None else delivery.reference,
-                    SecretUseIntent.OCI_PULL_CREDENTIAL if delivery is None else delivery.intent,
-                )
+                grant = (_grant_for(request, authority.credential_reference, SecretUseIntent.OCI_PULL_CREDENTIAL)
+                    if delivery is None else request.secret_resolution_grants[0])
                 request = replace(request, secret_resolution_grants=(grant,))
                 client = _ReadClient(request)
                 resolver = _Resolver()
@@ -682,7 +680,14 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                 request, authority, grants = _remote_request(request)
                 extras = [_grant_for(request, pull.credential_reference, SecretUseIntent.OCI_PULL_CREDENTIAL)]
                 for delivery in request.products[0].product.runtime_contract.secret_deliveries:
-                    extras.append(_grant_for(request, delivery.reference, delivery.intent))
+                    # Stop has no consumer-resolution authority in the current
+                    # Core contract. Preserve no-resolution by proving refusal
+                    # at that boundary, then exercise the lawful TLS-only read.
+                    consumer = _grant_for(request, delivery.reference, delivery.intent)
+                    with self.assertRaises(RuntimeEffectContractError):
+                        RuntimeEffectObservationRequest(replace(request,
+                            secret_resolution_grants=(*grants, *extras, consumer)),
+                            connection_admission=_connection_admission())
                 request = replace(request, secret_resolution_grants=(*grants, *extras))
                 ambient, remote, resolver = _ReadClient(request), _ReadClient(request), _Resolver()
                 remote.container = replace(remote.container, running=False)
@@ -858,6 +863,23 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                         products = ()
                     elif invalid == "multiple":
                         products = (*products, replace(products[0], node_id="second"))
+                    if operation_type in (StartNode, ReconcileNode):
+                        valid = replace(template, operation=operation_type(NodeTarget("api")))
+                        observation = RuntimeEffectObservationRequest(valid)
+                        malformed = replace(valid)
+                        object.__setattr__(malformed, "operation",
+                            operation_type(NodeTarget("foreign" if invalid == "target" else "api")))
+                        object.__setattr__(malformed, "products", products)
+                        # A deliberately tampered negative specimen, retaining
+                        # the original valid correlation, never an admitted intent.
+                        object.__setattr__(observation, "runtime_request", malformed)
+                        client = _ReadClient(valid)
+                        before = repr((client.network, client.container, client.image, client.volumes))
+                        result = self.observer(client).observe(observation, None)
+                        self.assertEqual(self.assert_observation(result, valid), "indeterminate")
+                        self.assertEqual(client.calls + client.mutations, [])
+                        self.assertEqual(before, repr((client.network, client.container, client.image, client.volumes)))
+                        continue
                     request = replace(template, operation=operation_type(NodeTarget("foreign" if invalid == "target" else "api")), products=products)
                     client = _ReadClient(template)
                     self.assertEqual(self.observe(request, client), "indeterminate")

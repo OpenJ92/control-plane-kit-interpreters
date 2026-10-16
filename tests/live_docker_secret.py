@@ -108,6 +108,7 @@ def main() -> None:
         run_configuration_witness(client, sdk, run_id, image_id, helper_image)
         from live_docker_installation import run_installation_witness
         run_installation_witness(client, sdk, canonical, helper_image)
+        run_installation_witness(client, sdk, canonical, helper_image, selected_secrets=True)
         if os.environ.get("CPK_INTERPRETERS_START_NODE_CONTRACT") == "1":
             from live_docker_start_node_contract import run_provider_contract
             try:

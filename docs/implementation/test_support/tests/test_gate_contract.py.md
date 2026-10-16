@@ -1,6 +1,12 @@
 Source: [test_support/tests/test_gate_contract.py](../../../../test_support/tests/test_gate_contract.py).
 
-Interpreters #198 / Servers #251 advances only CORE_REQUIREMENT
+Interpreters #190/#191 advances CORE_REQUIREMENT to actual accepted Core
+`87e231c661879e44816ba71ff9320c040c868d60`. Exact equality, gate assertions,
+normal pinned mode and provider opt-in semantics remain unchanged. The first
+attempt caught the stale prior expected coordinate before package collection;
+its reviewed correction is a fixture premise, not behavioral red evidence.
+
+Historical Interpreters #198 / Servers #251 advances only CORE_REQUIREMENT
 to accepted Core `05b5f28a624e6e03f1dadbe6ad77ece2bec09601`, matching package
 metadata. All existing gate assertions, normal pinned resolution and provider
 opt-in semantics are unchanged. Mechanical pin alignment needs no artificial

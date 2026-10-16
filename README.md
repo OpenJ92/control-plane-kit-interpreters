@@ -160,10 +160,15 @@ process delivery. It checks provider credential references and all three exact
 TLS grants before resolving any, reads without mutation, and closes its client
 once. Product and image-pull secrets are not resolved for observation.
 
-Secret-bearing products currently fail closed unless secret values have been
-resolved by a future authority boundary. That is intentional: secret references
-may be durable graph data, but secret values are not part of
-`RuntimeEffectRequest`.
+Consumer secret deliveries require exact version selections and matching
+request-bound consumer grants. Both execution entrypoints validate the complete
+request and grant coverage before opening an authority connection. Operational
+grants and legacy resolvers cannot substitute for consumer authority. Values
+remain ephemeral and never enter `RuntimeEffectRequest` or result evidence.
+The selected path verifies the actual recipient's environment and readonly file
+mounts, bytes, UID and mode before emitting Core installation receipts. Changed
+versions or numeric reader UIDs select new immutable file volumes; old volumes
+are retained. See the [implementation and validation checkpoint](docs/implementation/selected-secret-installation.md).
 
 ### StartNode creation diagnostics
 
@@ -277,6 +282,23 @@ to. `SecretReference` values are mapped to the provider's single `{secret_id}`
 path segment by base64url-encoding the complete UTF-8 `reference_id`, removing
 padding, and prefixing `cpk1_`. This is deterministic and injective; it does not
 discard path segments or rely on a collision-prone hash.
+
+`ControlPlaneKitSecretsMetadataReader.read_version` accepts explicit workspace,
+endpoint/credential references, secret reference, version ID, and use intent.
+It uses an authenticated metadata-only GET and requires the exact active version
+and durable intended use. It returns the existing provider metadata observation;
+it does not resolve plaintext, select latest, grant execution permission, or
+attest installation. Servers composition owns translation to the Operations
+metadata port and its exact request/response types; Interpreters does not import
+Operations.
+
+`ControlPlaneKitSecretsResolver` accepts the closed operational and
+consumer-version grant variants. Consumer grants forward the exact selected
+version and preserve original provider correlation. The client verifies the
+returned version and intended use before decoding secret material. Missing,
+revoked, mismatched, or malformed selections never fall back to another version
+or an operational grant. Provider first-resolution pinning and revocation checks
+remain authoritative on every resolution and replay.
 
 The same client exposes a closed delegation-key generation operation. It sends
 only workspace, `SecretReference`, purpose, issuer, caller, and correlation

@@ -19,12 +19,14 @@ from .client import (
 )
 from .custody import ControlPlaneKitSecretsCustodian
 from .resolver import ControlPlaneKitSecretsResolver
+from .metadata import ControlPlaneKitSecretsMetadataReader
 
 
 __all__ = [
     "ControlPlaneKitSecretsClient",
     "ControlPlaneKitSecretsCustodian",
     "ControlPlaneKitSecretsResolver",
+    "ControlPlaneKitSecretsMetadataReader",
     "SecretProviderBootstrapError",
     "SecretProviderBootstrapRegistry",
     "SecretProviderClientCode",

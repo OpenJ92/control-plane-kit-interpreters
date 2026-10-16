@@ -68,7 +68,7 @@ class InstallationWitnessDiagnosticTests(unittest.TestCase):
                     "configuration_installation_receipt": {"token": "private-value"},
                     "arbitrary": "private-value"})
                 report = _runtime_diagnostic("private-step", result,
-                    dict(network=True, volume=-1, reader="private-value", helper=15))
+                    dict(network=True, volume=-1, reader="private-value", helper=22))
                 self.assertEqual(report["failure_code"], "unavailable")
                 self.assertEqual(report["kind"], "unavailable")
                 self.assertEqual(report["phase"], "unavailable")

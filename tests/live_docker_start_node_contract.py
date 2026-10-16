@@ -133,12 +133,17 @@ def prepare_fixture(run_id):
     from control_plane_kit_core.planning import ActivityId, NodeTarget, RuntimeTarget, StartNode, StartRuntime
     from control_plane_kit_core.products import ProductDescriptorCodec, ProductDescriptorDigest, ProductIdentity, ProductReference
     from control_plane_kit_core.runtime_effects import RuntimeEffectKind, RuntimeEffectRequest, RuntimeEffectSource, RuntimeProductMaterial
+    from control_plane_kit_core.secret_selections import SecretVersionSelection
+    from control_plane_kit_core.secret_version_grants import SecretVersionResolutionGrant
+    from control_plane_kit_core.secret_installation import secret_material_selection_fingerprint
+    from control_plane_kit_core.runtime_effect_observation import runtime_effect_intent_for_request, runtime_effect_intent_fingerprint
     from control_plane_kit_core.secrets import (SecretFileDelivery, SecretFileMode, SecretFilePathBinding,
-        SecretProviderEndpointReference, SecretReference, SecretResolutionGrant, SecretResolved,
+        SecretProviderEndpointReference, SecretReference, SecretResolved,
         SecretMissing, SecretUseIntent, SecretValue)
     from control_plane_kit_core.types import RuntimeKind
     from control_plane_kit_interpreters.docker.runtime import (
-        _container_name, _digest, _network_name, _node_labels, _runtime_labels, _volume_name)
+        _container_name, _digest, _network_name, _node_labels, _runtime_labels, _volume_name,
+        _secret_volume_name, _selected_secret_identity)
 
     if not re.fullmatch(r"cpk141-[a-z0-9-]{4,48}", run_id):
         raise RuntimeError("fixture identity invalid")
@@ -173,7 +178,9 @@ def prepare_fixture(run_id):
     content = ProductDescriptorCodec().encode_document(product)
     material = RuntimeProductMaterial(node_id=node_id, runtime_id=runtime_id,
         reference=ProductReference(product.identity, ProductDescriptorDigest(content.content_digest)),
-        product=product, public_environment=contract.public_environment)
+        product=product, public_environment=contract.public_environment,
+        secret_selections=tuple(SecretVersionSelection(ref, intent, "fixture-version")
+            for ref, intent in zip(references, intents)))
 
     def request(operation, suffix, grants=()):
         return RuntimeEffectRequest(effect_id=run_id + "-" + suffix + "-effect",
@@ -184,14 +191,19 @@ def prepare_fixture(run_id):
             activity_id=ActivityId(run_id + "-" + suffix + "-activity"), operation=operation,
             products=() if suffix == "runtime" else (material,), secret_resolution_grants=grants)
 
-    grants = tuple(SecretResolutionGrant(authorization_id="suse_" + _digest(run_id, str(i)),
+    node = request(StartNode(NodeTarget(node_id)), "node")
+    grants = tuple(SecretVersionResolutionGrant(authorization_id="suse_" + _digest(run_id, str(i)),
         workspace_id=workspace, reference_registration_id="sref_" + _digest(run_id, "ref", str(i)),
         provider_registration_id="sprov_" + _digest(run_id, "provider"),
         endpoint_reference=SecretProviderEndpointReference(run_id + "-in-memory"),
         credential_reference=SecretReference("secret://fixture/" + run_id + "/unused-provider-credential"),
-        reference=ref, intent=intent, actor_subject="fixture", correlation_id=run_id + "-resolution",
+        selection=SecretVersionSelection(ref, intent, "fixture-version"),
+        actor_subject="fixture", correlation_id=run_id + "-resolution-" + str(i),
         intent_fingerprint=_digest(run_id, "intent", str(i)), run_id=run_id + "-run",
-        activity_id=run_id + "-node-activity", effect_id=run_id + "-node-effect")
+        activity_id=run_id + "-node-activity", effect_id=run_id + "-node-effect",
+        operation_id=node.source.request_id,
+        request_fingerprint=runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(node)),
+        selection_fingerprint=secret_material_selection_fingerprint(node))
         for i,(ref,intent) in enumerate(zip(references,intents)))
     start = request(StartRuntime(RuntimeTarget(runtime_id)), "runtime")
     node = request(StartNode(NodeTarget(node_id)), "node", grants)
@@ -199,18 +211,21 @@ def prepare_fixture(run_id):
     network = _network_name(node, runtime_id)
     recipient = _container_name(node, node_id)
     data_volume = _volume_name(node, node_id, "provider-data")
-    secret_volumes = tuple(_volume_name(node, node_id, "secret-" + _digest(target, ref.reference_id)[:16])
-                           for target,ref in zip(targets,references))
+    # This fixed image ABI is separately checked to run as10006 before effects.
+    secret_volumes = tuple(_secret_volume_name(node, node_id, delivery, owner_uid=10006)
+                           for delivery in deliveries)
     volume_labels = {data_volume: {**node_labels, "org.openj92.cpk.volume.kind": "retained-data"}}
-    for name,target,ref in zip(secret_volumes,targets,references):
+    for name,target,ref,delivery in zip(secret_volumes,targets,references,deliveries):
+        selection = next(value for value in material.secret_selections if value.reference == ref)
         volume_labels[name] = {**node_labels, "org.openj92.cpk.volume.kind": "secret-file",
-                              "org.openj92.cpk.secret.target": target, "org.openj92.cpk.secret.reference": ref.reference_id}
+            "org.openj92.cpk.secret.target": target, "org.openj92.cpk.secret.reference": ref.reference_id,
+            "org.openj92.cpk.secret.identity": _selected_secret_identity(node, node_id, delivery, selection, 10006)}
 
     class Resolver:
         def resolve(self, grant):
             if grant not in grants:
-                return SecretMissing(grant.reference)
-            return SecretResolved(grant.reference, SecretValue(raw_values[grants.index(grant)]))
+                return SecretMissing(grant.selection.reference)
+            return SecretResolved(grant.selection.reference, SecretValue(raw_values[grants.index(grant)]))
 
     return SimpleNamespace(start=start, node=node, material=material, resolver=Resolver(), grants=grants,
         network=network, recipient=recipient, node_labels=node_labels,

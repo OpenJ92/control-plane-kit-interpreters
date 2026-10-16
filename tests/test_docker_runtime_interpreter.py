@@ -62,6 +62,7 @@ from control_plane_kit_core.runtime_effects import (
     RuntimeEffectSource,
     RuntimeProductMaterial,
 )
+from control_plane_kit_core.secret_selections import SecretVersionSelection
 from control_plane_kit_core.operations.run_identity import RunId
 from control_plane_kit_core.secrets import (
     SecretEnvironmentDelivery,
@@ -210,7 +211,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertNotIn("fixture-secret", repr(result.descriptor()))
 
     def test_reconcile_replaces_stale_image_with_same_secret_reader(self) -> None:
-        raw = FakeDockerClient()
+        raw = _selected_fixture_client()
         old = _product_with_file_secret_delivery()
         desired = replace(old, image=replace(old.image, digest="sha256:" + "d" * 64))
         for product, image_id in ((old, "sha256:" + "b" * 64), (desired, "sha256:" + "c" * 64)):
@@ -219,14 +220,14 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
             raw.images.resources[product.image.execution_reference] = image
         interpreter = DockerRuntimeInterpreter(
             DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw)),
-            secret_resolver=FakeSecretResolver(raw, SecretResolved(
+            authorized_secret_resolver=FakeSelectedSecretResolver(raw, SecretResolved(
                 SecretReference("secret://local/api-token"), SecretValue("fixture"))))
-        self.assertIs(interpreter.execute(_request(StartNode(NodeTarget("api")),
+        self.assertIs(interpreter.execute(_selected_request(StartNode(NodeTarget("api")),
                       products=(_material(old),))).kind, EffectResultKind.SUCCEEDED)
         prior = raw.containers.resources[_workload_container_record(raw)["name"]]
         before = {name: dict(archive) for name, archive in raw.containers.volume_archives.items()}
         volume_count = len(raw.volumes.created)
-        result = interpreter.execute(_request(ReconcileNode(NodeTarget("api")), products=(_material(desired),)))
+        result = interpreter.execute(_selected_request(ReconcileNode(NodeTarget("api")), products=(_material(desired),)))
         self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
         self.assertTrue(prior.removed)
         self.assertEqual(raw.containers.volume_archives, before)
@@ -238,13 +239,13 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
     def test_secret_observation_transport_interruption_remains_uncertain(self) -> None:
         for interrupted, expected in ((True, EffectResultKind.UNCERTAIN), (False, EffectResultKind.FAILED)):
             with self.subTest(interrupted=interrupted):
-                raw = FakeDockerClient()
+                raw = _selected_fixture_client()
                 product = _product_with_file_secret_delivery()
                 interpreter = DockerRuntimeInterpreter(
                     DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw)),
-                    secret_resolver=FakeSecretResolver(raw, SecretResolved(
+                    authorized_secret_resolver=FakeSelectedSecretResolver(raw, SecretResolved(
                         SecretReference("secret://local/api-token"), SecretValue("fixture"))))
-                request = _request(StartNode(NodeTarget("api")), products=(_material(product),))
+                request = _selected_request(StartNode(NodeTarget("api")), products=(_material(product),))
                 self.assertIs(interpreter.execute(request).kind, EffectResultKind.SUCCEEDED)
                 target = raw.containers.resources[_workload_container_record(raw)["name"]]
                 target.attrs["State"]["Running"] = False
@@ -272,18 +273,18 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                 self._assert_numeric_reader_start_and_reuse(user, uid)
 
     def _assert_numeric_reader_start_and_reuse(self, user: str, uid: int) -> None:
-        raw = FakeDockerClient()
+        raw = _selected_fixture_client()
         product = _product_with_file_secret_delivery()
         reference = product.image.execution_reference
         image = FakeImage([], repo_digests=(reference,))
         image.attrs["Config"]["User"] = user
         raw.images.resources[reference] = image
-        resolver = FakeSecretResolver(raw, SecretResolved(
+        resolver = FakeSelectedSecretResolver(raw, SecretResolved(
             SecretReference("secret://local/api-token"), SecretValue("fixture")))
         sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
-        interpreter = DockerRuntimeInterpreter(sdk, secret_resolver=resolver)
+        interpreter = DockerRuntimeInterpreter(sdk, authorized_secret_resolver=resolver)
         for effect in (StartNode(NodeTarget("api")), StartNode(NodeTarget("api")), ReconcileNode(NodeTarget("api"))):
-            result = interpreter.execute(_request(effect, products=(_material(product),)))
+            result = interpreter.execute(_selected_request(effect, products=(_material(product),)))
             self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
             record = _workload_container_record(raw)
             self.assertNotIn("user", record)
@@ -300,7 +301,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertEqual(len(_workload_container_records(raw)), 1)
 
     def test_named_user_environment_only_delivery_is_unchanged(self) -> None:
-        raw = FakeDockerClient()
+        raw = _selected_fixture_client()
         product = _product_with_secret_delivery()
         reference = product.image.execution_reference
         image = FakeImage([], repo_digests=(reference,))
@@ -308,9 +309,9 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         raw.images.resources[reference] = image
         interpreter = DockerRuntimeInterpreter(
             DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw)),
-            secret_resolver=FakeSecretResolver(raw, SecretResolved(
+            authorized_secret_resolver=FakeSelectedSecretResolver(raw, SecretResolved(
                 SecretReference("secret://local/api-token"), SecretValue("fixture"))))
-        result = interpreter.execute(_request(StartNode(NodeTarget("api")), products=(_material(product),)))
+        result = interpreter.execute(_selected_request(StartNode(NodeTarget("api")), products=(_material(product),)))
         self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
         self.assertEqual(_workload_container_record(raw)["environment"]["API_TOKEN"], "fixture")
 
@@ -318,18 +319,18 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         for effect in (StartNode(NodeTarget("api")), ReconcileNode(NodeTarget("api"))):
             for user in ("secrets", "01", "1:group", None):
                 with self.subTest(effect=type(effect).__name__, user=user):
-                    raw = FakeDockerClient()
+                    raw = _selected_fixture_client()
                     product = _product_with_file_secret_delivery()
                     reference = product.image.execution_reference
                     image = FakeImage([], repo_digests=(reference,))
                     image.attrs["Config"]["User"] = user
                     raw.images.resources[reference] = image
-                    resolver = FakeSecretResolver(raw, SecretResolved(
+                    resolver = FakeSelectedSecretResolver(raw, SecretResolved(
                         SecretReference("secret://local/api-token"), SecretValue("fixture")))
                     interpreter = DockerRuntimeInterpreter(
                         DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw)),
-                        secret_resolver=resolver)
-                    result = interpreter.execute(_request(effect, products=(_material(product),)))
+                        authorized_secret_resolver=resolver)
+                    result = interpreter.execute(_selected_request(effect, products=(_material(product),)))
                     self.assertIs(result.kind, EffectResultKind.FAILED)
                     self.assertEqual(raw.networks.created, [])
                     self.assertEqual(raw.volumes.created, [])
@@ -339,14 +340,14 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         for effect in (StartNode(NodeTarget("api")), ReconcileNode(NodeTarget("api"))):
             for defect in ("uid", "mode", "content", "type", "missing", "mount", "mount-source", "mount-target", "subpath", "user", "image"):
                 with self.subTest(effect=type(effect).__name__, defect=defect):
-                    raw = FakeDockerClient()
+                    raw = _selected_fixture_client()
                     product = _product_with_file_secret_delivery()
-                    resolver = FakeSecretResolver(raw, SecretResolved(
+                    resolver = FakeSelectedSecretResolver(raw, SecretResolved(
                         SecretReference("secret://local/api-token"), SecretValue("fixture")))
                     interpreter = DockerRuntimeInterpreter(
                         DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw)),
-                        secret_resolver=resolver)
-                    request = _request(StartNode(NodeTarget("api")), products=(_material(product),))
+                        authorized_secret_resolver=resolver)
+                    request = _selected_request(StartNode(NodeTarget("api")), products=(_material(product),))
                     self.assertIs(interpreter.execute(request).kind, EffectResultKind.SUCCEEDED)
                     record = _workload_container_record(raw)
                     target = raw.containers.resources[record["name"]]
@@ -387,7 +388,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                         target.image.id = "sha256:" + "c" * 64
                     before = dict(raw.containers.volume_archives[volume])
                     volume_count = len(raw.volumes.created)
-                    result = interpreter.execute(_request(effect, products=(_material(product),)))
+                    result = interpreter.execute(_selected_request(effect, products=(_material(product),)))
                     self.assertIs(result.kind, EffectResultKind.FAILED)
                     self.assertFalse(target.started)
                     self.assertFalse(target.removed)
@@ -1325,8 +1326,8 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertEqual(fake_client.containers.created, [])
 
     def test_start_node_resolves_secret_environment_before_docker_mutation(self) -> None:
-        fake_client = FakeDockerClient()
-        resolver = FakeSecretResolver(
+        fake_client = _selected_fixture_client()
+        resolver = FakeSelectedSecretResolver(
             fake_client,
             SecretResolved(
                 SecretReference("secret://local/api-token"),
@@ -1338,11 +1339,11 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                 client=fake_client,
                 docker_module=FakeDockerModule(fake_client),
             ),
-            secret_resolver=resolver,
+            authorized_secret_resolver=resolver,
         )
 
         result = interpreter.execute(
-            _request(
+            _selected_request(
                 StartNode(NodeTarget("api")),
                 products=(_material(_product_with_secret_delivery()),),
             )
@@ -1362,8 +1363,8 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertNotIn("resolved-api-token", repr(result))
 
     def test_start_node_missing_secret_fails_before_docker_mutation(self) -> None:
-        fake_client = FakeDockerClient()
-        resolver = FakeSecretResolver(
+        fake_client = _selected_fixture_client()
+        resolver = FakeSelectedSecretResolver(
             fake_client,
             SecretMissing(SecretReference("secret://local/api-token")),
         )
@@ -1372,11 +1373,11 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                 client=fake_client,
                 docker_module=FakeDockerModule(fake_client),
             ),
-            secret_resolver=resolver,
+            authorized_secret_resolver=resolver,
         )
 
         result = interpreter.execute(
-            _request(
+            _selected_request(
                 StartNode(NodeTarget("api")),
                 products=(_material(_product_with_secret_delivery()),),
             )
@@ -1390,8 +1391,8 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertEqual(fake_client.containers.created, [])
 
     def test_start_node_resolves_file_secret_as_read_only_mount(self) -> None:
-        fake_client = FakeDockerClient()
-        resolver = FakeSecretResolver(
+        fake_client = _selected_fixture_client()
+        resolver = FakeSelectedSecretResolver(
             fake_client,
             SecretResolved(
                 SecretReference("secret://local/api-token"),
@@ -1403,11 +1404,11 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                 client=fake_client,
                 docker_module=FakeDockerModule(fake_client),
             ),
-            secret_resolver=resolver,
+            authorized_secret_resolver=resolver,
         )
 
         result = interpreter.execute(
-            _request(
+            _selected_request(
                 StartNode(NodeTarget("api")),
                 products=(_material(_product_with_file_secret_delivery()),),
             )
@@ -2657,12 +2658,14 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertNotIn("do-not-resolve", repr(result.descriptor()))
 
     def test_authorized_delivery_resolves_exact_grant_before_docker_mutation(self) -> None:
-        fake_client = FakeDockerClient()
+        fake_client = _selected_fixture_client()
         reference = SecretReference("secret://local/api-token")
-        grant = _grant(reference, SecretUseIntent.APPLICATION_CONTROL_TOKEN)
+        request = _selected_request(StartNode(NodeTarget("api")),
+            products=(_material(_product_with_secret_delivery()),))
+        grant = request.secret_resolution_grants[0]
         resolver = FakeAuthorizedSecretResolver(
             fake_client,
-            {(reference, grant.intent): "authorized-token"},
+            {(reference, grant.selection.intent): "authorized-token"},
         )
         interpreter = DockerRuntimeInterpreter(
             DockerSdkClient(
@@ -2672,13 +2675,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
             authorized_secret_resolver=resolver,
         )
 
-        result = interpreter.execute(
-            _request(
-                StartNode(NodeTarget("api")),
-                products=(_material(_product_with_secret_delivery()),),
-                secret_resolution_grants=(grant,),
-            )
-        )
+        result = interpreter.execute(request)
 
         self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
         self.assertEqual(resolver.requests, [grant])
@@ -2732,12 +2729,14 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         self.assertNotIn("registry-token", repr(result.descriptor()))
 
     def test_authorized_file_delivery_materializes_only_after_exact_grant(self) -> None:
-        fake_client = FakeDockerClient()
+        fake_client = _selected_fixture_client()
         reference = SecretReference("secret://local/api-token")
-        grant = _grant(reference, SecretUseIntent.APPLICATION_CONTROL_TOKEN)
+        request = _selected_request(StartNode(NodeTarget("api")),
+            products=(_material(_product_with_file_secret_delivery()),))
+        grant = request.secret_resolution_grants[0]
         resolver = FakeAuthorizedSecretResolver(
             fake_client,
-            {(reference, grant.intent): "file-secret-content"},
+            {(reference, grant.selection.intent): "file-secret-content"},
         )
         interpreter = DockerRuntimeInterpreter(
             DockerSdkClient(
@@ -2747,13 +2746,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
             authorized_secret_resolver=resolver,
         )
 
-        result = interpreter.execute(
-            _request(
-                StartNode(NodeTarget("api")),
-                products=(_material(_product_with_file_secret_delivery()),),
-                secret_resolution_grants=(grant,),
-            )
-        )
+        result = interpreter.execute(request)
 
         self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
         self.assertEqual(resolver.requests, [grant])
@@ -2966,6 +2959,16 @@ class FakeSecretResolver:
         return self.result
 
 
+class FakeSelectedSecretResolver(FakeSecretResolver):
+    """The explicit consumer fixture accepts only committed version grants."""
+
+    def resolve(self, grant):
+        from control_plane_kit_core.secret_version_grants import SecretVersionResolutionGrant
+        if type(grant) is not SecretVersionResolutionGrant:
+            raise AssertionError("consumer fixture requires a version grant")
+        return super().resolve(grant.selection.reference)
+
+
 class FakeAuthorizedSecretResolver:
     def __init__(
         self,
@@ -2982,10 +2985,12 @@ class FakeAuthorizedSecretResolver:
         self.networks_created_during_resolution.append(
             len(self.fake_client.networks.created)
         )
-        value = self.values.get((grant.reference, grant.intent))
+        from control_plane_kit_core.secret_version_grants import SecretVersionResolutionGrant
+        use = grant.selection if type(grant) is SecretVersionResolutionGrant else grant
+        value = self.values.get((use.reference, use.intent))
         if value is None:
-            return SecretMissing(grant.reference)
-        return SecretResolved(grant.reference, SecretValue(value))
+            return SecretMissing(use.reference)
+        return SecretResolved(use.reference, SecretValue(value))
 
 
 class MappingSecretResolver:
@@ -3124,6 +3129,36 @@ def _request(
     )
 
 
+def _selected_fixture_client():
+    # Reuse the existing actual-ID/archive-backed provider fixture. Import here
+    # because that fixture also uses this module's product/request values.
+    from configuration_replacement_fixtures import fixture
+    return fixture()[0]
+
+
+def _selected_request(operation, **kwargs):
+    """Explicit positive consumer fixture; _request never invents authority."""
+    from control_plane_kit_core.secret_version_grants import SecretVersionResolutionGrant
+    from control_plane_kit_core.secret_installation import secret_material_selection_fingerprint
+    from control_plane_kit_core.runtime_effect_observation import runtime_effect_intent_for_request, runtime_effect_intent_fingerprint
+    request = _request(operation, **kwargs)
+    grants = []
+    for selection in request.products[0].secret_selections:
+        authority = _grant(selection.reference, selection.intent)
+        grants.append(SecretVersionResolutionGrant(
+            authorization_id=authority.authorization_id, workspace_id=request.source.workspace_id,
+            reference_registration_id=authority.reference_registration_id,
+            provider_registration_id=authority.provider_registration_id,
+            endpoint_reference=authority.endpoint_reference, credential_reference=authority.credential_reference,
+            selection=selection, actor_subject=authority.actor_subject,
+            correlation_id=authority.correlation_id, intent_fingerprint=authority.intent_fingerprint,
+            operation_id=request.source.request_id, run_id=request.source.run_id.value,
+            activity_id=request.activity_id.value, effect_id=request.effect_id,
+            request_fingerprint=runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(request)),
+            selection_fingerprint=secret_material_selection_fingerprint(request)))
+    return replace(request, secret_resolution_grants=tuple(grants))
+
+
 def _grant(
     reference: SecretReference,
     intent: SecretUseIntent,
@@ -3171,6 +3206,10 @@ def _material(
         socket_environment=socket_environment,
         pull_authority=pull_authority,
         runtime_authority_deliveries=runtime_authority_deliveries,
+        secret_selections=tuple(SecretVersionSelection(reference, intent, "fixture-version")
+            for reference, intent in dict.fromkeys((delivery.reference, delivery.intent)
+                for delivery in product.runtime_contract.secret_deliveries
+                if type(delivery) in (SecretEnvironmentDelivery, SecretFileDelivery))),
     )
 
 

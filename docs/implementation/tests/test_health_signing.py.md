@@ -1,6 +1,15 @@
 Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py).
 
-Interpreters #198 / Servers #251 advances only installed-owner
+Interpreters #190/#191 advances the existing installed-owner expectations to
+actual accepted Secrets #53 merge `b3e6d21f1f53c3ad2fe9ec33900ddde0611e2b5a`
+and SDK #55 merge `ad0582937d7e41f1e7a41295fa1de58c2ce4cba2`, both selecting Core
+`87e231c661879e44816ba71ff9320c040c868d60`. Exact direct_url comparisons,
+candidate-origin, real signing/composition and denial assertions are unchanged.
+Test-only Servers `9921911d3939855a4f7c1989acdf7683fc8961da` remains under its
+existing fixture boundary. This repairs the selected dependency closure; the
+unchanged owning gate must establish Interpreter compatibility.
+
+Historical Interpreters #198 / Servers #251 advances only installed-owner
 expectations to actual accepted Secrets `28c9045c5d0aecf7471c151cae90ebb9ac88a123`
 and SDK `9aa01ef7b2df6106f6ad87c1625a7feb93394b88`, selecting Core
 `05b5f28a624e6e03f1dadbe6ad77ece2bec09601`. The actual signing/composition,

@@ -17,6 +17,7 @@ from control_plane_kit_core.public_ingress import NamedPublicIngress, IngressAut
 from control_plane_kit_core.runtime_effects import RuntimeEffectRequest, RuntimeEffectKind, RuntimeEffectSource, RuntimeProductMaterial
 from control_plane_kit_core.runtime_authority import RuntimeAuthorityReference
 from control_plane_kit_core.secrets import SecretFileDelivery, SecretFilePathBinding, SecretReference, SecretUseIntent
+from control_plane_kit_core.secret_selections import SecretVersionSelection
 from control_plane_kit_core.topology import DeploymentGraph, Node, RuntimeRecord, validate_graph
 from control_plane_kit_core.topology.graph import Endpoint, LiteralAddress
 from control_plane_kit_core.types import BlockFamily, Protocol, RuntimeKind
@@ -72,7 +73,8 @@ class World:
             OciImageReference("ghcr.io", "fixture/reader", "sha256:" + "a" * 64),
             ProductRuntimeContract(secret_deliveries=(self.file,)))
         self.reference = ProductReference(product.identity, ProductDescriptorDigest("b" * 64))
-        self.material = RuntimeProductMaterial("connector", "docker", self.reference, product)
+        self.material = RuntimeProductMaterial("connector", "docker", self.reference, product,
+            secret_selections=(SecretVersionSelection(self.file.reference, self.file.intent, "fixture-version"),))
         control = core.WorkloadNodeControlSurfaceDescriptor(
             core.NodeControlGraphReference(core.NodeControlGraphReferenceRole.PROVIDER_SOCKET, "control"),
             (), (core.NodeHealthReadKind.READINESS,))
@@ -102,7 +104,7 @@ class World:
             activity.activity_id, activity.operation, RuntimeAuthorityReference("docker-authority"), products=(self.material,))
         self.name = _container_name(self.request, "connector")
         self.network = _network_name(self.request, "docker")
-        self.volume = _secret_volume_name(self.request, "connector", self.file)
+        self.volume = _secret_volume_name(self.request, "connector", self.file, owner_uid=65532)
         config = {"Entrypoint": ["cloudflared", "--no-autoupdate", "--metrics", "127.0.0.1:20241"],
             "Cmd": ["tunnel", "run"], "User": "65532:65532", "WorkingDir": "", "StopSignal": "SIGTERM",
             "Healthcheck": deepcopy(HEALTHCHECK), "Env": ["PATH=/usr/local/bin:/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE=1",
