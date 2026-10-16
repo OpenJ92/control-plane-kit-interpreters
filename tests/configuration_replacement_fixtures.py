@@ -30,6 +30,8 @@ class ConfigurationContainers(FakeManager):
 
     def create_container(self, image, **kwargs):
         resource = super().create_container(image, **kwargs)
+        resource.attrs["Config"]["Env"] = [
+            f"{key}={value}" for key, value in kwargs.get("environment", {}).items()]
         identity = format(len(self.created_containers), "064x")
         resource.attrs["Id"] = identity
         is_workload = "org.openj92.cpk.node" in kwargs.get("labels", {})
@@ -62,6 +64,7 @@ class ConfigurationContainers(FakeManager):
             with tarfile.open(fileobj=output, mode="w") as target:
                 observed = tarfile.TarInfo(PurePosixPath(path).name)
                 observed.mode, observed.size = member.mode, len(body)
+                observed.uid, observed.gid = member.uid, member.gid
                 target.addfile(observed, BytesIO(body))
             return [output.getvalue()], {}
 
