@@ -138,3 +138,21 @@ original identities/labels and observed detachment govern exact test cleanup;
 foreign holders, ambiguous creates or remaining resources prevent acceptance.
 
 These are source and test descriptions, not claims of a passing candidate gate.
+
+Candidate `88027b49df663ed543f79cc41f9f77154c884352` passed 26 support tests,
+integrity, dependency build and compilation. Its package run executed 515 tests
+in 70.524 seconds, ending with 44 assertion failures and two construction errors
+(exit 1); clean import and real Docker witnesses were not reached. Log SHA256:
+`828b4aaf57b3b21a006066c709cabb80074081d84b04e873d62eec7854303305`.
+
+Static diagnosis found that the archive-backed provider fixture lacked the SDK
+`reload()` boundary used by private verification; 43 failure entries cluster at
+that initial verification. Another assertion is the exact SDK method inventory,
+and the two observer fixtures still supply operational consumer grants that
+the accepted Core now refuses. These are distinct from accepted recipient
+behavior. The correction exposes recorded reloads and between-read changes in
+the existing provider fixture, updates the exact method inventory, and models
+current observer grant admission. Archive-negative tests additionally require
+the actual recipient read to be reached, preventing an unrelated earlier
+fixture failure from satisfying a negative test. No production source or test
+runner change is needed for these corrections. Further gate evidence is pending.

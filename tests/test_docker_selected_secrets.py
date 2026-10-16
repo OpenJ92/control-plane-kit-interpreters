@@ -300,13 +300,33 @@ class DockerSelectedSecretTests(unittest.TestCase):
                         archive.addfile(tarfile.TarInfo("extra"))
                 chunks = ([b""] * 1025 if defect == "chunks" else
                     [b"x" * (16_777_216 + 1)] if defect == "size" else [output.getvalue()])
-                raw.containers.after_create = lambda resource: setattr(resource, "get_archive", lambda path: (chunks, {}))
+                reads = []
+                def archive(path):
+                    reads.append(path)
+                    return chunks, {}
+                raw.containers.after_create = lambda resource: setattr(resource, "get_archive", archive)
                 result = interpreter.execute(request)
+                self.assertEqual(reads, ["/run/secrets/token"])
                 self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
                 self.assertNotIn("secret_installation_receipt", result.evidence)
                 self.assertNotIn("wrong-private-value", repr(result))
                 self.assertNotIn("private-version-a", repr(result))
                 runtime_effect_result_fingerprint(result)
+
+    def test_actual_recipient_change_between_private_reads_never_attests(self):
+        request = request_for()
+        raw, sdk, interpreter, events, resolver = selected_fixture(request)
+        reloads = []
+        def changed(resource):
+            reloads.append(resource.attrs["Id"])
+            if len(reloads) == 2:
+                resource.attrs["Config"]["Env"].append("PUBLIC_CHANGED=1")
+        raw.containers.after_reload = changed
+        result = interpreter.execute(request)
+        self.assertEqual(len(reloads), 2)
+        self.assertEqual(reloads[0], reloads[1])
+        self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+        self.assertNotIn("secret_installation_receipt", result.evidence)
 
     def test_file_slot_capacity_is_admitted_before_authority_or_resolution(self):
         request = request_for(file_count=33)

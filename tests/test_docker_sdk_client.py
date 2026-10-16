@@ -600,6 +600,7 @@ class DockerSdkClientTests(unittest.TestCase):
                 "inspect_network",
                 "inspect_volume",
                 "inspect_secret_file",
+                "verify_secret_recipient",
                 "materialize_configuration_artifact",
                 "materialize_secret_file",
                 "pull_image",
