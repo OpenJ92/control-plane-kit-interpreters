@@ -3,8 +3,9 @@
 The reviewed target is Docker installation of an exact consumer-selected version,
 using the accepted Core contract at `87e231c661879e44816ba71ff9320c040c868d60`.
 Metadata and exact-version resolution source is separately checkpointed in #190.
-The candidate now implements #191 locally; validation and independent acceptance
-remain pending. The historical red evidence below predates this implementation.
+The candidate implements #191 locally. The full owning gate passed at
+`0557ce46bdb1f9d1b1ae038ef91d4ddf6531aed7`; independent final evidence review
+and publication remain separate. The historical failures below are retained.
 
 The agreed shape reuses the existing exact-container configuration replacement
 path for both plain and configuration activities. A complete consumer-grant
@@ -32,7 +33,8 @@ with the existing independent actual-container-ID preimage. The fixture now
 exposes the environment passed to Docker and preserves archive UID/GID. These
 are fixture premises, not evidence of successful implementation. Additional
 malformed-grant, close-failure, archive-negative, capacity, observer, and exact
-cleanup laws remain required before acceptance.
+cleanup laws were still required at that initial checkpoint; their subsequent
+implementation and evidence are recorded below.
 
 Validation stopped twice before package collection:
 
@@ -137,7 +139,8 @@ network, six volumes, two sequential workloads and at most 21 helpers. Recorded
 original identities/labels and observed detachment govern exact test cleanup;
 foreign holders, ambiguous creates or remaining resources prevent acceptance.
 
-These are source and test descriptions, not claims of a passing candidate gate.
+These descriptions were recorded before candidate execution; terminal evidence
+follows below.
 
 Candidate `88027b49df663ed543f79cc41f9f77154c884352` passed 26 support tests,
 integrity, dependency build and compilation. Its package run executed 515 tests
@@ -155,7 +158,7 @@ the existing provider fixture, updates the exact method inventory, and models
 current observer grant admission. Archive-negative tests additionally require
 the actual recipient read to be reached, preventing an unrelated earlier
 fixture failure from satisfying a negative test. No production source or test
-runner change is needed for these corrections. Further gate evidence is pending.
+runner change was needed for these corrections. The following run validated them.
 
 The corrected candidate `2334dc5ef006ed9276e25db1055e16b5496123c1` passed all
 26 support and 516 package tests (73.862 seconds), compilation and clean import.
@@ -189,4 +192,30 @@ admission and numeric UID validation remain unchanged. The old `{}` negative
 fixture becomes an explicit default-user law with provider provenance; null,
 nontext, missing/malformed Config and unsupported user forms remain negative.
 An actual-container missing/null/nontext User test prevents this image default
-from weakening installed-recipient evidence. Candidate gate evidence is pending.
+from weakening installed-recipient evidence. Its validation is recorded below.
+
+## Terminal owning-gate evidence
+
+Candidate `0557ce46bdb1f9d1b1ae038ef91d4ddf6531aed7` passed the unchanged
+pinned `./test.sh`, exit 0 with terminal `owning-gate=PASS`. Its 26 support tests
+passed in 0.064 seconds, 518 package tests passed in 72.897 seconds, and integrity,
+compilation and clean import passed. Log SHA256:
+`a66336aef62a4728e4d3e3c58d06fc992af82b6db9dd9ac74248873294719224`.
+
+The existing real numeric-reader/configuration witnesses passed. The selected
+secret runtime witness then verified actual created/reused/replaced incarnations,
+coherent configuration and secret receipts, unchanged old secret file material,
+stable reuse identity, distinct replacement identity and verified prior absence.
+Its exact resource totals were one internal network, six volumes, two sequential
+workloads and 21 helpers. Cleanup passed with zero unresolved creates and absent
+residue; outer numeric-reader cleanup and the runner's recorded-resource cleanup
+also passed. Provider-contract opt-in remained off.
+
+This proves the configured local Docker adapter and its actual private recipient
+readback under the admitted policy image's default root user. The separate real
+UID 10006 access witness and synthetic selected UID-change laws are not a real
+full selected non-root sequence. It does not prove Servers production injection,
+public Operations-to-provider integration, published-image adoption, a grandparent
+deployment, or general production secret-volume cleanup. No such resources or
+credentials were changed by this validation. Subsequent checkpoint-only edits
+do not change the validated source or executable tests.
