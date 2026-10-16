@@ -755,7 +755,7 @@ class DockerSdkClient:
         return DockerSdkImageInspection(
             image_id=image_id,
             repo_digests=tuple(sorted(repo_digests)),
-            configured_user=_configured_user(attrs),
+            configured_user=_image_configured_user(attrs),
         )
 
     def inspect_container(self, name: str) -> DockerSdkResourceInspection | None:
@@ -1521,6 +1521,15 @@ def _secret_archive(value: SecretValue, file_mode: SecretFileMode, *, owner_uid:
     with tarfile.open(fileobj=archive, mode="w") as tar:
         tar.addfile(info, BytesIO(encoded))
     return archive.getvalue()
+
+
+def _image_configured_user(attrs: Any) -> str | None:
+    # Docker API 1.52+ omits unset image Config.User. Only this documented
+    # omission means the existing empty/default user; malformed data does not.
+    config = attrs.get("Config") if isinstance(attrs, Mapping) else None
+    if isinstance(config, Mapping) and "User" not in config:
+        return ""
+    return _configured_user(attrs)
 
 
 def _configured_user(attrs: Any) -> str | None:

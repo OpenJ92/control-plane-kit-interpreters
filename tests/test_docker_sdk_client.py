@@ -522,8 +522,23 @@ class DockerSdkClientTests(unittest.TestCase):
                                 "missing protected-file recipient admission")
                 self.assertEqual(inspected.secret_file_owner_uid(), expected)
 
+    def test_image_user_omission_uses_documented_provider_default_only(self) -> None:
+        raw = FakeDockerClient()
+        observed = FakeImage([])
+        observed.attrs["Config"] = {}
+        raw.images.resources["fixture"] = observed
+        sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+        inspected = sdk.inspect_image("fixture")
+        self.assertEqual(inspected.configured_user, "")
+        self.assertEqual(inspected.secret_file_owner_uid(), 0)
+        del observed.attrs["Config"]
+        self.assertIsNone(sdk.inspect_image("fixture").configured_user)
+        with self.assertRaises(ValueError):
+            sdk.inspect_image("fixture").secret_file_owner_uid()
+        self.assertEqual(raw.containers.created, [])
+
     def test_protected_file_recipient_rejects_unsupported_or_missing_evidence(self) -> None:
-        for config in (None, {}, {"User": None}, {"User": 0}, {"User": "secrets"},
+        for config in (None, [], "", {"User": None}, {"User": 0}, {"User": "secrets"},
                        {"User": "00"}, {"User": "+1"}, {"User": " 1"},
                        {"User": "2147483648"}, {"User": "١"},
                        *({"User": value} for value in ("1:", ":1", "1:2:3", "1:group", "user:1",

@@ -328,6 +328,21 @@ class DockerSelectedSecretTests(unittest.TestCase):
         self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
         self.assertNotIn("secret_installation_receipt", result.evidence)
 
+    def test_actual_container_user_omission_or_malformed_value_is_not_image_default(self):
+        for value in ("omitted", None, 0):
+            with self.subTest(value=value):
+                request = request_for()
+                raw, sdk, interpreter, events, resolver = selected_fixture(request, user="")
+                def corrupt(resource):
+                    if value == "omitted":
+                        resource.attrs["Config"].pop("User")
+                    else:
+                        resource.attrs["Config"]["User"] = value
+                raw.containers.after_create = corrupt
+                result = interpreter.execute(request)
+                self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+                self.assertNotIn("secret_installation_receipt", result.evidence)
+
     def test_file_slot_capacity_is_admitted_before_authority_or_resolution(self):
         request = request_for(file_count=33)
         raw, sdk, interpreter, events, resolver = selected_fixture(request)

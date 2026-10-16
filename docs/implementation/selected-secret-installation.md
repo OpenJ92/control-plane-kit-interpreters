@@ -156,3 +156,37 @@ current observer grant admission. Archive-negative tests additionally require
 the actual recipient read to be reached, preventing an unrelated earlier
 fixture failure from satisfying a negative test. No production source or test
 runner change is needed for these corrections. Further gate evidence is pending.
+
+The corrected candidate `2334dc5ef006ed9276e25db1055e16b5496123c1` passed all
+26 support and 516 package tests (73.862 seconds), compilation and clean import.
+The actual-target archive negatives and same-ID refresh drift test now reach
+their intended boundaries. Existing real configuration installation, reuse,
+replacement and cleanup witnesses passed with absent residue. The new selected
+secret witness stopped in image-user preflight before creating any of its
+resources; the full gate exited 1. Log SHA256:
+`21191787cbe812f6d12eeb92d221af7c4011489b0eff0d2b87b5008b9741f608`.
+
+The public policy image's valid Config object omits User. The SDK interprets
+omission as unknown, whereas Docker documents omission of unset image User
+fields since API 1.52 and the default container user as UID 0. This is distinct
+from explicit null or malformed/missing Config. The prior negative fixture
+treated an empty Config object as unknown user; review of that premise is
+required before a narrow image-only normalization. No override, fabricated
+RepoDigest, alternate runner or selected-witness success is claimed.
+
+Provider references: [Docker API history](https://docs.docker.com/reference/api/engine/version-history/)
+and [default container user](https://docs.docker.com/engine/containers/run/#user).
+
+Bounded raw evidence from daemon API 1.55, `GET /v1.55/images/python:3.14-slim/json`:
+image ID `sha256:83ff1d245a3d57d04152252d3ef9cb361494d0b3395abd65a5ebe91c401c8e83`;
+Config present and object-valued; User key absent. No environment or full image
+configuration was recorded. This confirms documented omission, not explicit null.
+
+North and independent review approved the narrow representation correction:
+`inspect_image` maps omitted User inside a valid Config object to the existing
+empty-string default. `_configured_user` for actual containers, connector image
+admission and numeric UID validation remain unchanged. The old `{}` negative
+fixture becomes an explicit default-user law with provider provenance; null,
+nontext, missing/malformed Config and unsupported user forms remain negative.
+An actual-container missing/null/nontext User test prevents this image default
+from weakening installed-recipient evidence. Candidate gate evidence is pending.
