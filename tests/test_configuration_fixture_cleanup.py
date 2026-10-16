@@ -37,6 +37,10 @@ class Manager:
             raise NotFound("absent")
         return self.values[identity]
 
+    def list(self, *, all, filters):
+        return [resource for resource in self.values.values()
+            if any(mount.get("Name") == filters["volume"] for mount in resource.attrs.get("Mounts", []))]
+
 
 class ConfigurationFixtureCleanupTests(unittest.TestCase):
     def setUp(self):
@@ -100,14 +104,30 @@ class ConfigurationFixtureCleanupTests(unittest.TestCase):
         self.hold()
         self.assertEqual(self.client.containers.removals, ["helper-id"])
         self.assertIn("helper-id", self.client.containers.values)
-        self.assertEqual(self.client.volumes.values, {})
+        self.assertIn("volume-a", self.client.volumes.values)
+        self.assertEqual(self.client.volumes.removals, [])
 
     def test_failed_helper_removal_does_not_skip_other_owned_cleanup(self):
         self.volume()
         self.helper().fail_remove = True
         self.hold()
-        self.assertEqual(self.client.volumes.values, {})
+        self.assertIn("volume-a", self.client.volumes.values)
+        self.assertEqual(self.client.volumes.removals, [])
         self.assertIn("helper-id", self.client.containers.values)
+
+    def test_unrecorded_attachment_prevents_owned_volume_deletion(self):
+        self.volume()
+        Resource(self.client.containers, "foreign-container", {
+            "Mounts": [{"Type": "volume", "Name": "volume-a"}]})
+        self.hold()
+        self.assertEqual(self.client.volumes.removals, [])
+        self.assertEqual(self.client.containers.removals, [])
+
+    def test_attached_network_is_retained(self):
+        self.resources.create("network", "network-a", lambda: Resource(self.client.networks,
+            "network-a", {"Labels": {LABEL: "run-a"}, "Containers": {"foreign": {}}}))
+        self.hold()
+        self.assertEqual(self.client.networks.removals, [])
 
     def test_already_absent_resources_and_owned_helper_fallback_are_accepted(self):
         self.volume()

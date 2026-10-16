@@ -32,6 +32,8 @@ class ConfigurationContainers(FakeManager):
         resource = super().create_container(image, **kwargs)
         resource.attrs["Config"]["Env"] = [
             f"{key}={value}" for key, value in kwargs.get("environment", {}).items()]
+        if resource.image is not None:
+            resource.attrs["Image"] = resource.image.id
         identity = format(len(self.created_containers), "064x")
         resource.attrs["Id"] = identity
         is_workload = "org.openj92.cpk.node" in kwargs.get("labels", {})

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from typing import Mapping, Protocol, TypeAlias
 
 from control_plane_kit_core.runtime_effects import ImagePullAuthority
+from control_plane_kit_core.planning import StartNode, ReconcileNode
+from control_plane_kit_core.secret_selections import SecretVersionSelection
+from control_plane_kit_core.secret_version_grants import SecretVersionResolutionGrant
 from control_plane_kit_core.secrets import (
     AuthorizedSecretResolver,
     SecretDelivery,
@@ -21,6 +24,7 @@ from control_plane_kit_core.secrets import (
     SecretResolver,
     SecretUseIntent,
     SecretValue,
+    SecretResolved, SecretMissing, SecretDenied,
     require_authorized_secret,
     require_resolved_secret,
 )
@@ -114,6 +118,7 @@ class SecretFileRuntimeMaterial:
     value: SecretValue
     file_mode: SecretFileMode
     path_environment_name: str | None = None
+    selection: SecretVersionSelection | None = None
 
 
 @dataclass(frozen=True)
@@ -196,7 +201,7 @@ def secret_resolution_grant_for(
     matches = tuple(
         grant
         for grant in grants
-        if grant.permits(reference, intent)
+        if type(grant) is SecretResolutionGrant and grant.permits(reference, intent)
     )
     if len(matches) != 1:
         raise SecretResolutionError(
@@ -204,6 +209,71 @@ def secret_resolution_grant_for(
             "secret resolution requires one exact committed grant",
         )
     return matches[0]
+
+
+def selected_secret_grant_for(grants, selection):
+    matches = tuple(grant for grant in grants
+        if type(grant) is SecretVersionResolutionGrant and grant.selection == selection)
+    if len(matches) != 1:
+        raise SecretResolutionError(SecretResolutionCode.DENIED,
+            "selected secret requires one exact consumer grant")
+    return matches[0]
+
+
+def validate_selected_secret_grants(request, resolver):
+    """Pure coverage after Core admission, before authority or provider IO."""
+    if type(request.operation) not in (StartNode, ReconcileNode):
+        return
+    material, = request.products
+    if material.secret_selections and resolver is None:
+        raise SecretResolutionError(SecretResolutionCode.MISSING,
+            "selected secret resolver is not configured")
+    for selection in material.secret_selections:
+        selected_secret_grant_for(request.secret_resolution_grants, selection)
+
+
+def resolve_selected_secret_deliveries(deliveries, *, selections, grants, resolver):
+    """Ephemeral selected material; no operational or latest-version fallback."""
+    environment, files, values = {}, [], {}
+    for selection in selections:
+        grant = selected_secret_grant_for(grants, selection)
+        result = resolver.resolve(grant)
+        if type(result) is SecretMissing:
+            raise SecretResolutionError(SecretResolutionCode.MISSING, "selected secret is unavailable")
+        if type(result) is SecretDenied:
+            raise SecretResolutionError(SecretResolutionCode.DENIED, "selected secret is denied")
+        if (type(result) is not SecretResolved or result.reference != selection.reference
+                or type(result.value) is not SecretValue):
+            raise SecretResolutionError(SecretResolutionCode.INVALID_RESOLVER_RESULT,
+                "selected secret material is invalid")
+        value = replace(result.value)
+        if len(value.reveal().encode("utf-8")) > 65_536:
+            raise SecretResolutionError(SecretResolutionCode.INVALID_RESOLVER_RESULT,
+                "selected secret material is invalid")
+        values[(selection.reference, selection.intent)] = (selection, value)
+    for delivery in deliveries:
+        if type(delivery) is SecretReferenceEnvironmentDelivery:
+            _put_environment(environment, delivery.environment_name, delivery.reference.reference_id)
+            continue
+        selection, value = values[(delivery.reference, delivery.intent)]
+        if type(delivery) is SecretEnvironmentDelivery:
+            if "\x00" in value.reveal():
+                raise SecretResolutionError(SecretResolutionCode.INVALID_RESOLVER_RESULT,
+                    "selected secret environment is invalid")
+            _put_environment(environment, delivery.environment_name, value.reveal())
+        elif type(delivery) is SecretFileDelivery:
+            binding = delivery.path_binding
+            files.append(SecretFileRuntimeMaterial(delivery.reference, delivery.target_path,
+                value, delivery.file_mode, None if binding is None else binding.environment_name,
+                selection))
+            if binding is not None:
+                _put_environment(environment, binding.environment_name, delivery.target_path)
+    files.sort(key=lambda item: (item.target_path, item.reference.reference_id, item.selection.intent.value))
+    if len(environment) > 1024 or sum(len((key + "=" + value).encode("utf-8"))
+            for key, value in environment.items()) > 1_048_576:
+        raise SecretResolutionError(SecretResolutionCode.INVALID_RESOLVER_RESULT,
+            "selected secret environment exceeds adapter capacity")
+    return ResolvedSecretDeliveries(environment, tuple(files))
 
 
 def resolve_authorized_secret_deliveries(

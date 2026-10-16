@@ -312,6 +312,7 @@ class DockerSdkConnectorInspection:
 class DockerSdkConnectorImage:
     image_id: str
     launch_digest: str
+    owner_uid: int
 
 
 class DockerSdkConnectorEvidenceError(ValueError):
@@ -539,7 +540,9 @@ class DockerSdkClient:
             digests = _connector_strings(attrs["RepoDigests"], 32)
             if not matches_image_reference(reference, digests):
                 raise ValueError
-            return DockerSdkConnectorImage(identity, _connector_launch(attrs["Config"], token_path=token_path))
+            launch = _connector_launch(attrs["Config"], token_path=token_path)
+            return DockerSdkConnectorImage(identity, launch,
+                _secret_file_owner_uid(attrs["Config"]["User"]))
         except Exception:
             raise DockerSdkConnectorEvidenceError("connector image evidence is unavailable") from None
 
@@ -1034,6 +1037,63 @@ class DockerSdkClient:
                     raise RuntimeError("secret helper chmod failed")
         finally:
             helper.remove(force=True)
+
+    def verify_secret_recipient(self, container_id, *, expected_environment,
+            mounts, expected_files, admitted_image, owner_uid):
+        """Private actual-recipient readback; never return material or its digest."""
+        if (type(container_id) is not str or re.fullmatch(r"[0-9a-f]{64}", container_id) is None
+                or len(expected_files) != len(mounts) or len(mounts) > 32
+                or (not expected_files and owner_uid is not None)):
+            raise DockerSdkSecretFileEvidenceError("secret recipient evidence is invalid")
+        container = self._client().containers.get(container_id)
+
+        def facts():
+            container.reload()
+            attrs = getattr(container, "attrs", None)
+            config = attrs.get("Config") if isinstance(attrs, Mapping) else None
+            state = attrs.get("State") if isinstance(attrs, Mapping) else None
+            if (not isinstance(config, Mapping) or not isinstance(state, Mapping)
+                    or _container_identity(container) != container_id
+                    or attrs.get("Image") != admitted_image.image_id
+                    or config.get("User") != admitted_image.configured_user
+                    or state.get("Running") is not True
+                    or state.get("Paused", False) is not False
+                    or state.get("Restarting", False) is not False):
+                raise DockerSdkSecretFileEvidenceError("secret recipient evidence is invalid")
+            if expected_files and _secret_file_owner_uid(config.get("User")) != owner_uid:
+                raise DockerSdkSecretFileEvidenceError("secret recipient evidence is invalid")
+            raw = config.get("Env")
+            if type(raw) is not list or len(raw) > 1024:
+                raise DockerSdkSecretFileEvidenceError("secret recipient environment is invalid")
+            environment, size = {}, 0
+            for item in raw:
+                if type(item) is not str or "=" not in item or "\x00" in item:
+                    raise DockerSdkSecretFileEvidenceError("secret recipient environment is invalid")
+                size += len(item.encode("utf-8"))
+                key, value = item.split("=", 1)
+                if not key or key in environment or size > 1_048_576:
+                    raise DockerSdkSecretFileEvidenceError("secret recipient environment is invalid")
+                environment[key] = value
+            if any(environment.get(key) != value for key, value in expected_environment.items()):
+                raise DockerSdkSecretFileEvidenceError("secret recipient environment does not match")
+            mounted = tuple(_readonly_content_mount_facts(container, mount.target_path, mount.volume_name)
+                for mount in mounts)
+            return (attrs["Id"], attrs["Image"], config.get("User"),
+                tuple(sorted(environment.items())), mounted)
+
+        before = facts()
+        for mount, secret in zip(mounts, expected_files):
+            if mount.target_path != secret.target_path:
+                raise DockerSdkSecretFileEvidenceError("secret recipient mount is invalid")
+            chunks, _metadata = container.get_archive(mount.target_path)
+            observed = _secret_file_inspection(chunks,
+                expected_name=mount.target_path.rsplit("/", 1)[-1])
+            expected_digest = hashlib.sha256(secret.value.reveal().encode("utf-8")).hexdigest()
+            if (observed.content_digest != expected_digest or observed.uid != owner_uid
+                    or observed.mode != int(secret.file_mode.value, 8) or not observed.regular_file):
+                raise DockerSdkSecretFileEvidenceError("secret recipient file does not match")
+        if facts() != before:
+            raise DockerSdkSecretFileEvidenceError("secret recipient changed during verification")
 
     def inspect_secret_file(self, volume_name: str) -> DockerSdkSecretFileInspection | None:
         helper = self._create_configuration_helper(volume_name, readonly=True)
@@ -1696,30 +1756,33 @@ def _readonly_secret_mounts(attrs: Any) -> tuple[DockerSdkSecretMount, ...]:
     return tuple(result)
 
 
-def _secret_file_inspection(chunks: Any) -> DockerSdkSecretFileInspection:
+def _secret_file_inspection(chunks: Any, *, expected_name="content") -> DockerSdkSecretFileInspection:
     # Bound untrusted archive metadata and content together; never expose either
     # in errors. This boundary supports at most 16 MiB of archived material.
     maximum_archive_bytes = 16 * 1024 * 1024
     archive = BytesIO()
     # A lazy provider stream can fail after a prefix. That is an incomplete
     # observation, not established malformed material; preserve uncertainty.
-    for chunk in chunks:
-        if not isinstance(chunk, bytes) or archive.tell() + len(chunk) > maximum_archive_bytes:
+    for index, chunk in enumerate(chunks):
+        if index >= 1024 or type(chunk) is not bytes or archive.tell() + len(chunk) > maximum_archive_bytes:
             raise DockerSdkSecretFileEvidenceError("secret file inspection evidence is invalid")
         archive.write(chunk)
     try:
         archive.seek(0)
         with tarfile.open(fileobj=archive, mode="r:") as tar:
-            members = tar.getmembers()
-            if (len(members) != 1 or members[0].name != "content" or not members[0].isfile()
-                    or members[0].sparse is not None
-                    or not 0 <= members[0].size <= maximum_archive_bytes):
+            member = tar.next()
+            if (member is None or member.name != expected_name or not member.isfile()
+                    or member.sparse is not None or not 0 <= member.size <= maximum_archive_bytes
+                    or type(member.uid) is not int or not 0 <= member.uid <= 2147483647
+                    or type(member.mode) is not int or not 0 <= member.mode <= 0o7777):
                 raise ValueError("archive type")
-            member = members[0]
             content = tar.extractfile(member)
             if content is None:
                 raise ValueError("archive content")
-            digest = hashlib.sha256(content.read()).hexdigest()
+            body = content.read(maximum_archive_bytes + 1)
+            if len(body) != member.size or tar.next() is not None:
+                raise ValueError("archive content")
+            digest = hashlib.sha256(body).hexdigest()
             return DockerSdkSecretFileInspection(digest, member.uid, member.mode, True)
     except Exception:
         raise DockerSdkSecretFileEvidenceError("secret file inspection evidence is invalid") from None
@@ -1860,6 +1923,10 @@ def _container_identity(resource: Any) -> str | None:
 def _configuration_mount_facts(
     resource: Any, mount: DockerSdkConfigurationMount,
 ) -> tuple[str, str, str]:
+    return _readonly_content_mount_facts(resource, mount.artifact.target_path, mount.volume_name)
+
+
+def _readonly_content_mount_facts(resource, target_path, volume_name):
     attrs = getattr(resource, "attrs", None)
     host = attrs.get("HostConfig") if isinstance(attrs, Mapping) else None
     configured = host.get("Mounts") if isinstance(host, Mapping) else None
@@ -1868,16 +1935,16 @@ def _configuration_mount_facts(
         if (type(values) is not list or len(values) > 64
                 or any(not isinstance(value, Mapping) for value in values)):
             _invalid_configuration_evidence()
-    selected = [value for value in configured if value.get("Target") == mount.artifact.target_path]
-    effective = [value for value in observed if value.get("Destination") == mount.artifact.target_path]
+    selected = [value for value in configured if value.get("Target") == target_path]
+    effective = [value for value in observed if value.get("Destination") == target_path]
     if len(selected) != 1 or len(effective) != 1:
         _invalid_configuration_evidence()
     selected, effective = selected[0], effective[0]
     options = selected.get("VolumeOptions")
-    if (selected.get("Type") != "volume" or selected.get("Source") != mount.volume_name
+    if (selected.get("Type") != "volume" or selected.get("Source") != volume_name
             or selected.get("ReadOnly") is not True or not isinstance(options, Mapping)
             or options.get("Subpath") != "content" or effective.get("Type") != "volume"
-            or effective.get("Name") != mount.volume_name or effective.get("RW") is not False):
+            or effective.get("Name") != volume_name or effective.get("RW") is not False):
         _invalid_configuration_evidence()
     return effective["Name"], effective["Destination"], options["Subpath"]
 

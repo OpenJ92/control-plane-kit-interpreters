@@ -1,7 +1,9 @@
 """Selected consumer laws at the archive-backed runtime/SDK boundary (#191)."""
 from dataclasses import replace
+from io import BytesIO
 from types import SimpleNamespace
 import json
+import tarfile
 import unittest
 from unittest.mock import patch
 
@@ -23,13 +25,15 @@ INTENT = SecretUseIntent.APPLICATION_CONTROL_TOKEN
 LOCAL = SimpleNamespace(runtime_kind="docker", authority_kind="local-docker-socket")
 
 
-def request_for(*, version="version-a", reconcile=False, files=True, configuration=False, grants=True):
+def request_for(*, version="version-a", reconcile=False, files=True, file_count=1, configuration=False, grants=True):
     request = selected_request(reconcile=reconcile)
     material = request.products[0]
     deliveries = (SecretEnvironmentDelivery("APP_TOKEN", REFERENCE, INTENT),)
     if files:
-        deliveries += (SecretFileDelivery("/run/secrets/token", REFERENCE, INTENT,
-            path_binding=SecretFilePathBinding("APP_TOKEN_FILE")),)
+        deliveries += tuple(SecretFileDelivery(
+            "/run/secrets/token" if file_count == 1 else f"/run/secrets/token-{index}", REFERENCE, INTENT,
+            path_binding=SecretFilePathBinding("APP_TOKEN_FILE") if file_count == 1 else None)
+            for index in range(file_count))
     product = replace(material.product, runtime_contract=replace(material.product.runtime_contract,
         secret_deliveries=deliveries, configuration_artifacts=(material.product.runtime_contract.configuration_artifacts if configuration else ())))
     selection = SecretVersionSelection(REFERENCE, INTENT, version)
@@ -126,6 +130,85 @@ class DockerSelectedSecretTests(unittest.TestCase):
                         self.assertEqual(raw.containers.volume_archives[name], archive)
                     self.assertEqual("configuration_invocation_completion" in result.evidence, configuration)
 
+    def test_forged_grant_binding_refuses_before_all_io(self):
+        for field, value in (("workspace_id", "another-workspace"), ("effect_id", "another-effect"),
+                ("request_fingerprint", "f" * 64), ("selection_fingerprint", "e" * 64),
+                ("authorization_id", "")):
+            for authority in (False, True):
+                with self.subTest(field=field, authority=authority):
+                    request = request_for()
+                    object.__setattr__(request.secret_resolution_grants[0], field, value)
+                    raw, sdk, interpreter, events, resolver = selected_fixture(request)
+                    with patch("control_plane_kit_interpreters.docker.runtime._client_for_runtime_authority") as binding:
+                        result = interpreter.execute_with_authority(request, LOCAL) if authority else interpreter.execute(request)
+                    self.assertIs(result.kind, EffectResultKind.FAILED)
+                    self.assertEqual(result.failure.code, "docker.runtime-request-invalid")
+                    binding.assert_not_called()
+                    self.assertEqual(events, [])
+                    self.assertEqual(resolver.calls, [])
+                    self.assertEqual(raw.volumes.created, [])
+
+    def test_invalid_resolved_environment_refuses_before_mutation(self):
+        for payload in ("invalid\x00environment", "", None, "x" * 65_537):
+            with self.subTest(payload_kind=type(payload).__name__, empty=payload == ""):
+                request = request_for()
+                raw, sdk, interpreter, events, resolver = selected_fixture(request)
+                value = SecretValue("valid")
+                object.__setattr__(value, "_value", payload)
+                with patch.object(resolver, "resolve", return_value=SecretResolved(REFERENCE, value)):
+                    result = interpreter.execute(request)
+                self.assertIs(result.kind, EffectResultKind.FAILED)
+                self.assertEqual(raw.networks.created, [])
+                self.assertEqual(raw.volumes.created, [])
+                self.assertEqual(raw.containers.created, [])
+                self.assertNotIn("invalid", repr(result.evidence))
+
+    def test_volume_creation_with_unverified_ownership_remains_uncertain(self):
+        for configuration in (False, True):
+            with self.subTest(configuration=configuration):
+                request = request_for(configuration=configuration)
+                raw, sdk, interpreter, events, resolver = selected_fixture(request)
+                create = sdk.create_volume
+                def corrupt(*, name, labels):
+                    create(name=name, labels=labels)
+                    if labels.get("org.openj92.cpk.volume.kind") == "secret-file":
+                        raw.volumes.resources[name].attrs["Config"]["Labels"]["org.openj92.cpk.secret.identity"] = "wrong"
+                with patch.object(sdk, "create_volume", side_effect=corrupt):
+                    result = interpreter.execute(request)
+                self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+                attempt = result.evidence["secret_attempt"]
+                self.assertTrue(attempt["unknown_created_resource"])
+                self.assertEqual(attempt["attempted_indices"], [0])
+                self.assertEqual(attempt["staged_indices"], [])
+                self.assertEqual(attempt["secret_volumes_removed"], 0)
+                self.assertNotIn("secret_installation_receipt", result.evidence)
+                self.assertNotIn("configuration_invocation_completion", result.evidence)
+
+    def test_authority_close_fault_strips_all_installation_attestations(self):
+        for configuration in (False, True):
+            with self.subTest(configuration=configuration):
+                request = request_for(configuration=configuration)
+                raw, sdk, interpreter, events, resolver = selected_fixture(request)
+                binding = SimpleNamespace(client=sdk, close_after_execution=True)
+                verified = []
+                verify = sdk.verify_secret_recipient
+                def verified_recipient(*args, **kwargs):
+                    verify(*args, **kwargs)
+                    verified.append(True)
+                with patch("control_plane_kit_interpreters.docker.runtime._client_for_runtime_authority", return_value=binding), \
+                        patch.object(sdk, "verify_secret_recipient", side_effect=verified_recipient), \
+                        patch.object(sdk, "close", side_effect=TimeoutError("private-close-detail")):
+                    result = interpreter.execute_with_authority(request, LOCAL)
+                self.assertEqual(verified, [True])
+                self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+                self.assertTrue(result.evidence["secret_attempt"]["authority_close_unknown"])
+                for key in ("secret_installation_receipt", "secret_resolution_receipt",
+                        "configuration_installation_receipt", "configuration_invocation_completion"):
+                    self.assertNotIn(key, result.evidence)
+                self.assertEqual(result.observations, ())
+                self.assertNotIn("private-close-detail", repr(result))
+                runtime_effect_result_fingerprint(result)
+
     def test_environment_only_named_user_does_not_require_numeric_uid(self):
         request = request_for(files=False)
         raw, sdk, interpreter, events, resolver = selected_fixture(request, user="service")
@@ -197,3 +280,66 @@ class DockerSelectedSecretTests(unittest.TestCase):
         self.assertEqual(attempt["secret_volumes_removed"], 0)
         self.assertNotIn("private-detail", repr(result))
         self.assertNotIn("secret_installation_receipt", result.evidence)
+
+    def test_actual_recipient_archive_negatives_never_attest(self):
+        for defect in ("bytes", "uid", "mode", "symlink", "name", "extra-member", "chunks", "size"):
+            with self.subTest(defect=defect):
+                request = request_for()
+                raw, sdk, interpreter, events, resolver = selected_fixture(request)
+                output = BytesIO()
+                with tarfile.open(fileobj=output, mode="w") as archive:
+                    content = b"wrong-private-value" if defect == "bytes" else b"private-version-a"
+                    member = tarfile.TarInfo("wrong" if defect == "name" else "token")
+                    member.uid = 10007 if defect == "uid" else 10006
+                    member.mode = 0o444 if defect == "mode" else 0o400
+                    member.size = len(content)
+                    if defect == "symlink":
+                        member.type, member.linkname = tarfile.SYMTYPE, "/elsewhere"
+                    archive.addfile(member, BytesIO(content))
+                    if defect == "extra-member":
+                        archive.addfile(tarfile.TarInfo("extra"))
+                chunks = ([b""] * 1025 if defect == "chunks" else
+                    [b"x" * (16_777_216 + 1)] if defect == "size" else [output.getvalue()])
+                raw.containers.after_create = lambda resource: setattr(resource, "get_archive", lambda path: (chunks, {}))
+                result = interpreter.execute(request)
+                self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+                self.assertNotIn("secret_installation_receipt", result.evidence)
+                self.assertNotIn("wrong-private-value", repr(result))
+                self.assertNotIn("private-version-a", repr(result))
+                runtime_effect_result_fingerprint(result)
+
+    def test_file_slot_capacity_is_admitted_before_authority_or_resolution(self):
+        request = request_for(file_count=33)
+        raw, sdk, interpreter, events, resolver = selected_fixture(request)
+        with patch("control_plane_kit_interpreters.docker.runtime._client_for_runtime_authority") as binding:
+            result = interpreter.execute_with_authority(request, LOCAL)
+        self.assertIs(result.kind, EffectResultKind.FAILED)
+        self.assertEqual(result.failure.code, "docker.secret-result-capacity")
+        binding.assert_not_called()
+        self.assertEqual(events, [])
+        self.assertEqual(resolver.calls, [])
+
+    def test_maximum_file_slots_share_exact_resolution_and_fit_complete_result(self):
+        request = request_for(file_count=32)
+        raw, sdk, interpreter, events, resolver = selected_fixture(request)
+        result = interpreter.execute(request)
+        self.receipt(request, result)
+        self.assertEqual(resolver.calls, list(request.secret_resolution_grants))
+        attempt = result.evidence["secret_attempt"]
+        self.assertEqual(attempt["attempted_indices"], list(range(32)))
+        self.assertEqual(attempt["staged_indices"], list(range(32)))
+        self.assertEqual(attempt["file_identity_profile"], "docker.selected-secret-file.v1")
+
+    def test_passive_observer_cannot_attest_selected_installation(self):
+        from control_plane_kit_core.runtime_effect_observation import RuntimeEffectObservationRequest, RuntimeEffectObserverUnsupported
+        from control_plane_kit_interpreters.docker.observer import DockerRuntimeEffectObserver
+        request = request_for()
+        raw, sdk, interpreter, events, resolver = selected_fixture(request)
+        self.receipt(request, interpreter.execute(request))
+        events.clear()
+        resolver.calls.clear()
+        result = DockerRuntimeEffectObserver(sdk, authorized_secret_resolver=resolver).observe(
+            RuntimeEffectObservationRequest(request), None)
+        self.assertIs(type(result), RuntimeEffectObserverUnsupported)
+        self.assertEqual(events, [])
+        self.assertEqual(resolver.calls, [])

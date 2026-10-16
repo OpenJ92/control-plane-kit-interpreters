@@ -1,5 +1,19 @@
 # Selected configuration delivery witness (#156)
 
+## I191 selected consumer extension (candidate)
+
+The existing installation witness additionally runs with exact consumer-selected
+environment and file deliveries. It verifies Core secret and configuration
+receipts against the same actual created/reused/replaced IDs, and verifies that
+the old secret file remains unchanged after replacement. This sequence keeps
+the admitted policy image's configured user; the independent numeric UID/GID
+witness remains in place. Its finite ceiling is one internal network, six
+volumes, two workloads and 21 helpers, with no pull or published port. Cleanup
+now explicitly refuses attached volumes/networks after exact ownership checks;
+it never removes unrecorded holders. The owning runner and provider opt-in are
+unchanged. Candidate execution evidence is tracked in the
+[selected-secret checkpoint](selected-secret-installation.md).
+
 ## I186 configured runtime receipt witness
 
 `tests/live_docker_installation.py` runs one additional finite sequence in the

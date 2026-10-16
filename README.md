@@ -160,10 +160,15 @@ process delivery. It checks provider credential references and all three exact
 TLS grants before resolving any, reads without mutation, and closes its client
 once. Product and image-pull secrets are not resolved for observation.
 
-Secret-bearing products currently fail closed unless secret values have been
-resolved by a future authority boundary. That is intentional: secret references
-may be durable graph data, but secret values are not part of
-`RuntimeEffectRequest`.
+Consumer secret deliveries require exact version selections and matching
+request-bound consumer grants. Both execution entrypoints validate the complete
+request and grant coverage before opening an authority connection. Operational
+grants and legacy resolvers cannot substitute for consumer authority. Values
+remain ephemeral and never enter `RuntimeEffectRequest` or result evidence.
+The selected path verifies the actual recipient's environment and readonly file
+mounts, bytes, UID and mode before emitting Core installation receipts. Changed
+versions or numeric reader UIDs select new immutable file volumes; old volumes
+are retained. See the [implementation and validation checkpoint](docs/implementation/selected-secret-installation.md).
 
 ### StartNode creation diagnostics
 

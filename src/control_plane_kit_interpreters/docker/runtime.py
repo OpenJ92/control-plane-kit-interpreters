@@ -27,6 +27,7 @@ from control_plane_kit_core.runtime_authority import (
     RuntimeEffectContractError,
 )
 from control_plane_kit_core.runtime_effect_observation import runtime_effect_intent_for_request
+from control_plane_kit_core.secret_selections import SecretVersionSelection
 from control_plane_kit_core.runtime_effects import (
     EffectResultKind,
     RuntimeEffectFailure,
@@ -65,6 +66,7 @@ from control_plane_kit_interpreters.docker.authority import (
 from control_plane_kit_interpreters.docker.configuration import (
     ConfigurationAttempt, ConfigurationMaterialConflict, ConfigurationObservationUnknown,
     _installation_receipt, installed_configuration_matches, stage_configuration,
+    secret_installation_evidence,
 )
 from control_plane_kit_interpreters.docker.configuration_cleanup import (
     cleanup_configuration, refused_cleanup_authority,
@@ -100,6 +102,7 @@ from control_plane_kit_interpreters.secrets import (
     parse_image_pull_credential,
     resolve_authorized_secret_deliveries,
     resolve_secret_deliveries,
+    resolve_selected_secret_deliveries, validate_selected_secret_grants,
     secret_resolution_grant_for,
 )
 from control_plane_kit_interpreters.timing import verification_attempts
@@ -209,9 +212,10 @@ class DockerRuntimeInterpreter:
 
         try:
             runtime_effect_intent_for_request(request)
+            _admit_selected_secrets(request, self.authorized_secret_resolver)
             if type(request.operation) is CleanupConfigurationInstances:
                 return cleanup_configuration(self.client, request)
-            if request.kind is RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1:
+            if request.kind is RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1 or _has_selected_secrets(request):
                 return self._execute_configuration_node(request)
             match request.operation:
                 case StartRuntime():
@@ -277,6 +281,7 @@ class DockerRuntimeInterpreter:
             return _unsupported(request, "docker.unsupported-runtime-kind")
         try:
             runtime_effect_intent_for_request(request)
+            _admit_selected_secrets(request, self.authorized_secret_resolver)
             if type(request.operation) is CleanupConfigurationInstances:
                 # Refuse before resolver/client construction. Per-call TLS
                 # custody failure has no separate canonical cleanup carrier.
@@ -322,10 +327,14 @@ class DockerRuntimeInterpreter:
         if execution_error is not None:
             raise execution_error
         if close_error is not None:
-            if request.kind is RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1 and result is not None:
+            if (request.kind is RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1 or _has_selected_secrets(request)) and result is not None:
                 evidence = dict(result.evidence)
                 evidence.pop("configuration_invocation_completion", None)
                 evidence.pop("configuration_installation_receipt", None)
+                evidence.pop("secret_resolution_receipt", None)
+                evidence.pop("secret_installation_receipt", None)
+                if "secret_attempt" in evidence:
+                    evidence["secret_attempt"] = {**evidence["secret_attempt"], "authority_close_unknown": True}
                 return replace(result, kind=EffectResultKind.UNCERTAIN, evidence=evidence,
                     observations=(), failure=RuntimeEffectFailure(
                         "docker.runtime-authority-client-close-uncertain",
@@ -350,6 +359,10 @@ class DockerRuntimeInterpreter:
             return attempt.result(EffectResultKind.UNSUPPORTED, failure=RuntimeEffectFailure(
                 error.code, "Docker runtime authority does not support this replacement"))
         except (ConfigurationMaterialConflict, _DockerInterpreterPreconditionError) as error:
+            if attempt.secret_correlation is not None and (
+                    attempt.phase == "installed-verification" or attempt.unknown_materialization
+                    or attempt.unknown_created_resource):
+                return attempt.uncertain()
             return attempt.result(EffectResultKind.FAILED, failure=RuntimeEffectFailure(
                 getattr(error, "code", "docker.configuration-material-conflict"), str(error)))
         except DockerSdkConfigurationEvidenceError:
@@ -368,8 +381,9 @@ class DockerRuntimeInterpreter:
         material = _single_product(request)
         container_name = _container_name(request, material.node_id)
         network_name = _network_name(request, material.runtime_id)
-        labels = {**_node_labels(request, material),
-                  f"{_LABEL_PREFIX}.configuration.selection": attempt.selection_fingerprint}
+        labels = _node_labels(request, material)
+        if attempt.correlation is not None:
+            labels = {**labels, f"{_LABEL_PREFIX}.configuration.selection": attempt.selection_fingerprint}
         common = {"node_id": material.node_id, "runtime_id": material.runtime_id,
                   "container": container_name, "network": network_name,
                   "image": material.product.image.execution_reference}
@@ -379,17 +393,29 @@ class DockerRuntimeInterpreter:
         planned_observations = runtime_endpoint_observations(
             subject_id=material.node_id, graph_id=request.source.desired_graph_id,
             private_host=material.node_id, provider_ports=ports, published_ports=())
+        inspection = self.client.inspect_container(container_name)
+        if attempt.secret_correlation is not None and inspection is not None:
+            retained = sorted({mount.volume_name for mount in inspection.readonly_secret_mounts})
+            if len(retained) > 32 or any(type(name) is not str or len(name) > 256 for name in retained):
+                raise _DockerInterpreterPreconditionError("docker.secret-result-capacity",
+                    "Secret attempt exceeds its bounded resource context")
+            attempt.retained_mounts = retained
+        config_count = len(request.configuration_instances.instances) if attempt.correlation is not None else 0
+        file_count = sum(type(value) is SecretFileDelivery for value in material.product.runtime_contract.secret_deliveries)
         maximum = replace(attempt, phase="installed-verification",
-            attempted_indices=list(range(len(request.configuration_instances.instances))),
-            staged_indices=list(range(len(request.configuration_instances.instances))),
+            attempted_indices=list(range(config_count)), staged_indices=list(range(config_count)),
+            secret_attempted_indices=list(range(file_count)), secret_staged_indices=list(range(file_count)),
+            file_owner_uid=2147483647 if file_count else None,
             old_container_id="e" * 64, container_id="f" * 64,
             old_removed=True, unknown_created_resource=False)
         try:
             # Sizing only: the largest valid (replaced) receipt is never returned.
-            maximum_receipt = _installation_receipt(maximum).descriptor()
+            maximum_receipts = secret_installation_evidence(maximum)
+            if attempt.correlation is not None:
+                maximum_receipts["configuration_installation_receipt"] = _installation_receipt(maximum).descriptor()
             maximum.unknown_created_resource = True
             maximum.result(EffectResultKind.SUCCEEDED, observations=planned_observations,
-                extra={**common, "configuration_installation_receipt": maximum_receipt,
+                extra={**common, **maximum_receipts,
                     "capacity_reserve": ["x" * 256]
                     * ((1024 + 64 * len(ports) + 255) // 256)})
         except RuntimeEffectContractError:
@@ -398,7 +424,6 @@ class DockerRuntimeInterpreter:
 
         attempt.phase = "authority-preflight"
         authority_delivery = _authority_delivery_material(request, self.client)
-        inspection = self.client.inspect_container(container_name)
         reconcile = type(request.operation) is ReconcileNode
         same_installation = False
         if inspection is not None:
@@ -410,7 +435,8 @@ class DockerRuntimeInterpreter:
             _require_node_network(inspection, network_name)
             _require_node_container_authority(inspection, authority_delivery, self.client)
             same_installation = (_fingerprint_matches(inspection.labels, labels)
-                and inspection.labels.get(f"{_LABEL_PREFIX}.configuration.selection") == attempt.selection_fingerprint)
+                and (attempt.correlation is None or inspection.labels.get(
+                    f"{_LABEL_PREFIX}.configuration.selection") == attempt.selection_fingerprint))
             if not reconcile:
                 _require_node_container_correlation(inspection, labels, network_name)
             elif request.authority_deliveries and not same_installation:
@@ -424,6 +450,7 @@ class DockerRuntimeInterpreter:
             self.authorized_secret_resolver, self.image_pull_credentials)
         admitted_image = self._admit_start_node_image(material, auth_config)
         owner_uid = self._preflight_secret_files(request, material, secrets, admitted_image)
+        attempt.file_owner_uid = owner_uid if secrets.files else None
         attempt.phase = "network"
         runtime_labels = _runtime_labels(request, material.runtime_id)
         network = self.client.inspect_network(network_name)
@@ -432,9 +459,13 @@ class DockerRuntimeInterpreter:
         else:
             _require_runtime_owner(network.labels, runtime_labels, "network")
 
-        mounts = stage_configuration(self.client, request, attempt)
+        mounts = (stage_configuration(self.client, request, attempt) if attempt.correlation is not None
+            else tuple(DockerSdkConfigurationMount(artifact,
+                _volume_name(request, material.node_id, artifact.artifact_id))
+                for artifact in material.product.runtime_contract.configuration_artifacts))
         if inspection is not None and same_installation:
             attempt.container_id = inspection.container_id
+            attempt.secret_staged_indices = list(range(len(secrets.files)))
             _require_start_node_container(inspection, labels=labels, admitted_image=admitted_image,
                 network_name=network_name, require_running=False,
                 allow_prior_plan=reconcile, allow_prior_graph=reconcile)
@@ -449,7 +480,9 @@ class DockerRuntimeInterpreter:
         else:
             attempt.phase = "container-preparation"
             prepared = self._prepare_node_container(request, material, labels, secrets,
-                owner_uid=owner_uid, configuration_mounts=mounts)
+                owner_uid=owner_uid, configuration_mounts=mounts if attempt.correlation is not None else None,
+                attempt=attempt)
+            mounts = prepared.configuration_mounts
             if inspection is not None:
                 # Fresh exact-ID evidence must still equal the admitted old
                 # container before its destructive call; never remove by name.
@@ -487,14 +520,24 @@ class DockerRuntimeInterpreter:
             allow_prior_plan=reconcile, allow_prior_graph=reconcile)
         _require_node_container_authority(observed, authority_delivery, self.client, final=True)
         installed_configuration_matches(self.client, attempt.container_id, mounts)
+        if attempt.secret_correlation is not None:
+            secret_mounts = tuple(DockerSdkSecretMount(secret.target_path,
+                _secret_volume_name(request, material.node_id, secret, owner_uid=owner_uid))
+                for secret in secrets.files)
+            self.client.verify_secret_recipient(attempt.container_id,
+                expected_environment=secrets.environment, mounts=secret_mounts,
+                expected_files=secrets.files, admitted_image=admitted_image,
+                owner_uid=attempt.file_owner_uid)
         private_host = _private_host_for_runtime(request, material, observed)
         if len(private_host) > max(64, len(material.node_id)):
             raise ConfigurationObservationUnknown()
         observations = runtime_endpoint_observations(subject_id=material.node_id,
             graph_id=request.source.desired_graph_id, private_host=private_host,
             provider_ports=ports, published_ports=verify_published_ports((), observed.published_ports))
-        return attempt.result(EffectResultKind.SUCCEEDED, observations=observations,
-            extra={**common, "configuration_installation_receipt": _installation_receipt(attempt).descriptor()})
+        receipts = secret_installation_evidence(attempt)
+        if attempt.correlation is not None:
+            receipts["configuration_installation_receipt"] = _installation_receipt(attempt).descriptor()
+        return attempt.result(EffectResultKind.SUCCEEDED, observations=observations, extra={**common, **receipts})
 
     def _reconcile_runtime(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         runtime_id = _runtime_target(request.operation)
@@ -1145,7 +1188,7 @@ class DockerRuntimeInterpreter:
         # Inspect all existing secret resources before any configuration or
         # retained-data preparation. Observation helpers are readonly effects.
         for secret in secrets.files:
-            volume_name = _secret_volume_name(request, material.node_id, secret)
+            volume_name = _secret_volume_name(request, material.node_id, secret, owner_uid=owner_uid)
             volume = self.client.inspect_volume(volume_name)
             if volume is not None:
                 _require_node_owner(volume.labels, {
@@ -1154,6 +1197,7 @@ class DockerRuntimeInterpreter:
                     f"{_LABEL_PREFIX}.secret.target": secret.target_path,
                     f"{_LABEL_PREFIX}.secret.reference": secret.reference.reference_id,
                 }, "secret volume")
+                _require_selected_secret_identity(volume.labels, request, material.node_id, secret, owner_uid)
                 self._require_secret_file(volume_name, secret, owner_uid)
             elif container is not None and not replacing:
                 raise _DockerInterpreterPreconditionError(
@@ -1229,6 +1273,7 @@ class DockerRuntimeInterpreter:
         *,
         owner_uid: int = 0,
         configuration_mounts: tuple[DockerSdkConfigurationMount, ...] | None = None,
+        attempt: ConfigurationAttempt | None = None,
     ) -> _NodeContainerCreateMaterial:
         contract = material.product.runtime_contract
         retained_volumes = {
@@ -1279,17 +1324,32 @@ class DockerRuntimeInterpreter:
                 _require_node_owner(inspection.labels, volume_labels, "retained volume")
 
         secret_mounts = []
-        for secret in secrets.files:
-            volume_name = _secret_volume_name(request, material.node_id, secret)
+        for index, secret in enumerate(secrets.files):
+            volume_name = _secret_volume_name(request, material.node_id, secret, owner_uid=owner_uid)
             volume_labels = {
                 **labels,
                 f"{_LABEL_PREFIX}.volume.kind": "secret-file",
                 f"{_LABEL_PREFIX}.secret.target": secret.target_path,
                 f"{_LABEL_PREFIX}.secret.reference": secret.reference.reference_id,
             }
+            if secret.selection is not None:
+                volume_labels[f"{_LABEL_PREFIX}.secret.identity"] = _selected_secret_identity(
+                    request, material.node_id, secret, secret.selection, owner_uid)
+            if attempt is not None and attempt.secret_correlation is not None:
+                attempt.secret_attempted_indices.append(index)
             inspection = self.client.inspect_volume(volume_name)
             if inspection is None:
+                if attempt is not None:
+                    attempt.unknown_created_resource = True
                 self.client.create_volume(name=volume_name, labels=volume_labels)
+                created = self.client.inspect_volume(volume_name)
+                if created is None:
+                    raise ConfigurationObservationUnknown()
+                _require_node_owner(created.labels, volume_labels, "secret volume")
+                _require_selected_secret_identity(created.labels, request, material.node_id, secret, owner_uid)
+                if attempt is not None:
+                    attempt.unknown_created_resource = False
+                    attempt.unknown_materialization = True
                 self.client.materialize_secret_file(
                     volume_name,
                     secret.value,
@@ -1298,7 +1358,16 @@ class DockerRuntimeInterpreter:
                 )
             else:
                 _require_node_owner(inspection.labels, volume_labels, "secret volume")
+                _require_selected_secret_identity(inspection.labels, request, material.node_id, secret, owner_uid)
             self._require_secret_file(volume_name, secret, owner_uid)
+            observed = self.client.inspect_volume(volume_name)
+            if observed is None:
+                raise ConfigurationObservationUnknown()
+            _require_node_owner(observed.labels, volume_labels, "secret volume")
+            _require_selected_secret_identity(observed.labels, request, material.node_id, secret, owner_uid)
+            if attempt is not None and attempt.secret_correlation is not None:
+                attempt.unknown_materialization = False
+                attempt.secret_staged_indices.append(index)
             secret_mounts.append(DockerSdkSecretMount(secret.target_path, volume_name))
 
         return _NodeContainerCreateMaterial(
@@ -1641,6 +1710,10 @@ def _resolve_product_secret_deliveries(
 ) -> ResolvedSecretDeliveries:
     deliveries = material.product.runtime_contract.secret_deliveries
     try:
+        if material.secret_selections:
+            return resolve_selected_secret_deliveries(deliveries,
+                selections=material.secret_selections, grants=request.secret_resolution_grants,
+                resolver=authorized_resolver)
         if authorized_resolver is not None:
             return resolve_authorized_secret_deliveries(
                 deliveries,
@@ -1664,6 +1737,28 @@ def _resolve_product_secret_deliveries(
             "docker.secret-resolution-malformed",
             "secret resolver returned malformed material",
         ) from error
+
+
+def _has_selected_secrets(request):
+    return (type(request.operation) in (StartNode, ReconcileNode)
+        and len(request.products) == 1 and bool(request.products[0].secret_selections))
+
+
+def _admit_selected_secrets(request, resolver):
+    # Reconstruct through Core's public contract: intent descriptors deliberately
+    # exclude grants and cannot validate their binding to this request.
+    replace(request)
+    try:
+        validate_selected_secret_grants(request, resolver)
+    except SecretResolutionError as error:
+        code = ("required" if error.code is SecretResolutionCode.MISSING else error.code.value)
+        raise _DockerInterpreterPreconditionError("docker.secret-resolution-" + code,
+            "selected secret grant coverage is incomplete") from None
+    if _has_selected_secrets(request):
+        deliveries = request.products[0].product.runtime_contract.secret_deliveries
+        if sum(type(value) is SecretFileDelivery for value in deliveries) > 32:
+            raise _DockerInterpreterPreconditionError("docker.secret-result-capacity",
+                "Selected secret file slots exceed the bounded adapter capacity")
 
 
 def _optional_secret_resolution_grant(
@@ -1702,7 +1797,18 @@ def _secret_volume_name(
     request: RuntimeEffectRequest,
     node_id: str,
     secret: SecretFileRuntimeMaterial | SecretFileDelivery,
+    *, owner_uid=None,
 ) -> str:
+    selection = getattr(secret, "selection", None)
+    if type(secret) is SecretFileDelivery:
+        material, = request.products
+        matches = tuple(value for value in material.secret_selections
+            if value.reference == secret.reference and value.intent is secret.intent)
+        if len(matches) != 1:
+            raise ValueError("secret file selection is incomplete")
+        selection, = matches
+    if selection is not None:
+        return "cpk-sec-" + _selected_secret_identity(request, node_id, secret, selection, owner_uid)[:55]
     return _volume_name(
         request,
         node_id,
@@ -1711,6 +1817,27 @@ def _secret_volume_name(
             secret.reference.reference_id,
         )[:16],
     )
+
+
+def _selected_secret_identity(request, node_id, secret, selection, owner_uid):
+    if (type(selection) is not SecretVersionSelection or type(owner_uid) is not int
+            or not 0 <= owner_uid <= 2147483647):
+        raise ValueError("selected secret file identity is invalid")
+    material, = request.products
+    document = dict(profile="docker.selected-secret-file.v1",
+        workspace_id=request.source.workspace_id, runtime_id=material.runtime_id, node_id=node_id,
+        reference_id=selection.reference.reference_id, intent=selection.intent.value,
+        version_id=selection.version_id, target_path=secret.target_path,
+        file_mode=secret.file_mode.value, owner_uid=owner_uid)
+    return hashlib.sha256(json.dumps(document, sort_keys=True,
+        separators=(",", ":"), ensure_ascii=True).encode("ascii")).hexdigest()
+
+
+def _require_selected_secret_identity(labels, request, node_id, secret, owner_uid):
+    if secret.selection is not None and labels.get(f"{_LABEL_PREFIX}.secret.identity") != (
+            _selected_secret_identity(request, node_id, secret, secret.selection, owner_uid)):
+        raise _DockerInterpreterPreconditionError("docker.secret-identity-conflict",
+            "Secret volume does not match the selected immutable identity")
 
 
 def _secret_value_digest(secret: SecretFileRuntimeMaterial) -> str:
@@ -1989,6 +2116,7 @@ def _node_fingerprint(
         _canonical_descriptors(material.runtime_authority_deliveries),
         repr(tuple(artifact.content_digest for artifact in contract.configuration_artifacts)),
         repr(tuple(mount.resource_id for mount in contract.retained_data_mounts)),
+        *((_canonical_descriptors(material.secret_selections),) if material.secret_selections else ()),
     )
 
 

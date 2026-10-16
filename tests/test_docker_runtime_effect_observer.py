@@ -858,6 +858,23 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                         products = ()
                     elif invalid == "multiple":
                         products = (*products, replace(products[0], node_id="second"))
+                    if operation_type in (StartNode, ReconcileNode):
+                        valid = replace(template, operation=operation_type(NodeTarget("api")))
+                        observation = RuntimeEffectObservationRequest(valid)
+                        malformed = replace(valid)
+                        object.__setattr__(malformed, "operation",
+                            operation_type(NodeTarget("foreign" if invalid == "target" else "api")))
+                        object.__setattr__(malformed, "products", products)
+                        # A deliberately tampered negative specimen, retaining
+                        # the original valid correlation, never an admitted intent.
+                        object.__setattr__(observation, "runtime_request", malformed)
+                        client = _ReadClient(valid)
+                        before = repr((client.network, client.container, client.image, client.volumes))
+                        result = self.observer(client).observe(observation, None)
+                        self.assertEqual(self.assert_observation(result, valid), "indeterminate")
+                        self.assertEqual(client.calls + client.mutations, [])
+                        self.assertEqual(before, repr((client.network, client.container, client.image, client.volumes)))
+                        continue
                     request = replace(template, operation=operation_type(NodeTarget("foreign" if invalid == "target" else "api")), products=products)
                     client = _ReadClient(template)
                     self.assertEqual(self.observe(request, client), "indeterminate")

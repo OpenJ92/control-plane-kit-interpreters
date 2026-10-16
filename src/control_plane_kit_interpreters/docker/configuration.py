@@ -14,7 +14,11 @@ from control_plane_kit_core.configuration_invocation import (
 )
 from control_plane_kit_core.runtime_effect_observation import runtime_effect_result_fingerprint
 from control_plane_kit_core.runtime_effects import (
-    EffectResultKind, RuntimeEffectFailure, RuntimeEffectRequest, RuntimeEffectResult,
+    EffectResultKind, RuntimeEffectFailure, RuntimeEffectKind, RuntimeEffectRequest, RuntimeEffectResult,
+)
+from control_plane_kit_core.secret_installation import (
+    SecretResolutionReceipt, SecretInstallationReceipt,
+    secret_installation_correlation_for_request, secret_material_selection_fingerprint,
 )
 from control_plane_kit_interpreters.docker.sdk import DockerSdkConfigurationMount
 
@@ -74,13 +78,25 @@ class ConfigurationAttempt:
     old_removed: bool = False
     unknown_created_resource: bool = False
     action: str = "not-started"
+    file_owner_uid: int | None = None
+    secret_attempted_indices: list[int] = field(default_factory=list)
+    secret_staged_indices: list[int] = field(default_factory=list)
+    retained_mounts: list[str] = field(default_factory=list)
+    unknown_materialization: bool = False
+    authority_close_unknown: bool = False
 
     def __post_init__(self):
-        self.correlation = configuration_invocation_correlation_for_request(self.request)
-        self.selection_fingerprint = configuration_invocation_selection_fingerprint(self.correlation.selection)
+        self.correlation = (configuration_invocation_correlation_for_request(self.request)
+            if self.request.kind is RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1 else None)
+        self.selection_fingerprint = (configuration_invocation_selection_fingerprint(self.correlation.selection)
+            if self.correlation is not None else None)
+        self.secret_correlation = (secret_installation_correlation_for_request(self.request)
+            if self.request.products[0].secret_selections else None)
+        self.secret_fingerprint = (secret_material_selection_fingerprint(self.request)
+            if self.secret_correlation is not None else None)
 
     def evidence(self):
-        return {
+        result = {
             "action": self.action,
             "configuration_attempt": {
                 "profile": "docker.configuration-attempt.v1", "phase": self.phase,
@@ -93,12 +109,32 @@ class ConfigurationAttempt:
                 "configuration_volumes_removed": 0,
             },
         }
+        if self.correlation is None:
+            result.pop("configuration_attempt")
+        if self.secret_correlation is not None:
+            result["secret_attempt"] = {
+                "profile": "docker.secret-attempt.v1", "phase": self.phase,
+                "file_identity_profile": "docker.selected-secret-file.v1",
+                "request_fingerprint": self.secret_correlation.request_fingerprint,
+                "selection_fingerprint": self.secret_fingerprint,
+                "file_owner_uid": self.file_owner_uid,
+                "attempted_indices": list(self.secret_attempted_indices),
+                "staged_indices": list(self.secret_staged_indices),
+                "retained_mounts": list(self.retained_mounts),
+                "old_container_id": self.old_container_id, "container_id": self.container_id,
+                "old_removed": self.old_removed,
+                "unknown_created_resource": self.unknown_created_resource,
+                "unknown_materialization": self.unknown_materialization,
+                "authority_close_unknown": self.authority_close_unknown,
+                "secret_volumes_removed": 0,
+            }
+        return result
 
     def result(self, kind, *, failure=None, observations=(), extra=None):
         evidence = self.evidence()
         if extra is not None:
             evidence.update(extra)
-        if kind in (EffectResultKind.SUCCEEDED, EffectResultKind.FAILED):
+        if self.correlation is not None and kind in (EffectResultKind.SUCCEEDED, EffectResultKind.FAILED):
             evidence["configuration_invocation_completion"] = ConfigurationInvocationCompletion(
                 self.correlation.request_fingerprint, self.selection_fingerprint,
             ).descriptor()
@@ -108,6 +144,9 @@ class ConfigurationAttempt:
 
     def uncertain(self):
         # Provider exception strings, config bodies and secret material never enter evidence.
+        if self.correlation is None:
+            return self.result(EffectResultKind.UNCERTAIN, failure=RuntimeEffectFailure(
+                "docker.secret-effect-uncertain", "Docker selected secret effect is uncertain"))
         return self.result(EffectResultKind.UNCERTAIN, failure=RuntimeEffectFailure(
             "docker.configuration-effect-uncertain", "Docker configuration effect is uncertain"))
 
@@ -165,6 +204,25 @@ def _container_incarnation_fingerprint(identity):
 
 def _installation_receipt(attempt):
     """Build only at the runtime's final verified seam, never from a success flag."""
+    disposition, prior, current = _incarnation_fields(attempt)
+    return ConfigurationInstallationReceipt(attempt.correlation.request_fingerprint,
+        attempt.selection_fingerprint, disposition, prior, current)
+
+
+def secret_installation_evidence(attempt):
+    if attempt.secret_correlation is None:
+        return {}
+    disposition, prior, current = _incarnation_fields(attempt)
+    request_fingerprint = attempt.secret_correlation.request_fingerprint
+    return {
+        "secret_resolution_receipt": SecretResolutionReceipt(
+            request_fingerprint, attempt.secret_fingerprint).descriptor(),
+        "secret_installation_receipt": SecretInstallationReceipt(
+            request_fingerprint, attempt.secret_fingerprint, disposition, prior, current).descriptor(),
+    }
+
+
+def _incarnation_fields(attempt):
     if attempt.unknown_created_resource:
         raise ConfigurationObservationUnknown()
     current = _container_incarnation_fingerprint(attempt.container_id)
@@ -178,5 +236,4 @@ def _installation_receipt(attempt):
         disposition = ConfigurationInstallationDisposition.REPLACED
     else:
         raise ConfigurationObservationUnknown()
-    return ConfigurationInstallationReceipt(attempt.correlation.request_fingerprint,
-        attempt.selection_fingerprint, disposition, prior, current)
+    return disposition, prior, current

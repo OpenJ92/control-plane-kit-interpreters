@@ -106,10 +106,13 @@ class DockerConnectorConnectionObserver:
                     or delivery.path_binding is None or delivery.path_binding.environment_name != "TUNNEL_TOKEN_FILE"):
                 raise ValueError
             delivery.__post_init__()
+            selections = tuple(selection for selection in material.secret_selections
+                if selection.reference == delivery.reference and selection.intent == delivery.intent)
+            if len(selections) != 1:
+                raise ValueError
             expected_name = _container_name(request, node.node_id)
             expected_labels = _node_correlation_labels(_node_labels(request, material))
             network = _network_name(request, runtime_id)
-            mount = DockerSdkSecretMount(delivery.target_path, _secret_volume_name(request, node.node_id, delivery))
         except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
             return ConnectorConnectionObservation(ConnectorConnectionOutcome.REFUSED)
 
@@ -117,13 +120,16 @@ class DockerConnectorConnectionObserver:
         unknown = ConnectorConnectionObservation(ConnectorConnectionOutcome.UNKNOWN, **correlation)
         try:
             first = self.client.inspect_connector_container(expected_name)
-            if (first.name != "/" + expected_name or first.network != network or first.secret_mount != mount
+            if (first.name != "/" + expected_name or first.network != network
                     or _node_correlation_labels(dict(first.labels)) != expected_labels):
                 return unknown
             _fresh(first, self.clock())
             image = self.client.inspect_connector_image(self.image_reference, token_path=delivery.target_path)
+            mount = DockerSdkSecretMount(delivery.target_path,
+                _secret_volume_name(request, node.node_id, delivery, owner_uid=image.owner_uid))
             _fresh(first, self.clock())
-            if first.image_id != image.image_id or first.launch_digest != image.launch_digest:
+            if (first.image_id != image.image_id or first.launch_digest != image.launch_digest
+                    or first.secret_mount != mount):
                 return unknown
             final = self.client.inspect_connector_container(first.container_id)
             _fresh(final, self.clock())

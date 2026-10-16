@@ -1,5 +1,6 @@
 """I186 finite hosted witness: actual configured runtime and receipt production."""
 from contextlib import ExitStack
+from dataclasses import replace
 import json
 from uuid import uuid4
 from unittest.mock import patch
@@ -25,9 +26,16 @@ from control_plane_kit_interpreters.docker.configuration import configuration_vo
 from control_plane_kit_interpreters.docker.runtime import _container_name, _network_name
 from live_docker_configuration import ConfigurationFixtureResources
 from test_docker_installation_receipts import expected_identity
+from control_plane_kit_core.secret_installation import secret_installation_receipt_for_result, secret_material_selection_fingerprint
+from control_plane_kit_core.secret_selections import SecretVersionSelection
+from control_plane_kit_core.secret_version_grants import SecretVersionResolutionGrant
+from control_plane_kit_core.secrets import SecretEnvironmentDelivery, SecretFileDelivery, SecretReference, SecretUseIntent, SecretResolved, SecretValue
+from control_plane_kit_core.runtime_effect_observation import runtime_effect_intent_for_request, runtime_effect_intent_fingerprint
+from control_plane_kit_interpreters.docker.runtime import _secret_volume_name
+from test_docker_runtime_interpreter import _grant
 
 
-_LIMITS = {"network": 1, "volume": 4, "reader": 2, "helper": 14}
+_LIMITS = {"network": 1, "volume": 6, "reader": 2, "helper": 21}
 _PHASES = frozenset({"preflight", "authority-preflight", "network", "configuration-staging",
     "container-preparation", "container-remove", "container-create", "container-start", "installed-verification"})
 _FAILURE_CODES = frozenset({
@@ -104,7 +112,7 @@ def _hardened_workload_kwargs(builder, arguments):
         "security_opt": ["no-new-privileges"]}
 
 
-def _requests(workspace, image_reference):
+def _requests(workspace, image_reference, *, selected_secrets=False):
     def request(generation, suffix, reconcile):
         artifacts = tuple(ConfigurationArtifact(f"config-{index}", f"/etc/cpk-fixture/{index}.json",
             ConfigurationMediaType.JSON, json.dumps({"value": generation if index == 0 else "fixed"}),
@@ -120,17 +128,41 @@ def _requests(workspace, image_reference):
             artifact.target_path, artifact.media_type, artifact.file_mode, artifact.content_digest)
             for index, artifact in enumerate(artifacts)))
         effect = "effect-" + suffix
-        return RuntimeEffectRequest(effect, RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1, RuntimeKind.DOCKER,
+        request = RuntimeEffectRequest(effect, RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1, RuntimeKind.DOCKER,
             RuntimeEffectSource(workspace, "request-" + suffix, RunId("run-" + suffix), "plan-" + suffix,
                 "base-" + suffix, "desired-" + suffix, effect), ActivityId("activity-" + suffix),
             ReconcileNode(NodeTarget("receiver")) if reconcile else StartNode(NodeTarget("receiver")),
             products=(material,), configuration_instances=instances)
+        if not selected_secrets:
+            return request
+        reference = SecretReference("secret://disposable/installation/token")
+        intent = SecretUseIntent.APPLICATION_CONTROL_TOKEN
+        selection = SecretVersionSelection(reference, intent, "version-" + generation)
+        product = replace(product, runtime_contract=replace(product.runtime_contract, secret_deliveries=(
+            SecretEnvironmentDelivery("CPK_FIXTURE_TOKEN", reference, intent),
+            SecretFileDelivery("/run/secrets/cpk-fixture-token", reference, intent))))
+        descriptor = ProductDescriptorCodec().encode_document(product)
+        material = replace(material, product=product, secret_selections=(selection,),
+            reference=ProductReference(product.identity, ProductDescriptorDigest(descriptor.content_digest)))
+        request = replace(request, products=(material,))
+        authority = _grant(reference, intent)
+        grant = SecretVersionResolutionGrant(
+            authorization_id=authority.authorization_id, workspace_id=workspace,
+            reference_registration_id=authority.reference_registration_id,
+            provider_registration_id=authority.provider_registration_id,
+            endpoint_reference=authority.endpoint_reference, credential_reference=authority.credential_reference,
+            selection=selection, actor_subject=authority.actor_subject, correlation_id="fixture-" + suffix,
+            intent_fingerprint=authority.intent_fingerprint, operation_id=request.source.request_id,
+            run_id=request.source.run_id.value, activity_id=request.activity_id.value, effect_id=effect,
+            request_fingerprint=runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(request)),
+            selection_fingerprint=secret_material_selection_fingerprint(request))
+        return replace(request, secret_resolution_grants=(grant,))
     return request("a", "created", False), request("a", "reused", True), request("b", "replaced", True)
 
 
-def run_installation_witness(client, sdk, image_reference, helper_image):
+def run_installation_witness(client, sdk, image_reference, helper_image, *, selected_secrets=False):
     workspace = "cpk186-" + uuid4().hex
-    requests = _requests(workspace, image_reference)
+    requests = _requests(workspace, image_reference, selected_secrets=selected_secrets)
     image = sdk.inspect_image(image_reference)
     if image is None or client.images.get(image_reference).id != image.image_id:
         raise RuntimeError("installation fixture image provenance unavailable")
@@ -142,6 +174,10 @@ def run_installation_witness(client, sdk, image_reference, helper_image):
     name, network = _container_name(requests[0], "receiver"), _network_name(requests[0], "docker")
     volumes = {configuration_volume_name(ref) for request in (requests[0], requests[2])
                for ref in request.configuration_instances.instances}
+    secret_volumes = tuple(_secret_volume_name(request, "receiver",
+        request.products[0].product.runtime_contract.secret_deliveries[1],
+        owner_uid=image.secret_file_owner_uid()) for request in (requests[0], requests[2])) if selected_secrets else ()
+    volumes.update(secret_volumes)
     for manager, coordinate in ((client.containers, name), (client.networks, network),
                                 *((client.volumes, volume) for volume in sorted(volumes))):
         try:
@@ -173,7 +209,7 @@ def run_installation_witness(client, sdk, image_reference, helper_image):
     def create_volume(manager, *args, **kwargs):
         if manager.client is not client or args or kwargs.get("name") not in volumes:
             raise RuntimeError("installation fixture volume out of scope")
-        admit("volume", 4)
+        admit("volume", 6 if selected_secrets else 4)
         labels = dict(kwargs["labels"])
         return resources.create("volume", kwargs["name"],
             lambda: original_volume(manager, **{**kwargs, "labels": labels}), labels=labels)
@@ -188,12 +224,16 @@ def run_installation_witness(client, sdk, image_reference, helper_image):
     def create_helper(volume_name, *, readonly):
         if volume_name not in volumes:
             raise RuntimeError("installation fixture helper out of scope")
-        admit("helper", 14)
+        admit("helper", 21 if selected_secrets else 14)
         return resources.create("helper", volume_name,
             lambda: original_helper(volume_name, readonly=readonly), volume=volume_name, readonly=readonly)
 
     def hardened_kwargs(**kwargs):
-        return _hardened_workload_kwargs(original_kwargs, kwargs)
+        result = _hardened_workload_kwargs(original_kwargs, kwargs)
+        if selected_secrets:
+            # Selected recipients retain the actual admitted image user.
+            result.pop("user")
+        return result
 
     def refuse_pull(*args, **kwargs):
         raise RuntimeError("installation fixture image pull prohibited")
@@ -213,7 +253,12 @@ def run_installation_witness(client, sdk, image_reference, helper_image):
                 (sdk, "_container_create_kwargs", hardened_kwargs), (sdk, "pull_image", refuse_pull),
             ):
                 stack.enter_context(patch.object(owner, method, replacement))
-            interpreter = DockerRuntimeInterpreter(sdk)
+            class Resolver:
+                def resolve(self, grant):
+                    assert type(grant) is SecretVersionResolutionGrant
+                    return SecretResolved(grant.selection.reference, SecretValue("disposable-" + grant.selection.version_id))
+            interpreter = DockerRuntimeInterpreter(sdk, authorized_secret_resolver=Resolver() if selected_secrets else None)
+            retained_file = None
             for request, disposition in zip(requests, ("created", "reused", "replaced"), strict=True):
                 result = interpreter.execute(request)
                 emit(_runtime_diagnostic, disposition, result, counts)
@@ -222,6 +267,17 @@ def run_installation_witness(client, sdk, image_reference, helper_image):
                 receipt = configuration_installation_receipt_for_result(
                     configuration_invocation_correlation_for_request(request), result)
                 assert receipt is not None and receipt.disposition.value == disposition
+                if selected_secrets:
+                    secret_receipt = secret_installation_receipt_for_result(request, result)
+                    assert secret_receipt is not None and secret_receipt.disposition == receipt.disposition
+                    assert secret_receipt.current_realization_fingerprint == receipt.current_realization_fingerprint
+                    assert secret_receipt.prior_realization_fingerprint == receipt.prior_realization_fingerprint
+                    assert result.evidence["secret_attempt"]["secret_volumes_removed"] == 0
+                    assert "disposable-version" not in json.dumps(result.descriptor())
+                    if disposition == "created":
+                        retained_file = sdk.inspect_secret_file(secret_volumes[0])
+                    elif disposition == "replaced":
+                        assert sdk.inspect_secret_file(secret_volumes[0]) == retained_file
                 identity = result.evidence["configuration_attempt"]["container_id"]
                 assert any(kind == "reader" and captured == identity for kind, captured, _, _ in resources.entries)
                 assert receipt.current_realization_fingerprint == expected_identity(identity)
@@ -230,14 +286,14 @@ def run_installation_witness(client, sdk, image_reference, helper_image):
                 assert observed.image_id == image.image_id
                 resource = client.containers.get(identity)
                 resource.reload()
-                assert resource.id == identity and resource.attrs["Config"]["User"] == "10006:10008"
+                assert resource.id == identity and resource.attrs["Config"]["User"] == (image.configured_user if selected_secrets else "10006:10008")
                 assert resource.attrs["HostConfig"]["ReadonlyRootfs"] is True
                 assert resource.attrs["HostConfig"]["CapDrop"] == ["ALL"]
                 assert "no-new-privileges" in resource.attrs["HostConfig"]["SecurityOpt"]
                 assert not resource.attrs["HostConfig"]["PortBindings"]
                 assert set(resource.attrs["NetworkSettings"]["Networks"]) == {network}
                 artifacts = {artifact.artifact_id: artifact for artifact in request.products[0].product.runtime_contract.configuration_artifacts}
-                assert len(resource.attrs["Mounts"]) == 2
+                assert len(resource.attrs["Mounts"]) == (3 if selected_secrets else 2)
                 for ref in request.configuration_instances.instances:
                     mount = DockerSdkConfigurationMount(artifacts[ref.artifact_id], configuration_volume_name(ref))
                     actual = sdk.inspect_configuration_mount(identity, mount)
@@ -252,7 +308,7 @@ def run_installation_witness(client, sdk, image_reference, helper_image):
                     assert identity == identities[0]
                     assert receipt.prior_realization_fingerprint == receipts[0].current_realization_fingerprint
                     assert receipt.request_fingerprint != receipts[0].request_fingerprint
-                    assert counts == dict(network=1, volume=2, reader=1, helper=8)
+                    assert counts == dict(network=1, volume=3 if selected_secrets else 2, reader=1, helper=12 if selected_secrets else 8)
                 else:
                     assert identity != identities[0]
                     assert receipt.prior_realization_fingerprint == receipts[0].current_realization_fingerprint
@@ -260,7 +316,7 @@ def run_installation_witness(client, sdk, image_reference, helper_image):
                     assert sdk.inspect_container(identities[0]) is None
                 identities.append(identity)
                 receipts.append(receipt)
-            assert counts == dict(network=1, volume=4, reader=2, helper=14)
+            assert counts == dict(network=1, volume=6 if selected_secrets else 4, reader=2, helper=21 if selected_secrets else 14)
             network_ids = [identity for kind, identity, _, _ in resources.entries if kind == "network"]
             assert len(network_ids) == 1
             assert client.networks.get(network_ids[0]).attrs["Internal"] is True
@@ -276,6 +332,7 @@ def run_installation_witness(client, sdk, image_reference, helper_image):
     if not diagnostics_available:
         raise RuntimeError("installation fixture diagnostics unavailable")
     print(json.dumps({"installation_receipts": "passed", "sequence": [r.disposition.value for r in receipts],
+        "selected_secret_receipts": selected_secrets,
         "stable_reuse_identity": True, "distinct_replacement_identity": True,
         "prior_absence_verified": True, "all_selected_material_verified": True,
         "resources": counts, "residue": "absent"}, sort_keys=True))

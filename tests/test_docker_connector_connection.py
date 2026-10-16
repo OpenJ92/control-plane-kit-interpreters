@@ -9,6 +9,7 @@ import control_plane_kit_core as core
 from control_plane_kit_core.planning import ActivityId, ActivityPlan, PlannedActivity, StartRuntime
 from control_plane_kit_core.lifecycle import ResourceLifecycle
 from control_plane_kit_core.secrets import SecretEnvironmentDelivery, SecretUseIntent
+from control_plane_kit_core.secret_selections import SecretVersionSelection
 from control_plane_kit_core.topology import validate_graph
 from control_plane_kit_core.types import RuntimeKind
 from control_plane_kit_interpreters.docker import connector_connection as module
@@ -89,7 +90,10 @@ class DockerConnectorConnectionTests(unittest.TestCase):
                 elif case == "wrong-binding": deliveries = (replace(delivery, path_binding=None),)
                 elif case == "extra-file": deliveries += (replace(delivery, target_path="/run/secrets/extra", path_binding=None),)
                 contract = replace(world.material.product.runtime_contract, secret_deliveries=deliveries)
-                material = replace(world.material, product=replace(world.material.product, runtime_contract=contract))
+                selections = tuple(SecretVersionSelection(reference, intent, "fixture-version")
+                    for reference, intent in dict.fromkeys((item.reference, item.intent) for item in deliveries))
+                material = replace(world.material, product=replace(world.material.product, runtime_contract=contract),
+                    secret_selections=selections)
                 if case == "public-env":
                     from control_plane_kit_core.products import PublicStaticEnvironmentBinding
                     material = replace(material, public_environment=(PublicStaticEnvironmentBinding("PYTHONPATH", "/tmp/PRIVATE-CANDIDATE"),))

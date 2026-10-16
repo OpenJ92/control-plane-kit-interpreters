@@ -1994,7 +1994,7 @@ class ProviderContractObservationTests(unittest.TestCase):
         self.assertEqual(len(product.runtime_contract.secret_deliveries), 2)
         for delivery in product.runtime_contract.secret_deliveries:
             self.assertEqual(delivery.file_mode.value, "0400")
-        values = {grant.intent.value: fixture.resolver.resolve(grant).value.reveal()
+        values = {grant.selection.intent.value: fixture.resolver.resolve(grant).value.reveal()
                   for grant in fixture.grants}
         self.assertTrue(len(base64.urlsafe_b64decode(values["secrets.custody-root-key"])) == 32)
         document = json.loads(values["secrets.provider-credentials-document"])
