@@ -1,6 +1,11 @@
 # Exact metadata and resolution (#190)
 
-The accepted Core/Operations dependency is PR1988 merge
+Current Interpreters #201 dependency adoption selects Core #1991 merge
+`5b66dcac4bf2cf76219efaf05fa5ff06588bd16a`. Only the Core managed-update
+compiler changes; the metadata/grant contracts and this implementation remain
+unchanged. The original #190 source and evidence below retain their coordinates.
+
+The original accepted Core/Operations dependency is PR1988 merge
 `87e231c661879e44816ba71ff9320c040c868d60`. This slice changes provider IO;
 Docker immutable installation/recipient evidence remains #191, and the typed
 Operations-port bridge plus production injection remains Servers #252.

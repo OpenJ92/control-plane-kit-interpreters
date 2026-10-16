@@ -1,6 +1,11 @@
 Source: [test_support/tests/test_gate_contract.py](../../../../test_support/tests/test_gate_contract.py).
 
-Interpreters #190/#191 advances CORE_REQUIREMENT to actual accepted Core
+Interpreters #201 advances only CORE_REQUIREMENT to accepted Core
+`5b66dcac4bf2cf76219efaf05fa5ff06588bd16a`. Existing exact equality, pinned
+resolution, gate and provider-opt-in assertions remain unchanged. This is a
+coordinate adoption; normal owning-gate evidence remains required.
+
+Historical Interpreters #190/#191 advances CORE_REQUIREMENT to actual accepted Core
 `87e231c661879e44816ba71ff9320c040c868d60`. Exact equality, gate assertions,
 normal pinned mode and provider opt-in semantics remain unchanged. The first
 attempt caught the stale prior expected coordinate before package collection;
