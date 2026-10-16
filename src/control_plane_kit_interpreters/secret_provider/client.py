@@ -425,6 +425,28 @@ class ControlPlaneKitSecretsClient:
             replayed=response["replayed"],
         )
 
+    def read_metadata(
+        self, *, workspace_id: str, reference: SecretReference, version_id: str,
+    ) -> SecretProviderVersionMetadata:
+        """Observe one explicit provider version without reading its plaintext."""
+        _metadata_request(workspace_id, reference, version_id)
+        secret_id = canonical_provider_secret_id(reference)
+        response = self._request_json(
+            "GET", f"{_secret_path(workspace_id, secret_id)}/metadata"
+            f"?version_id={quote(version_id, safe='')}", None, mutation=False,
+        )
+        if set(response) != {"outcome", "metadata"} or response.get("outcome") != "metadata":
+            raise SecretProviderClientError(SecretProviderClientCode.MALFORMED_RESPONSE)
+        document = response["metadata"]
+        if (not isinstance(document, dict) or type(document.get("status")) is not str
+                or document["status"] not in {"active", "revoked"}):
+            raise SecretProviderClientError(SecretProviderClientCode.MALFORMED_RESPONSE)
+        observed = _metadata(document, workspace_id=workspace_id, secret_id=secret_id,
+            reference=reference, expected_status=document["status"])
+        if observed.version_id != version_id:
+            raise SecretProviderClientError(SecretProviderClientCode.MALFORMED_RESPONSE)
+        return observed
+
     def resolve(
         self,
         *,
@@ -472,6 +494,10 @@ class ControlPlaneKitSecretsClient:
             reference=reference,
             expected_status="active",
         )
+        # Validate selected identity before decoding or returning secret material.
+        if version_id is not None and (
+                metadata.version_id != version_id or metadata.labels.get("intent") != intent.value):
+            raise SecretProviderClientError(SecretProviderClientCode.MALFORMED_RESPONSE)
         encoded = response["value_base64"]
         if not isinstance(encoded, str):
             raise SecretProviderClientError(
@@ -605,12 +631,12 @@ class ControlPlaneKitSecretsClient:
         self,
         method: str,
         path: str,
-        payload: Mapping[str, object],
+        payload: Mapping[str, object] | None,
         *,
         mutation: bool,
     ) -> dict[str, Any]:
         try:
-            body = json.dumps(
+            body = b"" if payload is None else json.dumps(
                 payload,
                 separators=(",", ":"),
                 sort_keys=True,
@@ -873,6 +899,22 @@ def _raise_provider_error(
         mapped,
         certainty=_certainty(mutation and status_code >= 500),
     )
+
+
+def _metadata_request(workspace_id, reference, version_id):
+    """Validate the complete metadata lookup before credential/bootstrap IO."""
+    if (type(workspace_id) is not str or not _IDENTIFIER.fullmatch(workspace_id)
+            or type(version_id) is not str or not _IDENTIFIER.fullmatch(version_id)
+            or type(reference) is not SecretReference):
+        raise SecretProviderClientError(SecretProviderClientCode.MALFORMED_REQUEST)
+    valid = False
+    try:
+        valid = SecretReference(reference.reference_id) == reference
+        canonical_provider_secret_id(reference)
+    except (ValueError, TypeError, AttributeError, UnicodeError):
+        valid = False
+    if not valid:
+        raise SecretProviderClientError(SecretProviderClientCode.MALFORMED_REQUEST)
 
 
 def _metadata(

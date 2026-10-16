@@ -10,8 +10,10 @@ from control_plane_kit_core.secrets import (
     SecretDenied,
     SecretMissing,
     SecretResolution,
-    SecretResolutionGrant,
     SecretResolved,
+)
+from control_plane_kit_core.secret_version_grants import (
+    ResolutionGrant, SecretVersionResolutionGrant, validate_resolution_grant,
 )
 
 from .bootstrap import SecretProviderBootstrapRegistry
@@ -42,9 +44,19 @@ class ControlPlaneKitSecretsResolver:
         if not isinstance(self.policy, SecretProviderClientPolicy):
             raise TypeError("secret resolver requires provider client policy")
 
-    def resolve(self, grant: SecretResolutionGrant) -> SecretResolution:
-        if not isinstance(grant, SecretResolutionGrant):
-            raise TypeError("secret resolution requires SecretResolutionGrant")
+    def resolve(self, grant: ResolutionGrant) -> SecretResolution:
+        valid = False
+        try:
+            validate_resolution_grant(grant)
+            valid = True
+        except (ValueError, TypeError, AttributeError):
+            valid = False
+        if not valid:
+            raise SecretProviderClientError(SecretProviderClientCode.MALFORMED_REQUEST)
+        selected = type(grant) is SecretVersionResolutionGrant
+        reference = grant.selection.reference if selected else grant.reference
+        intent = grant.selection.intent if selected else grant.intent
+        version_id = grant.selection.version_id if selected else None
         configuration = self.bootstrap_registry.configuration_for(
             endpoint_reference=grant.endpoint_reference,
             credential_reference=grant.credential_reference,
@@ -57,19 +69,20 @@ class ControlPlaneKitSecretsResolver:
         try:
             resolved = client.resolve(
                 workspace_id=grant.workspace_id,
-                reference=grant.reference,
-                intent=grant.intent,
+                reference=reference,
+                intent=intent,
                 caller_subject=grant.actor_subject,
                 correlation_id=grant.correlation_id,
+                version_id=version_id,
             )
         except SecretProviderClientError as error:
             if error.code is SecretProviderClientCode.MISSING:
-                return SecretMissing(grant.reference)
+                return SecretMissing(reference)
             if error.code in {
                 SecretProviderClientCode.DENIED,
                 SecretProviderClientCode.REVOKED,
             }:
-                return SecretDenied(grant.reference)
+                return SecretDenied(reference)
             raise
         return SecretResolved(resolved.metadata.reference, resolved.value)
 

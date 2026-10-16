@@ -75,7 +75,7 @@ class SecretProviderMetadataTests(unittest.TestCase):
     def test_reader_refuses_substituted_or_unavailable_metadata_without_resolve(self):
         cases = (
             {"workspace_id": "other"}, {"secret_id": "other"},
-            {"version_id": "version-other"}, {"status": "revoked"},
+            {"version_id": "version-other"}, {"status": "revoked"}, {"status": []},
             {"labels": {}}, {"labels": {"intent": "postgres.password"}},
         )
         for changed in cases:

@@ -14,18 +14,22 @@ import httpx
 from cryptography.hazmat.primitives import serialization
 
 from control_plane_kit_core.delegation_keys import DelegationKeyPurpose
+from control_plane_kit_core.secret_selections import SecretVersionSelection
+from control_plane_kit_core.secret_version_grants import SecretVersionResolutionGrant
 
 from control_plane_kit_core.secrets import (
     SecretProviderEndpointReference,
     SecretReference,
     SecretResolutionGrant,
     SecretResolved,
+    SecretDenied,
     SecretUseIntent,
     SecretValue,
 )
 from control_plane_kit_interpreters.secret_provider import (
     ControlPlaneKitSecretsClient,
     ControlPlaneKitSecretsResolver,
+    ControlPlaneKitSecretsMetadataReader,
     SecretProviderBootstrapRegistry,
     SecretProviderClientCode,
     SecretProviderClientError,
@@ -61,6 +65,7 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                             "subject": "interpreter-client",
                             "token": token,
                             "grants": [
+                                {"action": "secret.metadata", "workspace_id": "workspace-1"},
                                 {
                                     "action": "secret.write",
                                     "workspace_id": "workspace-1",
@@ -152,6 +157,26 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                     caller_subject="cloudflare-interpreter",
                     correlation_id="ingress-create-1",
                 )
+                reader = ControlPlaneKitSecretsMetadataReader(registry)
+                selected_metadata = reader.read_version(workspace_id="workspace-1",
+                    endpoint_reference=endpoint, credential_reference=credential,
+                    reference=reference, version_id=written.version_id,
+                    intent=SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN)
+                self.assertEqual(selected_metadata, written)
+                selected_grant = SecretVersionResolutionGrant(
+                    authorization_id="suse_" + "e" * 64, workspace_id="workspace-1",
+                    reference_registration_id="sref_" + "b" * 64,
+                    provider_registration_id="sprov_" + "c" * 64,
+                    endpoint_reference=endpoint, credential_reference=credential,
+                    selection=SecretVersionSelection(reference, SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN,
+                        written.version_id), actor_subject="docker-interpreter",
+                    correlation_id="selected-version-1", intent_fingerprint="d" * 64,
+                    operation_id="operation-1", run_id="run-1", activity_id="activity-1",
+                    effect_id="effect-1", request_fingerprint="e" * 64, selection_fingerprint="f" * 64)
+                for _ in range(2):
+                    exact = resolver.resolve(selected_grant)
+                    self.assertIs(type(exact), SecretResolved)
+                    self.assertEqual(exact.value.reveal(), value.reveal())
                 grant_resolved = resolver.resolve(
                     SecretResolutionGrant(
                         authorization_id="suse_" + "a" * 64,
@@ -183,6 +208,13 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                     caller_subject="cloudflare-interpreter",
                     correlation_id="ingress-compensate-1",
                 )
+                self.assertIs(type(resolver.resolve(selected_grant)), SecretDenied)
+                with self.assertRaises(SecretProviderClientError) as metadata_refused:
+                    reader.read_version(workspace_id="workspace-1",
+                        endpoint_reference=endpoint, credential_reference=credential,
+                        reference=reference, version_id=written.version_id,
+                        intent=SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN)
+                self.assertIs(metadata_refused.exception.code, SecretProviderClientCode.REVOKED)
                 with self.assertRaises(SecretProviderClientError) as raised:
                     client.resolve(
                         workspace_id="workspace-1",
@@ -239,6 +271,9 @@ class LiveSecretProviderClientTests(unittest.TestCase):
             self.assertIn(("generated", "rotation-key-b"), correlations)
             self.assertIn(("resolved", "sign-generated-key-b"), correlations)
             self.assertIn(("resolved", "grant-resolver-1"), correlations)
+            self.assertIn(("metadata", "not-provided"), correlations)
+            self.assertIn(("resolved", "selected-version-1"), correlations)
+            self.assertIn(("revoked", "selected-version-1"), correlations)
             self.assertIn(("resolved", "connector-start-1"), correlations)
             self.assertIn(("revoked", "ingress-compensate-1"), correlations)
             self.assertIn(("revoked", "connector-retry-1"), correlations)

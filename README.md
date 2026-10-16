@@ -278,6 +278,23 @@ path segment by base64url-encoding the complete UTF-8 `reference_id`, removing
 padding, and prefixing `cpk1_`. This is deterministic and injective; it does not
 discard path segments or rely on a collision-prone hash.
 
+`ControlPlaneKitSecretsMetadataReader.read_version` accepts explicit workspace,
+endpoint/credential references, secret reference, version ID, and use intent.
+It uses an authenticated metadata-only GET and requires the exact active version
+and durable intended use. It returns the existing provider metadata observation;
+it does not resolve plaintext, select latest, grant execution permission, or
+attest installation. Servers composition owns translation to the Operations
+metadata port and its exact request/response types; Interpreters does not import
+Operations.
+
+`ControlPlaneKitSecretsResolver` accepts the closed operational and
+consumer-version grant variants. Consumer grants forward the exact selected
+version and preserve original provider correlation. The client verifies the
+returned version and intended use before decoding secret material. Missing,
+revoked, mismatched, or malformed selections never fall back to another version
+or an operational grant. Provider first-resolution pinning and revocation checks
+remain authoritative on every resolution and replay.
+
 The same client exposes a closed delegation-key generation operation. It sends
 only workspace, `SecretReference`, purpose, issuer, caller, and correlation
 metadata to the provider. It validates the returned core `DelegationPublicKey`,
