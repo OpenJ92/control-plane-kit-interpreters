@@ -1,7 +1,7 @@
 # Exact metadata and resolution (#190)
 
-Current Interpreters #201 dependency adoption selects Core #1991 merge
-`5b66dcac4bf2cf76219efaf05fa5ff06588bd16a`. Only the Core managed-update
+Current Interpreters #203 dependency adoption selects Core/Operations #1977 merge
+`012a7b8b7cc153cbf17b1a62513fab747eaad782`. Only the Core managed-update
 compiler changes; the metadata/grant contracts and this implementation remain
 unchanged. The original #190 source and evidence below retain their coordinates.
 

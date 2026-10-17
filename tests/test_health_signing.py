@@ -108,8 +108,8 @@ class HealthSigningPrerequisiteTests(unittest.TestCase):
     def test_actual_owner_provenance_and_candidate_origin(self):
         for package, coordinate in (
             ("control-plane-kit-servers", "9921911d3939855a4f7c1989acdf7683fc8961da"),
-            ("control-plane-kit-secrets", "56e6d3211a847efd98434ba2dd4093d29bf4b375"),
-            ("control-plane-kit-server-sdk", "d4cbbb16a4ce47bae0b791adab5de8940355ea99"),
+            ("control-plane-kit-secrets", "08076140178d59b91d585099136b7d8b6f51866b"),
+            ("control-plane-kit-server-sdk", "e289d6939b7e6432ffa5181789b0600bf8e3ffe2"),
         ):
             metadata = json.loads(importlib.metadata.distribution(package).read_text("direct_url.json"))
             self.assertEqual(metadata["url"], f"https://github.com/OpenJ92/{package}/archive/{coordinate}.zip")

@@ -1,9 +1,9 @@
 # Selected secret installation checkpoint (#191)
 
-Current Interpreters #201 dependency adoption selects Core #1991 merge
-`5b66dcac4bf2cf76219efaf05fa5ff06588bd16a`, test Secrets #55 merge
-`56e6d3211a847efd98434ba2dd4093d29bf4b375` and its SDK #57 merge
-`d4cbbb16a4ce47bae0b791adab5de8940355ea99`. Consumed secret selection,
+Current Interpreters #203 dependency adoption selects Core/Operations #1977 merge
+`012a7b8b7cc153cbf17b1a62513fab747eaad782`, test Secrets #57 merge
+`08076140178d59b91d585099136b7d8b6f51866b` and its SDK #59 merge
+`e289d6939b7e6432ffa5181789b0600bf8e3ffe2`. Consumed secret selection,
 grant, request and receipt contracts are unchanged; only Core's managed-update
 compiler production module changes. Installation code and witnesses are unchanged.
 The original #191 checkpoints and evidence below retain their coordinates;

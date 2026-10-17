@@ -2,17 +2,18 @@ Source: [pyproject.toml](../../pyproject.toml).
 
 Maintain this document alongside its source and selected dependencies.
 
-Interpreters #201 selects accepted Core #1991
-`5b66dcac4bf2cf76219efaf05fa5ff06588bd16a` and actual Secrets #55 merge
-`56e6d3211a847efd98434ba2dd4093d29bf4b375` in the existing test extra.
-Secrets selects SDK #57 merge `d4cbbb16a4ce47bae0b791adab5de8940355ea99`
-and the identical Core archive. Core changes only its managed-update compiler
-from the prior selection; consumed request, grant, receipt and receiver contracts
+Interpreters #203 selects accepted Core/Operations #1977
+`012a7b8b7cc153cbf17b1a62513fab747eaad782` and actual Secrets #57 merge
+`08076140178d59b91d585099136b7d8b6f51866b` in the existing test extra.
+Secrets selects SDK #59 merge `e289d6939b7e6432ffa5181789b0600bf8e3ffe2`
+and the identical Core archive. Core changes only its managed-update compiler's
+retained-verifier refresh relation from the prior selection; consumed request,
+grant, receipt and receiver contracts
 are unchanged. SDK/Secrets runtime source is unchanged. Existing exact gate and
 installed-owner expectations move with these pins; no runtime source, extras,
 test-only Servers fixture, gate or provider-opt-in change. The normal pinned
 owner gate must establish compatibility and its existing Docker witnesses.
-Only the actual accepted Interpreter merge can feed Servers #252; these pins do
+Only the actual accepted Interpreter merge can feed Servers #253; these pins do
 not establish the later public Operations-to-provider or grandparent acceptance.
 
 Historical Interpreters #190/#191 selects accepted Core/Operations #1988
