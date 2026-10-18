@@ -1,6 +1,14 @@
 Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py).
 
-Interpreters #205 advances installed-owner expectations to actual Secrets #59
+Interpreters #207 advances installed-owner expectations to actual Secrets #61
+merge `7ff1e771874e5963ee840d7148d2d4052278baa1` and SDK #63 merge
+`1657cb91b143931bafcdb32108950d2bbbb66d95`, sharing Core
+`73d87e99bf711ff8a88112ca56c5eee8055ac5b7`. Exact installed provenance,
+candidate origin, real signing/composition and denial assertions remain intact.
+The existing test-only Servers fixture and installation boundary are unchanged;
+no runtime, gate or provider-opt-in change accompanies this adoption.
+
+Historical Interpreters #205 advances installed-owner expectations to actual Secrets #59
 merge `165a7dc7abd75e1ba50b9494d0f0aabf0aa3c33c` and SDK #61 merge
 `d4e7c4d91c054f139e2971774ae5e37fc741262d`, sharing Core
 `9861e536e79314005499ae07379f627bfb1599a2`. Exact installed provenance,

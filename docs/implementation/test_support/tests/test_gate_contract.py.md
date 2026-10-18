@@ -1,6 +1,11 @@
 Source: [test_support/tests/test_gate_contract.py](../../../../test_support/tests/test_gate_contract.py).
 
-Interpreters #205 advances only CORE_REQUIREMENT to accepted Core
+Interpreters #207 advances only CORE_REQUIREMENT to accepted Core
+`73d87e99bf711ff8a88112ca56c5eee8055ac5b7`. Exact equality, pinned resolution,
+gate and provider-opt-in assertions are unchanged. The ordinary owning gate
+must validate the new dependency combination; no artificial red is required.
+
+Historical Interpreters #205 advances only CORE_REQUIREMENT to accepted Core
 `9861e536e79314005499ae07379f627bfb1599a2`. Existing exact equality, pinned
 resolution, gate and provider-opt-in assertions remain unchanged. This is a
 coordinate adoption; normal owning-gate evidence remains required.
