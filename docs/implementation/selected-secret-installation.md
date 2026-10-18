@@ -1,6 +1,16 @@
 # Selected secret installation checkpoint (#191)
 
-Current Interpreters #205 dependency adoption selects Core/Operations #1998 merge
+Current Interpreters #207 dependency adoption selects Core #2005 merge
+`73d87e99bf711ff8a88112ca56c5eee8055ac5b7`, test Secrets #61 merge
+`7ff1e771874e5963ee840d7148d2d4052278baa1` and its SDK #63 merge
+`1657cb91b143931bafcdb32108950d2bbbb66d95`. Core changes controller selection
+compatibility and planning, not the selection/grant/request/receipt contracts
+consumed here. Installation code and witnesses remain unchanged. The ordinary
+owning gate must prove the adopted dependency combination and exact fixture
+cleanup; provider-contract opt-in stays off. Historical evidence below retains
+its original coordinates and is not new live deployment evidence.
+
+Historical Interpreters #205 dependency adoption selects Core/Operations #1998 merge
 `9861e536e79314005499ae07379f627bfb1599a2`, test Secrets #59 merge
 `165a7dc7abd75e1ba50b9494d0f0aabf0aa3c33c` and its SDK #61 merge
 `d4e7c4d91c054f139e2971774ae5e37fc741262d`. Consumed secret selection,

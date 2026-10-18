@@ -2,7 +2,20 @@ Source: [pyproject.toml](../../pyproject.toml).
 
 Maintain this document alongside its source and selected dependencies.
 
-Interpreters #205 selects accepted Core/Operations #1998
+Interpreters #207 selects accepted Core #2005 merge
+`73d87e99bf711ff8a88112ca56c5eee8055ac5b7` and actual Secrets #61 merge
+`7ff1e771874e5963ee840d7148d2d4052278baa1` in the existing test extra.
+Secrets selects actual SDK #63 merge `1657cb91b143931bafcdb32108950d2bbbb66d95`
+and the identical Core archive. Core's new private declaration-compatibility
+relation serves controller selection/planning; consumed selection, grant,
+request, receipt and receiver contracts are unchanged. SDK and Secrets runtime
+source are unchanged. Exact gate and installed-owner expectations advance with
+the metadata; runtime code, extras, test-only Servers fixture, gate and provider
+opt-in remain unchanged. The ordinary pinned owning gate must prove compatibility
+and its existing Docker witnesses through final cleanup. Only the actual
+accepted Interpreters merge feeds Servers #254; no live acceptance follows here.
+
+Historical Interpreters #205 selects accepted Core/Operations #1998
 `9861e536e79314005499ae07379f627bfb1599a2` and actual Secrets #59 merge
 `165a7dc7abd75e1ba50b9494d0f0aabf0aa3c33c` in the existing test extra.
 Secrets selects SDK #61 merge `d4e7c4d91c054f139e2971774ae5e37fc741262d`

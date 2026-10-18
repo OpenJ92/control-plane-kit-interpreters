@@ -1,6 +1,13 @@
 # Exact metadata and resolution (#190)
 
-Current Interpreters #205 dependency adoption selects Core/Operations #1998 merge
+Current Interpreters #207 dependency adoption selects Core #2005 merge
+`73d87e99bf711ff8a88112ca56c5eee8055ac5b7`. Its private declaration relation
+and controller selection/planning changes leave consumed metadata/grant
+contracts unchanged. This adapter's validation, exact-version resolution,
+bounded errors and no-retry behavior are unchanged; the ordinary owning gate
+must establish dependency compatibility.
+
+Historical Interpreters #205 dependency adoption selects Core/Operations #1998 merge
 `9861e536e79314005499ae07379f627bfb1599a2`. Only the Core managed-update
 compiler changes; the metadata/grant contracts and this implementation remain
 unchanged. The original #190 source and evidence below retain their coordinates.
