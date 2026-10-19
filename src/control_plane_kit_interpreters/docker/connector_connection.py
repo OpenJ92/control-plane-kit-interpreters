@@ -24,6 +24,7 @@ from control_plane_kit_core.secret_installation import (
     SecretInstallationReceipt, secret_installation_correlation_for_request,
     secret_material_selection_fingerprint,
 )
+from control_plane_kit_core.secret_selections import SecretVersionSelection
 from control_plane_kit_core.secrets import SecretFileDelivery, SecretFileMode, SecretUseIntent
 from control_plane_kit_core.topology.changes import FieldSubject, ModifiedChange, StructuralField
 from control_plane_kit_core.topology.diff import diff_graphs
@@ -144,7 +145,7 @@ class DockerConnectorConnectionObserver:
         delivery.__post_init__()
         selections = tuple(selection for selection in material.secret_selections
             if selection.reference == delivery.reference and selection.intent == delivery.intent)
-        if len(selections) != 1:
+        if len(selections) != 1 or type(selections[0]) is not SecretVersionSelection:
             raise ValueError
         return mode, resolved, delivery
 
