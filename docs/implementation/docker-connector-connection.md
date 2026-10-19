@@ -1,5 +1,43 @@
 # Native connection observation (#167)
 
+## Descriptor-based shape query (#148 target checkpoint)
+
+The approved follow-on interface is `qualify_shape(activity_id=..., plan=...,
+current=..., desired=..., product_document=..., authority_ref=...)` on the
+existing observer. It returns the existing qualification mode or `None` without
+effects, material construction, time reads or authority grants. The current
+checkpoint contains new-law targets and an explicit unimplemented stub;
+target review and causal-red evidence are pending. Existing 30 connector test
+methods and full-material/observation source remain unchanged.
+
+The real Core descriptor bytes must canonically decode and match the supplied
+product before deriving the trusted reference and checking graph metadata and
+image. Empty descriptor/node deliveries are a symbolic generated-token
+obligation only for the exact supported ingress/plan relation. An explicitly
+authored file can match an empty declaration or the same static file slot with
+its own instance reference. Descriptor-only delivery is conservatively
+unsupported, even where later owner-projected full material could qualify.
+The full-to-shape coherence law applies only inside this declared supported
+domain. No fake reference/version or duplicated Operations resolver is allowed.
+
+The query reuses Core compilation and observation resolution; its narrow
+fresh/content-update restriction is a Docker capability, not generic topology
+validity. Operations retains producer/consumer effects, durable versions,
+current authority and installation provenance. Other interpreters can query the
+same Core intent with their own explicit supported/refused profiles; provider
+parity and host provisioning are not implied. The authored graph stays unchanged.
+
+Managed receiver environment/artifacts and new launch/mount profiles remain
+unsupported in this leaf. Strict selected-version and retained-proof checks,
+C-label/REUSED-A UNKNOWN, bounded passive observations and all existing reader-v1
+guards remain governing laws. Servers #181 owns future composition; Rowan's
+#188 product declaration/profile work is separate from this query.
+
+Plan: [approved interface](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/148#issuecomment-6278254403),
+[language/ownership note](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/148#issuecomment-6278263216),
+[coherence-domain correction](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/148#issuecomment-6278292316),
+[Kepler PLAN PASS](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/148#issuecomment-6278299447).
+
 ## Retained observation (#148)
 
 The reviewed #148 slice adds a pure `qualify` result (`FRESH`,

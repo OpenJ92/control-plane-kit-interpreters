@@ -83,6 +83,11 @@ class DockerConnectorConnectionObserver:
         except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
             return None
 
+    def qualify_shape(self, *, activity_id, plan, current, desired,
+                      product_document, authority_ref) -> ConnectorConnectionQualification | None:
+        """Query declared capability without resolving material or granting authority."""
+        raise NotImplementedError("descriptor-based connector shape qualification")
+
     def _qualify(self, *, activity_id, plan, current, desired, material, authority_ref):
         if (type(activity_id) is not ActivityId or type(plan) is not ActivityPlan
                 or type(material) is not RuntimeProductMaterial
