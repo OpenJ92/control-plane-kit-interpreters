@@ -32,6 +32,11 @@ class ConnectorConnectionOutcome(StrEnum):
     REFUSED = "refused"
 
 
+class ConnectorConnectionQualification(StrEnum):
+    FRESH = "fresh"
+    RETAINED_CONTENT_UPDATE = "retained_content_update"
+
+
 @dataclass(frozen=True, slots=True)
 class ConnectorConnectionObservation:
     outcome: ConnectorConnectionOutcome
@@ -56,7 +61,13 @@ class DockerConnectorConnectionObserver:
                 or type(self.image_reference) is not str or not callable(self.clock)):
             raise TypeError("native connection observer configuration is invalid")
 
-    def observe(self, request, *, plan, current, desired):
+    def qualify(self, *, activity_id, plan, current, desired, material, authority_ref):
+        raise NotImplementedError("native connection qualification is not implemented")
+
+    def observe(self, request, *, plan, current, desired,
+                installation_request=None, installation_receipt=None):
+        if installation_request is not None or installation_receipt is not None:
+            raise NotImplementedError("retained native installation observation is not implemented")
         try:
             if type(request) is not RuntimeEffectRequest or type(plan) is not ActivityPlan:
                 raise ValueError
