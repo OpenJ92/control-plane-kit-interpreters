@@ -1,17 +1,18 @@
 """#148 new-law query targets over Core values, without an Operations emulator."""
 from dataclasses import replace
+import json
 import unittest
 
 import control_plane_kit_core as core
 from control_plane_kit_core.configuration import ConfigurationArtifact, ConfigurationMediaType
 from control_plane_kit_core.environment import PublicStaticEnvironmentBinding
 from control_plane_kit_core.lifecycle import ResourceLifecycle
-from control_plane_kit_core.planning import ActivityId, ActivityPlan
+from control_plane_kit_core.planning import ActivityId, ActivityPlan, ActivityPlanDescriptorCodec
 from control_plane_kit_core.products import ProductDescriptorCodec, ProductReference, RetainedDataMount
 from control_plane_kit_core.runtime_authority import RuntimeAuthorityAccessDelivery, RuntimeAuthorityAccessDeliveryKind
 from control_plane_kit_core.secrets import SecretEnvironmentDelivery, SecretFilePathBinding, SecretReference, SecretUseIntent
 from control_plane_kit_core.secret_selections import SecretVersionSelection, UnselectedSecretUse, author_secret_selections
-from control_plane_kit_core.topology import validate_graph
+from control_plane_kit_core.topology import DEFAULT_GRAPH_CODEC, validate_graph
 from control_plane_kit_interpreters.docker.connector_connection import (
     ConnectorConnectionQualification, DockerConnectorConnectionObserver,
 )
@@ -51,6 +52,13 @@ def shape_world(world_type=World):
     return world, bind_document(world)
 
 
+def declared_snapshot(world, document):
+    return (json.dumps(DEFAULT_GRAPH_CODEC.encode(world.current.graph), sort_keys=True),
+        json.dumps(DEFAULT_GRAPH_CODEC.encode(world.desired.graph), sort_keys=True),
+        json.dumps(ActivityPlanDescriptorCodec().encode(world.plan), sort_keys=True),
+        ProductDescriptorCodec().encode_document(document.product).content, document.content)
+
+
 class ConnectorShapeQualificationTests(unittest.TestCase):
     def observer(self, world, **changes):
         def no_clock():
@@ -85,10 +93,10 @@ class ConnectorShapeQualificationTests(unittest.TestCase):
                 node = world.desired.graph.nodes["connector"]
                 self.assertEqual(node.secret_deliveries, ())
                 self.assertEqual(node.secret_selections, ())
-                before = (world.current, world.desired, world.plan, document)
+                before = declared_snapshot(world, document)
                 self.assertIs(self.shape(world, document), expected)
                 self.assertIs(self.shape(world, document), expected)
-                self.assertEqual((world.current, world.desired, world.plan, document), before)
+                self.assertEqual(declared_snapshot(world, document), before)
 
     def test_canonical_document_content_and_product_must_agree(self):
         for case in ("type", "noncanonical", "malformed", "oversized", "foreign-product"):
