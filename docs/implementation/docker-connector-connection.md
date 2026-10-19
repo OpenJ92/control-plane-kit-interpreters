@@ -1,12 +1,13 @@
 # Native connection observation (#167)
 
-## Retained extension target contract (#148)
+## Retained observation (#148)
 
 The reviewed #148 slice adds a pure `qualify` result (`FRESH`,
 `RETAINED_CONTENT_UPDATE`, or `None`) and paired optional
 `installation_request` / `installation_receipt` arguments to `observe`.
-At this target checkpoint these new entry points are explicit missing-behavior
-scaffolds; the contract below is not implementation, image or live evidence.
+The implementation shares pure graph/material qualification between preflight
+and observation; retained dispatch separately validates the installation proof.
+Source review and owning-green evidence are pending at this source checkpoint.
 
 Qualification takes the actual plan activity, validated graph pair, selected
 Core product material and current runtime authority reference. It performs no
@@ -41,7 +42,12 @@ initialization. The fixture models actual Core values and recording provider
 reads, without reproducing the Operations ledger or lifecycle.
 
 Plan review: [Kepler PASS](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/148#issuecomment-6276358825).
-Target review and owning Docker red/green evidence remain pending. Servers #181
+Target review passed at `608c526`; [causal-red review passed](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/148#issuecomment-6276624788)
+after 529 package tests produced only the 67 explicit missing-behavior errors
+(28 qualification, 39 retained observation), with 26 policy tests green. The
+earlier `549d671` attempt had a fixture import error and is not causal-red
+evidence. Assertions behind the scaffolds still require owning-green validation.
+Servers #181
 owns the native-port adapter, witness unwrapping, compatible pin selection and
 process activation. Whole #148 still includes separate legacy-helper retirement;
 product qualification and live #225 are not released by this slice.
@@ -60,8 +66,10 @@ result = observer.observe(original_request, plan=plan, current=current, desired=
 The composition-owned product reference/image binding identifies reviewed reader
 code. This first profile supports fresh desired-side resources, one tunnel file
 delivery under Core's protected secret namespace with TUNNEL_TOKEN_FILE binding,
-and the exact derived readonly volume. It refuses base/retained resources and
-environment token delivery. Source availability is not image publication or live
+and the exact derived readonly volume. Fresh observation refuses retained
+resources; only the bounded retained-content profile above can admit them with
+installation proof. Both profiles refuse base-side observation and environment
+token delivery. Source availability is not image publication or live
 adoption. Default dispatch and signed management observer guards are unchanged.
 
 Selection uses Core's actual compiler/resolver and existing Docker ownership/name
