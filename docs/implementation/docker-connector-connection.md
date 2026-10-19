@@ -1,5 +1,57 @@
 # Native connection observation (#167)
 
+## Retained observation (#148)
+
+The reviewed #148 slice adds a pure `qualify` result (`FRESH`,
+`RETAINED_CONTENT_UPDATE`, or `None`) and paired optional
+`installation_request` / `installation_receipt` arguments to `observe`.
+The implementation shares pure graph/material qualification between preflight
+and observation; retained dispatch separately validates the installation proof.
+Source review and owning-green evidence are pending at this source checkpoint.
+
+Qualification takes the actual plan activity, validated graph pair, selected
+Core product material and current runtime authority reference. It performs no
+Docker or clock read and needs no effect identity or installation witness.
+Retained observation separately requires the original Core installation request
+and exact typed `SecretInstallationReceipt`, correlated by Core's request and
+secret-selection fingerprints. The caller remains responsible for trusted
+durable provenance and current execution authority. Historical authority
+references never supply current credentials or authority.
+
+The retained graph relation is deliberately narrow: one public JSON application
+file changes content, its receiver configuration and all other graph values stay
+unchanged, and the actual Core managed-update compiler returns the exact ready
+plan. The changed workload must belong to the observed runtime and must not be
+the gateway or connector. Image, secret, verifier, declaration, topology,
+multi-file and path changes do not qualify. This capability predicate does not
+replace Core planning or Operations admission.
+
+The current observation B returns B's effect/activity identity while checking
+the original installation A's owned name, labels and selected readonly volume.
+The inspected immutable container ID must match A's receipt commitment. Existing
+launch, image, mount, newest-sample, nanosecond freshness, final reinspection,
+redaction and three-read/no-retry laws remain mandatory.
+
+A is a receipt-correlated installation request, not necessarily a birth-label
+origin. A real REUSED reconciliation can retain an earlier creation C's labels.
+This slice returns `UNKNOWN` after the first container read for C-label/A-receipt
+evidence even when the immutable ID matches. It does not normalize labels,
+search a provenance chain or guarantee success for every valid REUSED receipt.
+Missing/malformed/mismatched supplied proof instead refuses before lazy SDK
+initialization. The fixture models actual Core values and recording provider
+reads, without reproducing the Operations ledger or lifecycle.
+
+Plan review: [Kepler PASS](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/148#issuecomment-6276358825).
+Target review passed at `608c526`; [causal-red review passed](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/148#issuecomment-6276624788)
+after 529 package tests produced only the 67 explicit missing-behavior errors
+(28 qualification, 39 retained observation), with 26 policy tests green. The
+earlier `549d671` attempt had a fixture import error and is not causal-red
+evidence. Assertions behind the scaffolds still require owning-green validation.
+Servers #181
+owns the native-port adapter, witness unwrapping, compatible pin selection and
+process activation. Whole #148 still includes separate legacy-helper retirement;
+product qualification and live #225 are not released by this slice.
+
 This opt-in reader-v1 adapter consumes a product-owned Docker health sample.
 Operations must supply the original admitted request, exact plan and validated
 graph pair, and independently recheck current actor/runtime authority and worker
@@ -14,8 +66,10 @@ result = observer.observe(original_request, plan=plan, current=current, desired=
 The composition-owned product reference/image binding identifies reviewed reader
 code. This first profile supports fresh desired-side resources, one tunnel file
 delivery under Core's protected secret namespace with TUNNEL_TOKEN_FILE binding,
-and the exact derived readonly volume. It refuses base/retained resources and
-environment token delivery. Source availability is not image publication or live
+and the exact derived readonly volume. Fresh observation refuses retained
+resources; only the bounded retained-content profile above can admit them with
+installation proof. Both profiles refuse base-side observation and environment
+token delivery. Source availability is not image publication or live
 adoption. Default dispatch and signed management observer guards are unchanged.
 
 Selection uses Core's actual compiler/resolver and existing Docker ownership/name

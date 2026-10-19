@@ -6,14 +6,14 @@ import json
 import unittest
 
 import control_plane_kit_core as core
-from control_plane_kit_core.planning import ActivityId, ActivityPlan, PlannedActivity, StartRuntime
+from control_plane_kit_core.planning import ActivityId, ActivityPlan, PlannedActivity, StartNode, StartRuntime
 from control_plane_kit_core.lifecycle import ResourceLifecycle
 from control_plane_kit_core.secrets import SecretEnvironmentDelivery, SecretUseIntent
 from control_plane_kit_core.secret_selections import SecretVersionSelection
 from control_plane_kit_core.topology import validate_graph
 from control_plane_kit_core.types import RuntimeKind
 from control_plane_kit_interpreters.docker import connector_connection as module
-from docker_connector_fixtures import World, sample, CONTAINER_ID, NATIVE_ID, IMAGE_ID
+from docker_connector_fixtures import World, RetainedWorld, sample, CONTAINER_ID, NATIVE_ID, IMAGE_ID
 
 
 class DockerConnectorConnectionTests(unittest.TestCase):
@@ -308,3 +308,294 @@ class DockerConnectorConnectionTests(unittest.TestCase):
         world.error = RuntimeError("PRIVATE-CANDIDATE credential error")
         self.assert_outcome(world, "unknown")
         self.assertEqual(world.api.calls, [("container", world.name)])
+
+
+class RetainedConnectorConnectionTests(unittest.TestCase):
+    """#148 new-law admission and strengthened existing passive-reader laws."""
+
+    assert_outcome = DockerConnectorConnectionTests.assert_outcome
+
+    def qualify(self, world, **changes):
+        def no_clock():
+            raise AssertionError("qualification must not read time")
+        options = dict(activity_id=world.request.activity_id, plan=world.plan,
+            current=world.current, desired=world.desired, material=world.material,
+            authority_ref=world.request.authority_ref)
+        options.update(changes)
+        return module.DockerConnectorConnectionObserver(world.client, world.reference,
+            world.material.product.image.execution_reference, no_clock).qualify(**options)
+
+    def test_qualification_is_pure_and_does_not_substitute_for_installation_proof(self):
+        for world_type, mode in ((World, module.ConnectorConnectionQualification.FRESH),
+                (RetainedWorld, module.ConnectorConnectionQualification.RETAINED_CONTENT_UPDATE)):
+            with self.subTest(mode=mode):
+                world = world_type(lazy=True)
+                self.assertIs(self.qualify(world), mode)
+                self.assertEqual(world.initializations + world.api.calls, [])
+        world = RetainedWorld(lazy=True)
+        result = self.assert_outcome(world, "refused", installation_request=None, installation_receipt=None)
+        self.assertIsNone(result.effect_id)
+        self.assertIsNone(result.activity_id)
+        self.assertEqual(world.initializations + world.api.calls, [])
+
+    def test_qualification_checks_actual_plan_material_and_current_authority(self):
+        for world_type in (World, RetainedWorld):
+            for case in ("activity", "plan", "authority", "material", "image", "graph"):
+                with self.subTest(world=world_type.__name__, case=case):
+                    world = world_type(lazy=True)
+                    changes = {}
+                    if case == "activity": changes["activity_id"] = ActivityId("missing")
+                    elif case == "plan": changes["plan"] = ActivityPlan(())
+                    elif case == "authority": changes["authority_ref"] = replace(world.request.authority_ref, reference_id="foreign")
+                    elif case == "material": changes["material"] = replace(world.material, node_id="foreign")
+                    elif case == "image": changes["material"] = replace(world.material,
+                        product=replace(world.material.product, image=replace(world.material.product.image, digest="sha256:" + "f" * 64)))
+                    else: changes["desired"] = world.current
+                    self.assertIsNone(self.qualify(world, **changes))
+                    self.assertEqual(world.initializations + world.api.calls, [])
+
+    def test_unselected_token_does_not_qualify_for_either_profile(self):
+        from control_plane_kit_core.secret_selections import UnselectedSecretUse
+        for world_type in (World, RetainedWorld):
+            with self.subTest(world=world_type.__name__):
+                world = world_type(lazy=True)
+                material = replace(world.material, secret_selections=(
+                    UnselectedSecretUse(world.file.reference, world.file.intent),))
+                self.assertIsNone(self.qualify(world, material=material))
+                self.assertEqual(world.initializations + world.api.calls, [])
+
+    def test_unselected_token_observation_refuses_before_lazy_io(self):
+        from control_plane_kit_core.secret_selections import UnselectedSecretUse
+        for world_type in (World, RetainedWorld):
+            with self.subTest(world=world_type.__name__):
+                world = world_type(lazy=True)
+                material = replace(world.material, secret_selections=(
+                    UnselectedSecretUse(world.file.reference, world.file.intent),))
+                request = replace(world.request, products=(material,))
+                result = self.assert_outcome(world, "refused", request=request)
+                self.assertIsNone(result.effect_id)
+                self.assertEqual(world.initializations + world.api.calls, [])
+
+    def test_retained_observation_uses_installation_labels_and_returns_current_correlation(self):
+        from control_plane_kit_core.secret_installation import SecretInstallationDisposition
+        for reconcile, disposition in ((False, SecretInstallationDisposition.CREATED),
+                (True, SecretInstallationDisposition.CREATED), (True, SecretInstallationDisposition.REPLACED)):
+            for outcome in ("connected", "disconnected", "unknown"):
+                with self.subTest(reconcile=reconcile, disposition=disposition, outcome=outcome):
+                    world = RetainedWorld(reconcile=reconcile)
+                    world.install_receipt(disposition=disposition)
+                    world.mutate("State", "Health", {"Status": "healthy", "Log": [sample(), sample(outcome)]})
+                    self.assertNotEqual(world.installation_request.source.plan_id, world.request.source.plan_id)
+                    self.assertNotEqual(world.installation_request.effect_id, world.request.effect_id)
+                    result = self.assert_outcome(world, outcome)
+                    self.assertEqual((result.effect_id, result.activity_id),
+                        (world.request.effect_id, world.request.activity_id.value))
+                    self.assertEqual(world.api.calls, [("container", world.name),
+                        ("image", world.material.product.image.execution_reference), ("container", CONTAINER_ID)])
+                    if outcome != "unknown":
+                        self.assertEqual(result.container_id, CONTAINER_ID)
+
+    def test_historical_authority_reference_does_not_supply_current_authority(self):
+        world = RetainedWorld()
+        world.installation_request = replace(world.installation_request,
+            authority_ref=replace(world.installation_request.authority_ref, reference_id="historical-authority"))
+        world.install_receipt()
+        self.assert_outcome(world, "connected")
+        world = RetainedWorld(lazy=True)
+        self.assert_outcome(world, "refused", request=replace(world.request,
+            authority_ref=replace(world.request.authority_ref, reference_id="foreign-current")))
+        self.assertEqual(world.initializations + world.api.calls, [])
+
+    def test_reused_installation_with_earlier_creation_labels_is_unknown(self):
+        from control_plane_kit_core.secret_installation import SecretInstallationDisposition
+        from control_plane_kit_interpreters.docker.runtime import _node_labels
+        world = RetainedWorld(reconcile=True)
+        # Actual fingerprint-equal reconciliation preserves C's labels, while
+        # the accepted REUSED receipt commits A and that same immutable ID.
+        creation = replace(world.installation_request, operation=StartNode(world.installation_request.operation.target),
+            source=replace(world.installation_request.source,
+            plan_id="earlier-creation-c", desired_graph_id="graph-c"))
+        for container in world.containers:
+            container["Config"]["Labels"] = _node_labels(creation, world.material)
+        world.install_receipt(disposition=SecretInstallationDisposition.REUSED)
+        self.assertEqual(world.installation_receipt.prior_realization_fingerprint,
+            world.installation_receipt.current_realization_fingerprint)
+        self.assert_outcome(world, "unknown")
+        self.assertEqual(world.api.calls, [("container", world.name)])
+
+    def test_missing_half_foreign_or_mismatched_proof_refuses_before_lazy_io(self):
+        from control_plane_kit_core.configuration_installation import ConfigurationInstallationReceipt
+        from control_plane_kit_core.secret_installation import SecretInstallationReceipt
+        for case in ("none", "request-only", "receipt-only", "wrong-request", "generic-receipt",
+                "request-fingerprint", "selection-fingerprint", "malformed-receipt", "workspace",
+                "runtime", "node", "product", "image", "version", "runtime-kind", "grants", "authority-deliveries",
+                "observation-as-installation"):
+            with self.subTest(case=case):
+                world = RetainedWorld(lazy=True)
+                original, receipt = world.installation_request, world.installation_receipt
+                if case == "none": original, receipt = None, None
+                elif case == "request-only": receipt = None
+                elif case == "receipt-only": original = None
+                elif case == "wrong-request": original = object()
+                elif case == "observation-as-installation": original = world.request
+                elif case == "generic-receipt": receipt = ConfigurationInstallationReceipt(
+                    receipt.request_fingerprint, receipt.selection_fingerprint, receipt.disposition,
+                    receipt.prior_realization_fingerprint, receipt.current_realization_fingerprint)
+                elif case == "request-fingerprint": receipt = replace(receipt, request_fingerprint="f" * 64)
+                elif case == "selection-fingerprint": receipt = replace(receipt, selection_fingerprint="f" * 64)
+                elif case == "malformed-receipt":
+                    receipt = deepcopy(receipt)
+                    object.__setattr__(receipt, "current_realization_fingerprint", "PRIVATE-CANDIDATE")
+                    self.assertIs(type(receipt), SecretInstallationReceipt)
+                else:
+                    if case == "workspace": original = replace(original, source=replace(original.source, workspace_id="foreign"))
+                    elif case == "runtime-kind": original = replace(original, runtime_kind=RuntimeKind.KUBERNETES)
+                    elif case in ("grants", "authority-deliveries"):
+                        original = deepcopy(original)
+                        field = "secret_resolution_grants" if case == "grants" else "authority_deliveries"
+                        object.__setattr__(original, field, ("PRIVATE-CANDIDATE",))
+                    else:
+                        material = world.material
+                        if case in ("runtime", "node"):
+                            material = replace(material, **{case + "_id": "foreign"})
+                            if case == "node": original = replace(original,
+                                operation=replace(original.operation, target=replace(original.operation.target, node_id="foreign")),
+                                products=(material,))
+                        elif case == "product": material = replace(material,
+                            reference=replace(material.reference, descriptor_sha256=replace(material.reference.descriptor_sha256, value="f" * 64)))
+                        elif case == "image": material = replace(material,
+                            product=replace(material.product, image=replace(material.product.image, digest="sha256:" + "f" * 64)))
+                        else: material = replace(material, secret_selections=(replace(material.secret_selections[0], version_id="foreign-version"),))
+                        original = replace(original, products=(material,))
+                    if case not in ("grants", "authority-deliveries"):
+                        world.installation_request = original
+                        world.install_receipt()
+                        receipt = world.installation_receipt
+                result = self.assert_outcome(world, "refused", installation_request=original, installation_receipt=receipt)
+                self.assertIsNone(result.effect_id)
+                self.assertIsNone(result.activity_id)
+                self.assertEqual(world.initializations + world.api.calls, [])
+
+    def test_fresh_observation_refuses_unexpected_installation_pair(self):
+        installation = RetainedWorld()
+        world = World(lazy=True)
+        self.assert_outcome(world, "refused", installation_request=installation.installation_request,
+            installation_receipt=installation.installation_receipt)
+        self.assertEqual(world.initializations + world.api.calls, [])
+
+    def test_receipt_incarnation_must_match_even_with_exact_owned_name_and_labels(self):
+        for case in ("different-container", "different-receipt", "malformed-provider-id"):
+            with self.subTest(case=case):
+                world = RetainedWorld()
+                if case == "different-receipt": world.install_receipt(container_id="f" * 64)
+                else:
+                    for container in world.containers:
+                        container["Id"] = "f" * 64 if case == "different-container" else "PRIVATE-CANDIDATE"
+                self.assert_outcome(world, "unknown")
+                self.assertEqual(world.api.calls, [("container", world.name)])
+
+    def test_retained_provider_evidence_preserves_bounded_failure_and_freshness_laws(self):
+        for case, calls in (("launch", 2), ("mount", 1), ("stale", 1), ("future-nanosecond", 1),
+                ("final-id", 3), ("final-new-sample", 3), ("provider-error", 1)):
+            with self.subTest(case=case):
+                world = RetainedWorld()
+                if case == "launch":
+                    world.mutate("Config", "Cmd", ["PRIVATE-CANDIDATE"])
+                    for container in world.containers:
+                        container["Args"] = container["Config"]["Entrypoint"][1:] + container["Config"]["Cmd"]
+                elif case == "mount":
+                    for container in world.containers: container["Mounts"][0]["RW"] = True
+                elif case == "stale": world.now += timedelta(seconds=11)
+                elif case == "future-nanosecond": world.mutate("State", "Health", {"Log": [sample(end="2026-09-24T12:00:02.000000001Z")]})
+                elif case == "final-id": world.containers[1]["Id"] = "f" * 64
+                elif case == "final-new-sample": world.containers[1]["State"]["Health"]["Log"].append(sample("disconnected"))
+                else: world.error = RuntimeError("PRIVATE-CANDIDATE credential error")
+                self.assert_outcome(world, "unknown")
+                self.assertEqual(len(world.api.calls), calls)
+
+    def test_other_graph_and_artifact_changes_are_outside_closed_content_profile(self):
+        for case in ("no-change", "path", "two-files", "wrapper", "declaration", "other-runtime", "gateway", "connector", "add-node", "remove-node", "graph-name"):
+            with self.subTest(case=case):
+                world = RetainedWorld(lazy=True)
+                before = world.current.graph.nodes["workload"]
+                after = world.desired.graph.nodes["workload"]
+                wrapper, app = before.configuration_artifacts
+                if case == "no-change": world.desired = world.current
+                elif case == "path": world.desired = validate_graph(world.current.graph.update_node(replace(before,
+                    configuration_artifacts=(wrapper, replace(app, target_path="/etc/application/other.json")))))
+                elif case == "two-files":
+                    second = replace(app, artifact_id="second", target_path="/etc/application/second.json")
+                    world.current = validate_graph(world.current.graph.update_node(replace(before,
+                        configuration_artifacts=before.configuration_artifacts + (second,))))
+                    world.desired = validate_graph(world.desired.graph.update_node(replace(after,
+                        configuration_artifacts=after.configuration_artifacts + (replace(second, content='{"mode":"new"}', source_digest=None),))))
+                elif case == "wrapper": world.desired = validate_graph(world.current.graph.update_node(replace(before,
+                    configuration_artifacts=(replace(wrapper, content=wrapper.content + "\n", source_digest=None), app))))
+                elif case == "declaration":
+                    surface = replace(world.receiver.declaration.surface, health_reads=(core.NodeHealthReadKind.LIVENESS,))
+                    configured = replace(world.receiver, declaration=replace(world.receiver.declaration, surface=surface))
+                    changed_wrapper = replace(wrapper,
+                        content=core.ReceiverNodeControlConfigurationCodec().encode_bytes(configured).decode(), source_digest=None)
+                    world.desired = validate_graph(world.current.graph.update_node(replace(before,
+                        block_spec=replace(before.block_spec, control_surfaces=(surface,)),
+                        configuration_artifacts=(changed_wrapper, app))))
+                elif case == "other-runtime":
+                    from control_plane_kit_core.topology import RuntimeRecord
+                    pair = []
+                    for value in (world.current, world.desired):
+                        graph = value.graph
+                        node = replace(graph.nodes["workload"], runtime_id="other")
+                        configured = replace(world.receiver, target=replace(world.receiver.target,
+                            runtime_id=replace(world.receiver.target.runtime_id, value="other")))
+                        node = replace(node, configuration_artifacts=(replace(wrapper,
+                            content=core.ReceiverNodeControlConfigurationCodec().encode_bytes(configured).decode(), source_digest=None),
+                            node.configuration_artifacts[1]))
+                        pair.append(validate_graph(replace(graph, nodes={**graph.nodes, "workload": node}, runtimes={
+                            "docker": replace(graph.runtimes["docker"], children=("gateway", "connector")),
+                            "other": RuntimeRecord("other", RuntimeKind.DOCKER, ("workload",))})))
+                    world.current, world.desired = pair
+                elif case in ("gateway", "connector"):
+                    node = world.desired.graph.nodes[case]
+                    world.desired = validate_graph(world.desired.graph.update_node(replace(node, metadata={**node.metadata, "changed": "yes"})))
+                elif case in ("add-node", "remove-node"):
+                    graph = world.current.graph if case == "add-node" else world.desired.graph
+                    reduced = replace(graph, nodes={key:value for key, value in graph.nodes.items() if key != "workload"},
+                        runtimes={"docker": replace(graph.runtimes["docker"], children=("gateway", "connector"))})
+                    if case == "add-node": world.current = validate_graph(reduced)
+                    else: world.desired = validate_graph(reduced)
+                else: world.desired = validate_graph(replace(world.desired.graph, name="other"))
+                world.recompile_retained(require_ready=False)
+                self.assertIsNone(self.qualify(world))
+                self.assert_outcome(world, "refused")
+                self.assertEqual(world.initializations + world.api.calls, [])
+
+    def test_ready_image_secret_and_verifier_plans_do_not_qualify_as_content_updates(self):
+        from control_plane_kit_core.secrets import SecretReference
+        for case in ("image", "secret", "verifier"):
+            with self.subTest(case=case):
+                world = RetainedWorld(lazy=True)
+                before = world.current.graph.nodes["workload"]
+                if case == "image":
+                    before = replace(before, metadata={"product_identity": "fixture/workload/1",
+                        "product_descriptor_digest": "a" * 64, "oci_image": "ghcr.io/fixture/workload@sha256:" + "a" * 64})
+                    after = replace(before, metadata={"product_identity": "fixture/workload/2",
+                        "product_descriptor_digest": "b" * 64, "oci_image": "ghcr.io/fixture/workload@sha256:" + "b" * 64})
+                elif case == "secret":
+                    delivery = SecretEnvironmentDelivery("APPLICATION_TOKEN", SecretReference("secret://fixture/application"),
+                        SecretUseIntent.APPLICATION_CONTROL_TOKEN)
+                    selection = SecretVersionSelection(delivery.reference, delivery.intent, "version-one")
+                    before = replace(before, secret_deliveries=(delivery,), secret_selections=(selection,))
+                    after = replace(before, secret_selections=(replace(selection, version_id="version-two"),))
+                else:
+                    wrapper, app = before.configuration_artifacts
+                    configured = replace(world.receiver, verifiers=tuple(replace(value, issuer=value.issuer + "-new")
+                        for value in world.receiver.verifiers))
+                    content = core.ReceiverNodeControlConfigurationCodec().encode_bytes(configured).decode()
+                    after = replace(before, configuration_artifacts=(replace(wrapper, content=content, source_digest=None), app))
+                world.current = validate_graph(world.current.graph.update_node(before))
+                world.desired = validate_graph(world.current.graph.update_node(after))
+                world.recompile_retained()
+                self.assertTrue(world.plan.ready_for_execution)
+                self.assertIsNone(self.qualify(world))
+                self.assert_outcome(world, "refused")
+                self.assertEqual(world.initializations + world.api.calls, [])

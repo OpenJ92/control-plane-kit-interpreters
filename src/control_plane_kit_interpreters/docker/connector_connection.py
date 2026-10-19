@@ -2,7 +2,7 @@
 
 Construction is not admission. Operations owns current authority and folding.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 import json
@@ -10,15 +10,27 @@ import re
 from typing import Callable
 from uuid import UUID
 
+from control_plane_kit_core.configuration import ConfigurationMediaType
 from control_plane_kit_core.planning import (
-    ActivityPlan, ManagementBootstrapStage, ObserveManagementBootstrap,
+    ActivityId, ActivityPlan, ManagementBootstrapStage, ObserveManagementBootstrap,
     PlanGraphSide, resolve_management_observation, compile_graph_activity_plan,
-    AllocatePublicIngress, StartNode, StartRuntime,
+    compile_managed_update_activity_plan, AllocatePublicIngress, StartNode, StartRuntime,
 )
 from control_plane_kit_core.products import ProductReference
-from control_plane_kit_core.runtime_effects import RuntimeEffectRequest
+from control_plane_kit_core.receiver_configuration import select_receiver_node_control_configuration_artifact
+from control_plane_kit_core.runtime_authority import RuntimeAuthorityReference
+from control_plane_kit_core.runtime_effects import RuntimeEffectRequest, RuntimeProductMaterial
+from control_plane_kit_core.secret_installation import (
+    SecretInstallationReceipt, secret_installation_correlation_for_request,
+    secret_material_selection_fingerprint,
+)
+from control_plane_kit_core.secret_selections import SecretVersionSelection
 from control_plane_kit_core.secrets import SecretFileDelivery, SecretFileMode, SecretUseIntent
+from control_plane_kit_core.topology.changes import FieldSubject, ModifiedChange, StructuralField
+from control_plane_kit_core.topology.diff import diff_graphs
+from control_plane_kit_core.topology.validation import NodeSubject
 from control_plane_kit_core.types import RuntimeKind
+from control_plane_kit_interpreters.docker.configuration import _container_incarnation_fingerprint
 from control_plane_kit_interpreters.docker.runtime import (
     _container_name, _network_name, _node_correlation_labels, _node_labels, _secret_volume_name,
 )
@@ -30,6 +42,11 @@ class ConnectorConnectionOutcome(StrEnum):
     DISCONNECTED = "disconnected"
     UNKNOWN = "unknown"
     REFUSED = "refused"
+
+
+class ConnectorConnectionQualification(StrEnum):
+    FRESH = "fresh"
+    RETAINED_CONTENT_UPDATE = "retained_content_update"
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,28 +73,35 @@ class DockerConnectorConnectionObserver:
                 or type(self.image_reference) is not str or not callable(self.clock)):
             raise TypeError("native connection observer configuration is invalid")
 
-    def observe(self, request, *, plan, current, desired):
+    def qualify(self, *, activity_id, plan, current, desired, material,
+                authority_ref) -> ConnectorConnectionQualification | None:
+        """Pure capability selection, without installation proof or execution authority."""
         try:
-            if type(request) is not RuntimeEffectRequest or type(plan) is not ActivityPlan:
-                raise ValueError
-            request.__post_init__()
-            operation = request.operation
-            if (type(operation) is not ObserveManagementBootstrap
-                    or operation.stage is not ManagementBootstrapStage.CONNECTOR_CONNECTED
-                    or operation.target.graph_side is not PlanGraphSide.DESIRED_GRAPH
-                    or request.runtime_kind is not RuntimeKind.DOCKER or request.authority_ref is None):
-                raise ValueError
-            resolved = resolve_management_observation(operation, current, desired,
-                expected_operation=plan.activity(request.activity_id).operation)
-            runtime_id = operation.target.runtime_id
-            runtime = resolved.selected_graph.graph.runtimes[runtime_id]
-            if (runtime.kind is not RuntimeKind.DOCKER or runtime.authority_ref != request.authority_ref
-                    or runtime_id in current.graph.runtimes):
-                raise ValueError
-            node = resolved.connector_node
-            gateway_id, ingress_id = resolved.gateway_node.node_id, resolved.ingress.ingress_id
-            # Freshness belongs to the complete graph pair and real creation
-            # obligations, not merely a new runtime ID or the observation pin.
+            mode, _, _ = self._qualify(activity_id=activity_id, plan=plan, current=current,
+                desired=desired, material=material, authority_ref=authority_ref)
+            return mode
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+            return None
+
+    def _qualify(self, *, activity_id, plan, current, desired, material, authority_ref):
+        if (type(activity_id) is not ActivityId or type(plan) is not ActivityPlan
+                or type(material) is not RuntimeProductMaterial
+                or type(authority_ref) is not RuntimeAuthorityReference):
+            raise ValueError
+        operation = plan.activity(activity_id).operation
+        if (type(operation) is not ObserveManagementBootstrap
+                or operation.stage is not ManagementBootstrapStage.CONNECTOR_CONNECTED
+                or operation.target.graph_side is not PlanGraphSide.DESIRED_GRAPH):
+            raise ValueError
+        resolved = resolve_management_observation(operation, current, desired, expected_operation=operation)
+        runtime_id = operation.target.runtime_id
+        runtime = resolved.selected_graph.graph.runtimes[runtime_id]
+        if runtime.kind is not RuntimeKind.DOCKER or runtime.authority_ref != authority_ref:
+            raise ValueError
+        node = resolved.connector_node
+        gateway_id, ingress_id = resolved.gateway_node.node_id, resolved.ingress.ingress_id
+        if runtime_id not in current.graph.runtimes:
+            # Freshness requires actual creation obligations in the complete pair.
             compiled = compile_graph_activity_plan(current, desired)
             operations = tuple(item.operation for item in compiled.activities)
             if (plan != compiled or not compiled.ready_for_execution
@@ -88,31 +112,67 @@ class DockerConnectorConnectionObserver:
                         for identity in (gateway_id, node.node_id))
                     or not any(type(item) is AllocatePublicIngress and item.target.ingress_id == ingress_id for item in operations)):
                 raise ValueError
+            mode = ConnectorConnectionQualification.FRESH
+        else:
+            compiled = compile_managed_update_activity_plan(current, desired)
+            if (plan != compiled or not compiled.ready_for_execution
+                    or current.graph.runtimes[runtime_id] != runtime
+                    or current.graph.nodes.get(gateway_id) != resolved.gateway_node
+                    or current.graph.nodes.get(node.node_id) != node
+                    or resolved.ingress not in current.graph.public_ingresses
+                    or not _retained_content_change(current, desired, runtime_id, gateway_id, node.node_id)):
+                raise ValueError
+            mode = ConnectorConnectionQualification.RETAINED_CONTENT_UPDATE
+        # Round-trip a detached value rather than normalize caller-owned material.
+        if RuntimeProductMaterial.from_descriptor(material.descriptor()) != material:
+            raise ValueError
+        contract = material.product.runtime_contract
+        if (material.node_id != node.node_id or material.runtime_id != runtime_id
+                or material.reference != self.product_reference
+                or material.product.image.execution_reference != self.image_reference
+                or node.metadata.get("product_identity") != material.reference.identity.key
+                or node.metadata.get("product_descriptor_digest") != material.reference.descriptor_sha256.value
+                or material.public_environment or material.socket_environment
+                or material.runtime_authority_deliveries
+                or contract.public_environment or contract.configuration_artifacts or contract.retained_data_mounts):
+            raise ValueError
+        delivery, = contract.secret_deliveries
+        if (type(delivery) is not SecretFileDelivery
+                or delivery.intent is not SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN
+                or delivery.file_mode is not SecretFileMode.OWNER_READ_ONLY
+                or delivery.path_binding is None or delivery.path_binding.environment_name != "TUNNEL_TOKEN_FILE"):
+            raise ValueError
+        delivery.__post_init__()
+        selections = tuple(selection for selection in material.secret_selections
+            if selection.reference == delivery.reference and selection.intent == delivery.intent)
+        if len(selections) != 1 or type(selections[0]) is not SecretVersionSelection:
+            raise ValueError
+        return mode, resolved, delivery
+
+    def observe(self, request, *, plan, current, desired,
+                installation_request: RuntimeEffectRequest | None = None,
+                installation_receipt: SecretInstallationReceipt | None = None):
+        try:
+            if type(request) is not RuntimeEffectRequest or type(plan) is not ActivityPlan:
+                raise ValueError
+            request.__post_init__()
+            if (request.runtime_kind is not RuntimeKind.DOCKER or request.authority_deliveries
+                    or request.operation != plan.activity(request.activity_id).operation):
+                raise ValueError
             material, = request.products
-            contract = material.product.runtime_contract
-            if (material.node_id != node.node_id or material.runtime_id != runtime_id
-                    or material.reference != self.product_reference
-                    or material.product.image.execution_reference != self.image_reference
-                    or node.metadata.get("product_identity") != material.reference.identity.key
-                    or node.metadata.get("product_descriptor_digest") != material.reference.descriptor_sha256.value
-                    or material.public_environment or material.socket_environment
-                    or material.runtime_authority_deliveries or request.authority_deliveries
-                    or contract.public_environment or contract.configuration_artifacts or contract.retained_data_mounts):
-                raise ValueError
-            delivery, = contract.secret_deliveries
-            if (type(delivery) is not SecretFileDelivery
-                    or delivery.intent is not SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN
-                    or delivery.file_mode is not SecretFileMode.OWNER_READ_ONLY
-                    or delivery.path_binding is None or delivery.path_binding.environment_name != "TUNNEL_TOKEN_FILE"):
-                raise ValueError
-            delivery.__post_init__()
-            selections = tuple(selection for selection in material.secret_selections
-                if selection.reference == delivery.reference and selection.intent == delivery.intent)
-            if len(selections) != 1:
-                raise ValueError
-            expected_name = _container_name(request, node.node_id)
-            expected_labels = _node_correlation_labels(_node_labels(request, material))
-            network = _network_name(request, runtime_id)
+            mode, resolved, delivery = self._qualify(activity_id=request.activity_id, plan=plan,
+                current=current, desired=desired, material=material, authority_ref=request.authority_ref)
+            node = resolved.connector_node
+            origin, incarnation = request, None
+            if mode is ConnectorConnectionQualification.FRESH:
+                if installation_request is not None or installation_receipt is not None:
+                    raise ValueError
+            else:
+                origin = _installation_origin(request, installation_request, installation_receipt)
+                incarnation = installation_receipt.current_realization_fingerprint
+            expected_name = _container_name(origin, node.node_id)
+            expected_labels = _node_correlation_labels(_node_labels(origin, material))
+            network = _network_name(origin, material.runtime_id)
         except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
             return ConnectorConnectionObservation(ConnectorConnectionOutcome.REFUSED)
 
@@ -123,10 +183,12 @@ class DockerConnectorConnectionObserver:
             if (first.name != "/" + expected_name or first.network != network
                     or _node_correlation_labels(dict(first.labels)) != expected_labels):
                 return unknown
+            if incarnation is not None and _container_incarnation_fingerprint(first.container_id) != incarnation:
+                return unknown
             _fresh(first, self.clock())
             image = self.client.inspect_connector_image(self.image_reference, token_path=delivery.target_path)
             mount = DockerSdkSecretMount(delivery.target_path,
-                _secret_volume_name(request, node.node_id, delivery, owner_uid=image.owner_uid))
+                _secret_volume_name(origin, node.node_id, delivery, owner_uid=image.owner_uid))
             _fresh(first, self.clock())
             if (first.image_id != image.image_id or first.launch_digest != image.launch_digest
                     or first.secret_mount != mount):
@@ -146,6 +208,57 @@ class DockerConnectorConnectionObserver:
             # Provider exceptions, candidate values and their hashes never cross
             # the observation boundary. No retries or fallback effects.
             return unknown
+
+
+def _retained_content_change(current, desired, runtime_id, gateway_id, connector_id):
+    """Narrow reader capability over Core's separately validated managed plan."""
+    changes = diff_graphs(current, desired).changes
+    if len(changes) != 1:
+        return False
+    change, = changes
+    if (type(change) is not ModifiedChange or type(change.subject) is not FieldSubject
+            or change.subject.field is not StructuralField.CONFIGURATION_ARTIFACTS
+            or type(change.subject.owner) is not NodeSubject):
+        return False
+    node_id = change.subject.owner.node_id
+    before, after = current.graph.nodes[node_id], desired.graph.nodes[node_id]
+    if (node_id in (gateway_id, connector_id) or after.runtime_id != runtime_id
+            or desired.graph.update_node(replace(after, configuration_artifacts=before.configuration_artifacts)) != current.graph):
+        return False
+    old = {value.artifact_id: value for value in before.configuration_artifacts}
+    new = {value.artifact_id: value for value in after.configuration_artifacts}
+    if old.keys() != new.keys():
+        return False
+    changed = tuple(key for key in old if old[key] != new[key])
+    if len(changed) != 1:
+        return False
+    wrapper = select_receiver_node_control_configuration_artifact(artifacts=before.configuration_artifacts,
+        environment=before.public_environment + before.socket_environment,
+        control_surfaces=before.block_spec.control_surfaces)
+    if changed[0] == wrapper.artifact_id:
+        return False
+    original, successor = old[changed[0]], new[changed[0]]
+    return (original.media_type is ConfigurationMediaType.JSON and original.content != successor.content
+        and replace(successor, content=original.content, source_digest=original.source_digest) == original)
+
+
+def _installation_origin(request, original, receipt):
+    """Check supplied provenance correlation; durable proof belongs to the caller."""
+    if (type(original) is not RuntimeEffectRequest or type(receipt) is not SecretInstallationReceipt
+            or original.runtime_kind is not RuntimeKind.DOCKER
+            or original.secret_resolution_grants != () or original.authority_deliveries != ()):
+        raise ValueError
+    context = secret_installation_correlation_for_request(original)
+    SecretInstallationReceipt.__post_init__(receipt)
+    material, = request.products
+    if (original.products != request.products
+            or (context.source.workspace_id, context.runtime_id, context.node_id) != (
+                request.source.workspace_id, material.runtime_id, material.node_id)
+            or not context.secret_selections
+            or receipt.request_fingerprint != context.request_fingerprint
+            or receipt.selection_fingerprint != secret_material_selection_fingerprint(original)):
+        raise ValueError
+    return original
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)

@@ -9,6 +9,7 @@ import control_plane_kit_core as core
 from control_plane_kit_core.algebra import BlockSockets, BlockSpec, ProviderSocket
 from control_plane_kit_core.capabilities import CapabilityName
 from control_plane_kit_core.operations.run_identity import RunId
+from control_plane_kit_core.planning import ReconcileNode, StartNode
 from control_plane_kit_core.products import (
     ContainerServerProduct, OciImageReference, ProductIdentity, ProductReference,
     ProductDescriptorDigest, ProductRuntimeContract,
@@ -147,3 +148,92 @@ class World:
         activity, = (item for item in self.plan.activities if type(item.operation) is core.ObserveManagementBootstrap
                      and item.operation.stage is core.ManagementBootstrapStage.CONNECTOR_CONNECTED)
         self.request = replace(self.request, operation=activity.operation, activity_id=activity.activity_id)
+
+
+class RetainedWorld(World):
+    """Actual public-content update and typed installation, not a ledger emulator."""
+
+    def __init__(self, *, lazy=False, reconcile=False):
+        super().__init__(lazy=lazy)
+        from control_plane_kit_core.configuration import ConfigurationArtifact, ConfigurationMediaType
+        from control_plane_kit_core.environment import PublicStaticEnvironmentBinding
+        from control_plane_kit_core.wrapper_configuration import WORKLOAD_NODE_CONTROL_CONFIGURATION_ENVIRONMENT
+        from receiver_configuration_fixtures import receiver_configuration, receiver_artifact
+        from health_signing_fixtures import key
+
+        activity, = (item for item in self.plan.activities
+            if type(item.operation) is StartNode and item.operation.target.node_id == "connector")
+        self.installation_request = replace(self.request,
+            effect_id="event-installation", source=replace(self.request.source,
+                intent_event_id="event-installation", plan_id="plan-installation",
+                desired_graph_id="graph-installation"),
+            activity_id=activity.activity_id, operation=activity.operation)
+        if reconcile:
+            self.installation_request = replace(self.installation_request,
+                operation=ReconcileNode(activity.operation.target))
+        self.install_receipt()
+        for container in self.containers:
+            container["Config"]["Labels"] = _node_labels(self.installation_request, self.material)
+
+        control = self.desired.graph.nodes["gateway"].block_spec.control_surfaces[0]
+        roles = core.NodeControlGraphReferenceRole
+        target = core.NodeControlReceiverTarget(*(
+            core.NodeControlGraphReference(role, value) for role, value in (
+                (roles.WORKSPACE, "workspace"), (roles.RUNTIME, "docker"),
+                (roles.NODE, "workload"), (roles.PROVIDER_SOCKET, "control"))), "a" * 32)
+        declaration = core.WorkloadNodeControlSurfaceDeclaration(control,
+            profile=core.WorkloadNodeControlSurfaceDeclarationProfile.V2)
+        self.receiver = receiver_configuration(target, declaration, key("native-health")[1])
+        wrapper = receiver_artifact(self.receiver)
+        application = ConfigurationArtifact("application", "/etc/application/settings.json",
+            ConfigurationMediaType.JSON, '{"mode":"blue"}')
+        workload = Node("workload", BlockFamily.APPLICATION,
+            BlockSpec("workload", capabilities=(CapabilityName.NODE_CONTROLLABLE, CapabilityName.HEALTH_CHECKABLE),
+                control_surfaces=(control,)), "container-server", "docker",
+            BlockSockets(providers=(ProviderSocket("control", Protocol.HTTP),)),
+            endpoints={"control": Endpoint(LiteralAddress("http://workload:8000"), Protocol.HTTP)},
+            configuration_artifacts=(wrapper, application),
+            public_environment=(PublicStaticEnvironmentBinding(
+                WORKLOAD_NODE_CONTROL_CONFIGURATION_ENVIRONMENT, wrapper.target_path),))
+        graph = self.desired.graph
+        self.current = validate_graph(replace(graph, nodes={**graph.nodes, "workload": workload},
+            runtimes={"docker": replace(graph.runtimes["docker"], children=("gateway", "connector", "workload"))}))
+        self.desired = validate_graph(self.current.graph.update_node(replace(workload,
+            configuration_artifacts=(wrapper, replace(application, content='{"mode":"green"}', source_digest=None)))))
+        self.recompile_retained()
+        self.request = replace(self.request, effect_id="event-observe-b", source=replace(self.request.source,
+            intent_event_id="event-observe-b", request_id="request-b", run_id=RunId("run-b"),
+            plan_id="plan-b", base_graph_id="graph-before-b", desired_graph_id="graph-b"))
+
+    def install_receipt(self, *, disposition=None, container_id=CONTAINER_ID):
+        from control_plane_kit_core.secret_installation import (
+            SecretInstallationDisposition, SecretInstallationReceipt,
+            secret_installation_correlation_for_request, secret_material_selection_fingerprint,
+        )
+        from control_plane_kit_interpreters.docker.configuration import _container_incarnation_fingerprint
+        disposition = SecretInstallationDisposition.CREATED if disposition is None else disposition
+        current = _container_incarnation_fingerprint(container_id)
+        prior = (current if disposition is SecretInstallationDisposition.REUSED else
+            _container_incarnation_fingerprint("e" * 64) if disposition is SecretInstallationDisposition.REPLACED else None)
+        self.installation_receipt = SecretInstallationReceipt(
+            secret_installation_correlation_for_request(self.installation_request).request_fingerprint,
+            secret_material_selection_fingerprint(self.installation_request), disposition, prior, current)
+
+    def recompile_retained(self, *, require_ready=True):
+        self.current.require_valid()
+        self.desired.require_valid()
+        self.plan = core.compile_managed_update_activity_plan(self.current, self.desired)
+        if require_ready and not self.plan.ready_for_execution:
+            raise AssertionError("retained native fixture must compile")
+        activities = tuple(item for item in self.plan.activities
+            if type(item.operation) is core.ObserveManagementBootstrap
+            and item.operation.stage is core.ManagementBootstrapStage.CONNECTOR_CONNECTED)
+        if activities:
+            activity, = activities
+            self.request = replace(self.request, operation=activity.operation, activity_id=activity.activity_id)
+
+    def observe(self, module, **changes):
+        options = dict(installation_request=self.installation_request,
+            installation_receipt=self.installation_receipt)
+        options.update(changes)
+        return super().observe(module, **options)
