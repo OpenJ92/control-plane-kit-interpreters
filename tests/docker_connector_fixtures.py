@@ -9,6 +9,7 @@ import control_plane_kit_core as core
 from control_plane_kit_core.algebra import BlockSockets, BlockSpec, ProviderSocket
 from control_plane_kit_core.capabilities import CapabilityName
 from control_plane_kit_core.operations.run_identity import RunId
+from control_plane_kit_core.planning import ReconcileNode, StartNode
 from control_plane_kit_core.products import (
     ContainerServerProduct, OciImageReference, ProductIdentity, ProductReference,
     ProductDescriptorDigest, ProductRuntimeContract,
@@ -161,7 +162,7 @@ class RetainedWorld(World):
         from health_signing_fixtures import key
 
         activity, = (item for item in self.plan.activities
-            if type(item.operation) is core.StartNode and item.operation.target.node_id == "connector")
+            if type(item.operation) is StartNode and item.operation.target.node_id == "connector")
         self.installation_request = replace(self.request,
             effect_id="event-installation", source=replace(self.request.source,
                 intent_event_id="event-installation", plan_id="plan-installation",
@@ -169,7 +170,7 @@ class RetainedWorld(World):
             activity_id=activity.activity_id, operation=activity.operation)
         if reconcile:
             self.installation_request = replace(self.installation_request,
-                operation=core.ReconcileNode(activity.operation.target))
+                operation=ReconcileNode(activity.operation.target))
         self.install_receipt()
         for container in self.containers:
             container["Config"]["Labels"] = _node_labels(self.installation_request, self.material)

@@ -6,7 +6,7 @@ import json
 import unittest
 
 import control_plane_kit_core as core
-from control_plane_kit_core.planning import ActivityId, ActivityPlan, PlannedActivity, StartRuntime
+from control_plane_kit_core.planning import ActivityId, ActivityPlan, PlannedActivity, StartNode, StartRuntime
 from control_plane_kit_core.lifecycle import ResourceLifecycle
 from control_plane_kit_core.secrets import SecretEnvironmentDelivery, SecretUseIntent
 from control_plane_kit_core.secret_selections import SecretVersionSelection
@@ -332,6 +332,7 @@ class RetainedConnectorConnectionTests(unittest.TestCase):
                 world = world_type(lazy=True)
                 self.assertIs(self.qualify(world), mode)
                 self.assertEqual(world.initializations + world.api.calls, [])
+        world = RetainedWorld(lazy=True)
         result = self.assert_outcome(world, "refused", installation_request=None, installation_receipt=None)
         self.assertIsNone(result.effect_id)
         self.assertIsNone(result.activity_id)
@@ -389,7 +390,7 @@ class RetainedConnectorConnectionTests(unittest.TestCase):
         world = RetainedWorld(reconcile=True)
         # Actual fingerprint-equal reconciliation preserves C's labels, while
         # the accepted REUSED receipt commits A and that same immutable ID.
-        creation = replace(world.installation_request, operation=core.StartNode(world.installation_request.operation.target),
+        creation = replace(world.installation_request, operation=StartNode(world.installation_request.operation.target),
             source=replace(world.installation_request.source,
             plan_id="earlier-creation-c", desired_graph_id="graph-c"))
         for container in world.containers:
