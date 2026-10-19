@@ -10,7 +10,7 @@ from control_plane_kit_core.planning import ActivityId, ActivityPlan
 from control_plane_kit_core.products import ProductDescriptorCodec, ProductReference, RetainedDataMount
 from control_plane_kit_core.runtime_authority import RuntimeAuthorityAccessDelivery, RuntimeAuthorityAccessDeliveryKind
 from control_plane_kit_core.secrets import SecretEnvironmentDelivery, SecretFilePathBinding, SecretReference, SecretUseIntent
-from control_plane_kit_core.secret_selections import SecretVersionSelection, UnselectedSecretUse
+from control_plane_kit_core.secret_selections import SecretVersionSelection, UnselectedSecretUse, author_secret_selections
 from control_plane_kit_core.topology import validate_graph
 from control_plane_kit_interpreters.docker.connector_connection import (
     ConnectorConnectionQualification, DockerConnectorConnectionObserver,
@@ -28,6 +28,7 @@ def bind_document(world, *, declared=(), authored=(), product=None):
         graph = getattr(world, side).graph
         if "connector" in graph.nodes:
             node = replace(graph.nodes["connector"], secret_deliveries=authored,
+                secret_selections=author_secret_selections(authored),
                 metadata={"product_identity": world.reference.identity.key,
                     "product_descriptor_digest": document.content_digest})
             setattr(world, side, validate_graph(graph.update_node(node)))
@@ -215,8 +216,12 @@ class ConnectorShapeQualificationTests(unittest.TestCase):
                 mode = self.shape(world, document)
                 self.assertIsNotNone(mode)
                 self.assertIs(self.full(world), mode)
-                for selections in ((), (UnselectedSecretUse(world.file.reference, world.file.intent),)):
-                    material = replace(world.material, secret_selections=selections)
+                missing = replace(world.material, secret_selections=(), product=replace(
+                    world.material.product, runtime_contract=replace(
+                        world.material.product.runtime_contract, secret_deliveries=())))
+                unselected = replace(world.material, secret_selections=(
+                    UnselectedSecretUse(world.file.reference, world.file.intent),))
+                for material in (missing, unselected):
                     self.assertIsNone(self.full(world, material=material))
                     result = self.observer(world).observe(replace(world.request, products=(material,)),
                         plan=world.plan, current=world.current, desired=world.desired)
