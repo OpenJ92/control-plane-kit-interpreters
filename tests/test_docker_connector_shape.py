@@ -28,7 +28,7 @@ def bind_document(world, *, declared=(), authored=(), product=None):
         graph = getattr(world, side).graph
         if "connector" in graph.nodes:
             node = replace(graph.nodes["connector"], secret_deliveries=authored,
-                secret_selections=author_secret_selections(authored),
+                secret_selections=author_secret_selections(authored, previous=world.material.secret_selections),
                 metadata={"product_identity": world.reference.identity.key,
                     "product_descriptor_digest": document.content_digest})
             setattr(world, side, validate_graph(graph.update_node(node)))
