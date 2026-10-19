@@ -354,6 +354,28 @@ class RetainedConnectorConnectionTests(unittest.TestCase):
                     self.assertIsNone(self.qualify(world, **changes))
                     self.assertEqual(world.initializations + world.api.calls, [])
 
+    def test_unselected_token_does_not_qualify_for_either_profile(self):
+        from control_plane_kit_core.secret_selections import UnselectedSecretUse
+        for world_type in (World, RetainedWorld):
+            with self.subTest(world=world_type.__name__):
+                world = world_type(lazy=True)
+                material = replace(world.material, secret_selections=(
+                    UnselectedSecretUse(world.file.reference, world.file.intent),))
+                self.assertIsNone(self.qualify(world, material=material))
+                self.assertEqual(world.initializations + world.api.calls, [])
+
+    def test_unselected_token_observation_refuses_before_lazy_io(self):
+        from control_plane_kit_core.secret_selections import UnselectedSecretUse
+        for world_type in (World, RetainedWorld):
+            with self.subTest(world=world_type.__name__):
+                world = world_type(lazy=True)
+                material = replace(world.material, secret_selections=(
+                    UnselectedSecretUse(world.file.reference, world.file.intent),))
+                request = replace(world.request, products=(material,))
+                result = self.assert_outcome(world, "refused", request=request)
+                self.assertIsNone(result.effect_id)
+                self.assertEqual(world.initializations + world.api.calls, [])
+
     def test_retained_observation_uses_installation_labels_and_returns_current_correlation(self):
         from control_plane_kit_core.secret_installation import SecretInstallationDisposition
         for reconcile, disposition in ((False, SecretInstallationDisposition.CREATED),
