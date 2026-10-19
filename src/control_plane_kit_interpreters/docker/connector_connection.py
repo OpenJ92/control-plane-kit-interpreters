@@ -16,7 +16,7 @@ from control_plane_kit_core.planning import (
     PlanGraphSide, resolve_management_observation, compile_graph_activity_plan,
     compile_managed_update_activity_plan, AllocatePublicIngress, StartNode, StartRuntime,
 )
-from control_plane_kit_core.products import ProductReference
+from control_plane_kit_core.products import ProductDescriptorCodec, ProductDescriptorDocument, ProductReference
 from control_plane_kit_core.receiver_configuration import select_receiver_node_control_configuration_artifact
 from control_plane_kit_core.runtime_authority import RuntimeAuthorityReference
 from control_plane_kit_core.runtime_effects import RuntimeEffectRequest, RuntimeProductMaterial
@@ -83,9 +83,52 @@ class DockerConnectorConnectionObserver:
         except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
             return None
 
-    def _qualify(self, *, activity_id, plan, current, desired, material, authority_ref):
+    def qualify_shape(self, *, activity_id, plan, current, desired,
+                      product_document, authority_ref) -> ConnectorConnectionQualification | None:
+        """Query declared capability without resolving material or granting authority."""
+        try:
+            if type(product_document) is not ProductDescriptorDocument:
+                raise ValueError
+            document = ProductDescriptorCodec().decode_document(product_document.content)
+            if document != product_document:
+                raise ValueError
+            mode, resolved = self._qualify_plan(activity_id=activity_id, plan=plan,
+                current=current, desired=desired, authority_ref=authority_ref)
+            node = resolved.connector_node
+            reference = ProductReference.from_document(document)
+            contract = document.product.runtime_contract
+            if (reference != self.product_reference
+                    or document.product.image.execution_reference != self.image_reference
+                    or node.metadata.get("product_identity") != reference.identity.key
+                    or node.metadata.get("product_descriptor_digest") != reference.descriptor_sha256.value
+                    or node.public_environment or node.socket_environment
+                    or node.configuration_artifacts or node.runtime_authority_deliveries
+                    or contract.public_environment or contract.configuration_artifacts or contract.retained_data_mounts):
+                raise ValueError
+            # The graph declares the producer/consumer relation. Operations alone
+            # later creates the delivery and selected version from durable facts.
+            ingresses = tuple(value for value in resolved.selected_graph.graph.public_ingresses
+                if value.connector_node_id == node.node_id)
+            if ingresses != (resolved.ingress,):
+                raise ValueError
+            if not node.secret_deliveries:
+                if contract.secret_deliveries:
+                    # Do not infer descriptor-only material projection here.
+                    raise ValueError
+            else:
+                delivery, = node.secret_deliveries
+                slot = _reader_token_slot(delivery)
+                if contract.secret_deliveries:
+                    declared, = contract.secret_deliveries
+                    if _reader_token_slot(declared) != slot:
+                        raise ValueError
+            return mode
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+            return None
+
+    def _qualify_plan(self, *, activity_id, plan, current, desired, authority_ref):
+        """Core owns validity/order; this predicate bounds the reader's capability."""
         if (type(activity_id) is not ActivityId or type(plan) is not ActivityPlan
-                or type(material) is not RuntimeProductMaterial
                 or type(authority_ref) is not RuntimeAuthorityReference):
             raise ValueError
         operation = plan.activity(activity_id).operation
@@ -123,6 +166,15 @@ class DockerConnectorConnectionObserver:
                     or not _retained_content_change(current, desired, runtime_id, gateway_id, node.node_id)):
                 raise ValueError
             mode = ConnectorConnectionQualification.RETAINED_CONTENT_UPDATE
+        return mode, resolved
+
+    def _qualify(self, *, activity_id, plan, current, desired, material, authority_ref):
+        if type(material) is not RuntimeProductMaterial:
+            raise ValueError
+        mode, resolved = self._qualify_plan(activity_id=activity_id, plan=plan,
+            current=current, desired=desired, authority_ref=authority_ref)
+        node = resolved.connector_node
+        runtime_id = plan.activity(activity_id).operation.target.runtime_id
         # Round-trip a detached value rather than normalize caller-owned material.
         if RuntimeProductMaterial.from_descriptor(material.descriptor()) != material:
             raise ValueError
@@ -137,12 +189,7 @@ class DockerConnectorConnectionObserver:
                 or contract.public_environment or contract.configuration_artifacts or contract.retained_data_mounts):
             raise ValueError
         delivery, = contract.secret_deliveries
-        if (type(delivery) is not SecretFileDelivery
-                or delivery.intent is not SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN
-                or delivery.file_mode is not SecretFileMode.OWNER_READ_ONLY
-                or delivery.path_binding is None or delivery.path_binding.environment_name != "TUNNEL_TOKEN_FILE"):
-            raise ValueError
-        delivery.__post_init__()
+        _reader_token_slot(delivery)
         selections = tuple(selection for selection in material.secret_selections
             if selection.reference == delivery.reference and selection.intent == delivery.intent)
         if len(selections) != 1 or type(selections[0]) is not SecretVersionSelection:
@@ -208,6 +255,17 @@ class DockerConnectorConnectionObserver:
             # Provider exceptions, candidate values and their hashes never cross
             # the observation boundary. No retries or fallback effects.
             return unknown
+
+
+def _reader_token_slot(delivery):
+    """Validate the existing file profile without constructing or resolving it."""
+    if (type(delivery) is not SecretFileDelivery
+            or delivery.intent is not SecretUseIntent.CLOUDFLARE_TUNNEL_TOKEN
+            or delivery.file_mode is not SecretFileMode.OWNER_READ_ONLY
+            or delivery.path_binding is None or delivery.path_binding.environment_name != "TUNNEL_TOKEN_FILE"):
+        raise ValueError
+    delivery.__post_init__()
+    return delivery.target_path, delivery.intent, delivery.file_mode, delivery.path_binding
 
 
 def _retained_content_change(current, desired, runtime_id, gateway_id, connector_id):
