@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from control_plane_kit_core.products import ProductDescriptorCodec, ProductReference
+from control_plane_kit_core.capabilities import CapabilityName
 from control_plane_kit_core.configuration_instances import ConfigurationInstanceSelection
 from control_plane_kit_core.runtime_effects import RuntimeEffectKind
 from control_plane_kit_core.topology import validate_graph
@@ -57,7 +58,9 @@ class ManagedConnectorTests(unittest.TestCase):
                     if case == "required-target":
                         contract = replace(contract, configuration_requirements=(replace(
                             contract.configuration_requirements[0], target_path="/etc/other.json"),))
-                    elif case == "surface": contract = replace(contract, control_surfaces=())
+                    elif case == "surface":
+                        contract = replace(contract, control_surfaces=(), capabilities=tuple(
+                            value for value in contract.capabilities if value is not CapabilityName.NODE_CONTROLLABLE))
                     else: contract = replace(contract, public_environment=())
                     document = ProductDescriptorCodec().encode_document(replace(document.product, runtime_contract=contract))
                     world.reference = ProductReference.from_document(document)
