@@ -1,6 +1,18 @@
 # Selected secret installation checkpoint (#191)
 
-Current Interpreters #207 dependency adoption selects Core #2005 merge
+Current Interpreters #211 selects Core
+`ec61e2b17c3a3f1bdea1dd6bc8fc64ac1b9528b0`, accepted Secrets #63 merge
+`b30e62664da50cfdda347509a17fa70888cb169a` and its accepted SDK #65 merge
+`eff09090755eb21028695f0224eec7b81f2db535`. Installation continues to consume
+concrete selected artifacts and exact grants; Core refuses unresolved required
+slots at the effect-material boundary. No installation, receipt, readback,
+uncertainty or cleanup implementation changes here. Ordinary pinned validation
+is pending and must include the existing actual Docker witnesses and owned
+container/reader fixture image/record cleanup. The main package test image is
+retained by the existing runner; provider-contract opt-in remains off.
+This is dependency adoption for Servers #280, not managed transport or live proof.
+
+Historical Interpreters #207 dependency adoption selects Core #2005 merge
 `73d87e99bf711ff8a88112ca56c5eee8055ac5b7`, test Secrets #61 merge
 `7ff1e771874e5963ee840d7148d2d4052278baa1` and its SDK #63 merge
 `1657cb91b143931bafcdb32108950d2bbbb66d95`. Core changes controller selection

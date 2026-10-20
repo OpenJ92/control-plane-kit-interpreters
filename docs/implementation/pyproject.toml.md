@@ -2,7 +2,23 @@ Source: [pyproject.toml](../../pyproject.toml).
 
 Maintain this document alongside its source and selected dependencies.
 
-Interpreters #207 selects accepted Core #2005 merge
+Interpreters #211 selects accepted Core
+`ec61e2b17c3a3f1bdea1dd6bc8fc64ac1b9528b0` and accepted Secrets #63 merge
+`b30e62664da50cfdda347509a17fa70888cb169a` in the existing test extra.
+Secrets selects accepted SDK #65 merge
+`eff09090755eb21028695f0224eec7b81f2db535` and the identical Core archive.
+Core adds declared configuration requirements while strict actual receiver
+selection and resolved effect material remain the interpreter inputs.
+Only metadata and exact provenance expectations change here; runtime source,
+extras, assertions, runner and the historical Servers fixture remain unchanged.
+The fixture's existing `--no-deps` installation does not create a dependency on
+Servers #280. Ordinary pinned owning validation is pending at this checkpoint.
+It must prove the full package and Docker witnesses, recorded container/reader
+fixture image/record cleanup; the main package test image remains retained.
+Only an actual accepted #211 merge feeds #280. Managed transport, image
+adoption and live acceptance remain separate.
+
+Historical Interpreters #207 selects accepted Core #2005 merge
 `73d87e99bf711ff8a88112ca56c5eee8055ac5b7` and actual Secrets #61 merge
 `7ff1e771874e5963ee840d7148d2d4052278baa1` in the existing test extra.
 Secrets selects actual SDK #63 merge `1657cb91b143931bafcdb32108950d2bbbb66d95`
