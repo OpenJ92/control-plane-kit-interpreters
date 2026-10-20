@@ -27,6 +27,11 @@ from control_plane_kit_core.secrets import SecretFileMode, SecretValue
 from control_plane_kit_core.types import Protocol, Transport
 
 
+class ConnectorConnectionProfile(Enum):
+    NATIVE_READER_V1 = "native-reader-v1"
+    MANAGED_WRAPPER_V1 = "managed-wrapper-v1"
+
+
 class _ContainerCreateSuboperation(Enum):
     INSPECTION = "container-inspection"
     REQUEST = "request-construction"

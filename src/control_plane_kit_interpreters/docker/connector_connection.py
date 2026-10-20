@@ -34,7 +34,7 @@ from control_plane_kit_interpreters.docker.configuration import _container_incar
 from control_plane_kit_interpreters.docker.runtime import (
     _container_name, _network_name, _node_correlation_labels, _node_labels, _secret_volume_name,
 )
-from control_plane_kit_interpreters.docker.sdk import DockerSdkClient, DockerSdkSecretMount
+from control_plane_kit_interpreters.docker.sdk import ConnectorConnectionProfile, DockerSdkClient, DockerSdkSecretMount
 
 
 class ConnectorConnectionOutcome(StrEnum):
@@ -67,15 +67,19 @@ class DockerConnectorConnectionObserver:
     product_reference: ProductReference
     image_reference: str
     clock: Callable[[], datetime]
+    profile: ConnectorConnectionProfile = ConnectorConnectionProfile.NATIVE_READER_V1
 
     def __post_init__(self):
         if (type(self.client) is not DockerSdkClient or type(self.product_reference) is not ProductReference
-                or type(self.image_reference) is not str or not callable(self.clock)):
+                or type(self.image_reference) is not str or not callable(self.clock)
+                or type(self.profile) is not ConnectorConnectionProfile):
             raise TypeError("native connection observer configuration is invalid")
 
     def qualify(self, *, activity_id, plan, current, desired, material,
                 authority_ref) -> ConnectorConnectionQualification | None:
         """Pure capability selection, without installation proof or execution authority."""
+        if self.profile is ConnectorConnectionProfile.MANAGED_WRAPPER_V1:
+            raise NotImplementedError("managed connection qualification is not implemented")
         try:
             mode, _, _ = self._qualify(activity_id=activity_id, plan=plan, current=current,
                 desired=desired, material=material, authority_ref=authority_ref)
@@ -86,6 +90,8 @@ class DockerConnectorConnectionObserver:
     def qualify_shape(self, *, activity_id, plan, current, desired,
                       product_document, authority_ref) -> ConnectorConnectionQualification | None:
         """Query declared capability without resolving material or granting authority."""
+        if self.profile is ConnectorConnectionProfile.MANAGED_WRAPPER_V1:
+            raise NotImplementedError("managed connection shape is not implemented")
         try:
             if type(product_document) is not ProductDescriptorDocument:
                 raise ValueError
@@ -199,6 +205,8 @@ class DockerConnectorConnectionObserver:
     def observe(self, request, *, plan, current, desired,
                 installation_request: RuntimeEffectRequest | None = None,
                 installation_receipt: SecretInstallationReceipt | None = None):
+        if self.profile is ConnectorConnectionProfile.MANAGED_WRAPPER_V1:
+            raise NotImplementedError("managed connection observation is not implemented")
         try:
             if type(request) is not RuntimeEffectRequest or type(plan) is not ActivityPlan:
                 raise ValueError
