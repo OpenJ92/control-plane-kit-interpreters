@@ -65,7 +65,12 @@ uses accepted Servers #280 merge `39928d9` as the product-shape reference, not a
 new published image. Core remains pinned to `ec61e2b`; no dependency changed.
 The initial target run failed on an omitted fixture endpoint; corrected target
 `eeb4880` reached exactly 63 missing-implementation errors, with all 543 prior
-tests passing. Source/owning-green review remains pending at this checkpoint.
+tests passing. Source `2e4b087` passed independent source review and the full
+unchanged pinned owning gate: 26 policy and 555 package tests, isolated import,
+Docker configuration/installation/secret-delivery witnesses and owned cleanup.
+This is package/interpreter evidence; the managed native profile itself is
+covered by recording-SDK tests, with actual selected-image/live qualification
+remaining downstream. Final merge disposition is recorded on #148 and its PR.
 
 The earlier sections below describe the native default and its historical
 acceptance; their managed-profile exclusion applies to that default only.
