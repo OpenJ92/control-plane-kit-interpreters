@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 from control_plane_kit_core.products import ProductDescriptorCodec, ProductReference
 from control_plane_kit_core.capabilities import CapabilityName
-from control_plane_kit_core.configuration_instances import ConfigurationInstanceSelection
 from control_plane_kit_core.runtime_effects import RuntimeEffectKind
 from control_plane_kit_core.topology import validate_graph
 from control_plane_kit_interpreters.docker import connector_connection as module
@@ -112,7 +111,7 @@ class ManagedConnectorTests(unittest.TestCase):
                 elif case == "missing-selection":
                     world.installation_request = replace(world.installation_request,
                         kind=RuntimeEffectKind.REALIZE_ACTIVITY,
-                        configuration_instances=ConfigurationInstanceSelection(()))
+                        configuration_instances=None)
                     world.install_receipt()
                 elif case == "foreign-receipt":
                     changes["installation_receipt"] = replace(world.installation_receipt, request_fingerprint="f" * 64)
