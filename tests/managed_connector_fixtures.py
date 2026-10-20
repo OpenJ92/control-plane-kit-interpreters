@@ -12,6 +12,7 @@ from control_plane_kit_core.environment import PublicStaticEnvironmentBinding
 from control_plane_kit_core.products import ProductDescriptorCodec, ProductReference, ProviderRuntimePort
 from control_plane_kit_core.runtime_effects import RuntimeEffectKind
 from control_plane_kit_core.topology import validate_graph
+from control_plane_kit_core.topology.graph import Endpoint, LiteralAddress
 from control_plane_kit_core.types import Protocol
 from control_plane_kit_interpreters.docker import connector_connection as module
 from control_plane_kit_interpreters.docker.configuration import configuration_volume_name
@@ -62,6 +63,7 @@ def managed_world(*, retained=False, lazy=False):
         node = replace(node, block_spec=replace(node.block_spec,
             capabilities=contract.capabilities, control_surfaces=(surface,)),
             sockets=contract.sockets, public_environment=ENVIRONMENT,
+            endpoints={"control": Endpoint(LiteralAddress("http://connector:8000"), Protocol.HTTP)},
             configuration_artifacts=(world.artifact,),
             metadata={"product_identity": world.reference.identity.key,
                       "product_descriptor_digest": world.reference.descriptor_sha256.value})
