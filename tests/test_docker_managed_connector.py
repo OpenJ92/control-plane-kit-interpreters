@@ -167,7 +167,7 @@ class ManagedConnectorTests(unittest.TestCase):
                     self.assertEqual(world.archive_calls, [])
 
     def test_two_mount_profile_rejects_extra_shadowed_writable_or_drifted_mounts(self):
-        for case in ("extra", "duplicate", "shadow", "writable", "subpath", "observed-name", "bind", "tmpfs", "volumes-from"):
+        for case in ("extra", "duplicate", "shadow", "shared-token-volume", "writable", "subpath", "observed-name", "bind", "tmpfs", "volumes-from"):
             with self.subTest(case=case):
                 world = managed_world()
                 container = world.containers[0]
@@ -181,6 +181,9 @@ class ManagedConnectorTests(unittest.TestCase):
                 elif case == "shadow":
                     configured[0]["Target"] = "/etc/cpk"
                     effective[0]["Destination"] = "/etc/cpk"
+                elif case == "shared-token-volume":
+                    configured[1]["Source"] = configured[0]["Source"]
+                    effective[1]["Name"] = effective[0]["Name"]
                 elif case == "writable": configured[1]["ReadOnly"] = False
                 elif case == "subpath": configured[1]["VolumeOptions"]["Subpath"] = "other"
                 elif case == "observed-name": effective[1]["Name"] = "other"

@@ -1,5 +1,75 @@
 # Native connection observation (#167)
 
+## Explicit managed wrapper profile (#148)
+
+`ConnectorConnectionProfile.MANAGED_WRAPPER_V1` explicitly selects the accepted
+managed Cloudflared launch and configuration shape. Native reader-v1 remains
+the default, with its existing refusal and fresh/retained laws. No product class
+name or extra mount implicitly changes the profile.
+
+```python
+from control_plane_kit_interpreters.docker.connector_connection import (
+    ConnectorConnectionProfile, DockerConnectorConnectionObserver,
+)
+
+observer = DockerConnectorConnectionObserver(
+    client, reviewed_product_reference, reviewed_image_reference, utc_clock,
+    profile=ConnectorConnectionProfile.MANAGED_WRAPPER_V1,
+)
+```
+
+The pure shape query admits the exact declared JSON/read-only
+`cloudflared-control` slot at `/etc/cpk/cloudflared/control.json`, configuration
+environment binding and V2 control surface. It checks canonical product/image,
+graph metadata, complete supported plan and current runtime authority. Declared
+slot selection does not decode receiver material, resolve a token or establish
+installation. Full qualification requires genuine matching receiver material
+and the selected token file/version; observation also checks workspace scope.
+
+SDK image inspection requires the managed Python entrypoint, empty Cmd, `/app`,
+user `65532:65532`, SIGTERM, fixed configuration binding and unchanged readiness
+HEALTHCHECK. Effective container launch must equal that selected image with only
+the admitted token-path overlay. The container must have exactly two distinct
+readonly volume/content-subpath mounts: selected token and configuration.
+Extra, duplicate, overlapping, writable, bind/tmpfs/VolumesFrom and inconsistent
+configured/effective mounts fail closed. Sharing token storage with the
+configuration mount is rejected before any archive read.
+
+Retained observation uses the existing original request/secret receipt pair.
+Core's original receipt reader already validates the coupled configuration
+receipt; Operations owns that durable source proof and current admission.
+Original configuration selection determines the expected allocated volume and
+receipt incarnation. Missing or incompatible retained selection refuses before
+I/O; it cannot use fresh-mode candidate semantics. No second receipt export or
+duplicate Operations read is needed.
+
+Fresh observation rejects installation pairs. Its observed configuration volume
+is a candidate/stability fact, not accepted allocation history. Both modes read
+only the selected configuration target through bounded `get_archive` on the
+captured container ID, using the existing installed-configuration projection.
+Digest, mode and regular-file facts must match. This projection does not prove
+file UID/GID. The observer never reads the token body, stages configuration,
+creates a helper, executes a command, probes a network endpoint or repairs state.
+
+The final container inspection must preserve both mounts, launch, ownership,
+image, incarnation and newest sample, with the existing strict freshness and
+decoder. Changed/unavailable facts return UNKNOWN without retry. These reads are
+point-in-time evidence, not an atomic snapshot or continuing attestation.
+CONNECTOR_CONNECTED still cannot discharge authenticated management health,
+installation/accounting acceptance or cleanup. Existing local/signed readers
+and generic legacy helper paths are unchanged; downstream selected composition
+must separately prove no helper/fallback on its owned route.
+
+Plan [revision 2](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/148#issuecomment-6300992975)
+uses accepted Servers #280 merge `39928d9` as the product-shape reference, not a
+new published image. Core remains pinned to `ec61e2b`; no dependency changed.
+The initial target run failed on an omitted fixture endpoint; corrected target
+`eeb4880` reached exactly 63 missing-implementation errors, with all 543 prior
+tests passing. Source/owning-green review remains pending at this checkpoint.
+
+The earlier sections below describe the native default and its historical
+acceptance; their managed-profile exclusion applies to that default only.
+
 ## Descriptor-based shape query (#148)
 
 The approved follow-on interface is `qualify_shape(activity_id=..., plan=...,

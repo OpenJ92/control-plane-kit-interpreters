@@ -32,6 +32,9 @@ class ConnectorConnectionProfile(Enum):
     MANAGED_WRAPPER_V1 = "managed-wrapper-v1"
 
 
+_MANAGED_CONNECTOR_CONFIGURATION_PATH = "/etc/cpk/cloudflared/control.json"
+
+
 class _ContainerCreateSuboperation(Enum):
     INSPECTION = "container-inspection"
     REQUEST = "request-construction"
@@ -301,6 +304,12 @@ class DockerSdkConnectorSample:
 
 
 @dataclass(frozen=True, repr=False)
+class DockerSdkConnectorConfigurationMount:
+    target_path: str
+    volume_name: str
+
+
+@dataclass(frozen=True, repr=False)
 class DockerSdkConnectorInspection:
     container_id: str
     name: str
@@ -311,6 +320,7 @@ class DockerSdkConnectorInspection:
     secret_mount: "DockerSdkSecretMount"
     started_at: str
     sample: DockerSdkConnectorSample
+    configuration_mount: DockerSdkConnectorConfigurationMount | None = None
 
 
 @dataclass(frozen=True, repr=False)
@@ -530,14 +540,20 @@ class DockerSdkClient:
             raise DockerSdkConnectorEvidenceError("connector acquisition configuration is invalid")
         return api
 
-    def inspect_connector_container(self, identity: str) -> DockerSdkConnectorInspection:
+    def inspect_connector_container(self, identity: str, *,
+                                    profile=ConnectorConnectionProfile.NATIVE_READER_V1) -> DockerSdkConnectorInspection:
         try:
-            return _connector_container(self._connector_api().inspect_container(identity))
+            if type(profile) is not ConnectorConnectionProfile:
+                raise ValueError
+            return _connector_container(self._connector_api().inspect_container(identity), profile=profile)
         except Exception:
             raise DockerSdkConnectorEvidenceError("connector evidence is unavailable") from None
 
-    def inspect_connector_image(self, reference: str, *, token_path: str) -> DockerSdkConnectorImage:
+    def inspect_connector_image(self, reference: str, *, token_path: str,
+                                profile=ConnectorConnectionProfile.NATIVE_READER_V1) -> DockerSdkConnectorImage:
         try:
+            if type(profile) is not ConnectorConnectionProfile:
+                raise ValueError
             attrs = _connector_mapping(self._connector_api().inspect_image(reference))
             identity = attrs["Id"]
             if not _is_canonical_sha256_image_id(identity):
@@ -545,7 +561,7 @@ class DockerSdkClient:
             digests = _connector_strings(attrs["RepoDigests"], 32)
             if not matches_image_reference(reference, digests):
                 raise ValueError
-            launch = _connector_launch(attrs["Config"], token_path=token_path)
+            launch = _connector_launch(attrs["Config"], token_path=token_path, profile=profile)
             return DockerSdkConnectorImage(identity, launch,
                 _secret_file_owner_uid(attrs["Config"]["User"]))
         except Exception:
@@ -1650,10 +1666,11 @@ def _connector_strings(value: Any, count: int = 64) -> tuple[str, ...]:
     return tuple(_connector_text(item) for item in value)
 
 
-def _connector_launch(raw: Any, *, token_path: str | None = None) -> str:
+def _connector_launch(raw: Any, *, token_path: str | None = None,
+                      profile=ConnectorConnectionProfile.NATIVE_READER_V1) -> str:
     """Hash only after exact bounded validation; never truncate candidate data.
 
-    Image mode checks reader-v1 program and overlays the sole admitted token
+    Image mode checks the selected closed program and overlays the admitted token
     path. Container mode hashes actual launch. Environment order is immaterial;
     argv order and every environment value remain material to equality.
     """
@@ -1684,18 +1701,24 @@ def _connector_launch(raw: Any, *, token_path: str | None = None) -> str:
             raise ValueError
         timing.append(value)
     if token_path is not None:
-        if (entrypoint != ("cloudflared", "--no-autoupdate", "--metrics", "127.0.0.1:20241")
-                or command != ("tunnel", "run") or user != "65532:65532" or stop != "SIGTERM"
+        managed = profile is ConnectorConnectionProfile.MANAGED_WRAPPER_V1
+        expected_program = (("python", "-m", "control_plane_kit_servers_cloudflared_connector.entrypoint")
+            if managed else ("cloudflared", "--no-autoupdate", "--metrics", "127.0.0.1:20241"))
+        if (entrypoint != expected_program
+                or command != (() if managed else ("tunnel", "run")) or user != "65532:65532" or stop != "SIGTERM"
                 or probe != ("CMD", "python", "-m", "control_plane_kit_servers_cloudflared_connector.readiness")
                 or timing != [5_000_000_000, 3_000_000_000, 1, 0, 0]
-                or shell or cwd or "TUNNEL_TOKEN" in environment or "TUNNEL_TOKEN_FILE" in environment):
+                or shell or cwd != ("/app" if managed else "")
+                or "TUNNEL_TOKEN" in environment or "TUNNEL_TOKEN_FILE" in environment):
+            raise ValueError
+        if managed and environment.get("CPK_WRAPPER_CONFIGURATION_FILE") != _MANAGED_CONNECTOR_CONFIGURATION_PATH:
             raise ValueError
         environment["TUNNEL_TOKEN_FILE"] = _connector_text(token_path)
     payload = (entrypoint, command, user, cwd, stop, shell, environment, probe, timing)
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _connector_container(raw: Any) -> DockerSdkConnectorInspection:
+def _connector_container(raw: Any, *, profile=ConnectorConnectionProfile.NATIVE_READER_V1) -> DockerSdkConnectorInspection:
     attrs = _connector_mapping(raw)
     identity = _connector_text(attrs["Id"], 64)
     if re.fullmatch(r"[0-9a-f]{64}", identity) is None or not _is_canonical_sha256_image_id(attrs["Image"]):
@@ -1720,14 +1743,29 @@ def _connector_container(raw: Any) -> DockerSdkConnectorInspection:
     if any(host.get(key) not in (None, [], {}) for key in ("Binds", "Tmpfs", "VolumesFrom")):
         raise ValueError
     configured, observed = host["Mounts"], attrs["Mounts"]
-    if type(configured) is not list or type(observed) is not list or len(configured) != 1 or len(observed) != 1:
+    managed = profile is ConnectorConnectionProfile.MANAGED_WRAPPER_V1
+    count = 2 if managed else 1
+    if type(configured) is not list or type(observed) is not list or len(configured) != count or len(observed) != count:
         raise ValueError
-    _connector_mapping(configured[0])
-    _connector_mapping(observed[0])
+    for item in configured + observed:
+        _connector_mapping(item)
     mounts = _readonly_secret_mounts(attrs)
-    if len(mounts) != 1:
+    if len(mounts) != count:
         raise ValueError
-    mount, = mounts
+    configuration_mount = None
+    if managed:
+        configuration, = (value for value in mounts if value.target_path == _MANAGED_CONNECTOR_CONFIGURATION_PATH)
+        mount, = (value for value in mounts if value != configuration)
+        for left, right in ((mount.target_path, configuration.target_path), (configuration.target_path, mount.target_path)):
+            if left == right or right.startswith(left.rstrip("/") + "/"):
+                raise ValueError
+        # Never read token storage as configuration, even if mounted twice.
+        if mount.volume_name == configuration.volume_name:
+            raise ValueError
+        configuration_mount = DockerSdkConnectorConfigurationMount(
+            _connector_text(configuration.target_path), _connector_text(configuration.volume_name, 256))
+    else:
+        mount, = mounts
     _connector_text(mount.target_path)
     _connector_text(mount.volume_name, 256)
     log = _connector_mapping(state["Health"])["Log"]
@@ -1740,7 +1778,8 @@ def _connector_container(raw: Any) -> DockerSdkConnectorInspection:
         raise ValueError
     sample = DockerSdkConnectorSample(_connector_text(latest["Start"], 40), _connector_text(latest["End"], 40),
         latest["ExitCode"], _connector_text(latest["Output"], 256))
-    return DockerSdkConnectorInspection(identity, name, attrs["Image"], labels, launch, network, mount, started_at, sample)
+    return DockerSdkConnectorInspection(identity, name, attrs["Image"], labels, launch, network,
+        mount, started_at, sample, configuration_mount)
 
 
 def _readonly_secret_mounts(attrs: Any) -> tuple[DockerSdkSecretMount, ...]:
