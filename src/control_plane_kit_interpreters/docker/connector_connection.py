@@ -1,4 +1,4 @@
-"""Opt-in passive native reader-v1 observation, without effect replay.
+"""Opt-in passive native connection observation with closed launch profiles.
 
 Construction is not admission. Operations owns current authority and folding.
 """
@@ -10,16 +10,21 @@ import re
 from typing import Callable
 from uuid import UUID
 
-from control_plane_kit_core.configuration import ConfigurationMediaType
+import control_plane_kit_core as core
+from control_plane_kit_core.algebra import BlockSockets, ProviderSocket
+from control_plane_kit_core.configuration import ConfigurationMediaType, ConfigurationFileMode, ConfigurationArtifactRequirement
+from control_plane_kit_core.environment import PublicStaticEnvironmentBinding
 from control_plane_kit_core.planning import (
     ActivityId, ActivityPlan, ManagementBootstrapStage, ObserveManagementBootstrap,
     PlanGraphSide, resolve_management_observation, compile_graph_activity_plan,
     compile_managed_update_activity_plan, AllocatePublicIngress, StartNode, StartRuntime,
 )
-from control_plane_kit_core.products import ProductDescriptorCodec, ProductDescriptorDocument, ProductReference
-from control_plane_kit_core.receiver_configuration import select_receiver_node_control_configuration_artifact
+from control_plane_kit_core.products import ProductDescriptorCodec, ProductDescriptorDocument, ProductReference, ProviderRuntimePort
+from control_plane_kit_core.receiver_configuration import (
+    select_receiver_node_control_configuration_artifact, select_receiver_node_control_configuration_slot,
+)
 from control_plane_kit_core.runtime_authority import RuntimeAuthorityReference
-from control_plane_kit_core.runtime_effects import RuntimeEffectRequest, RuntimeProductMaterial
+from control_plane_kit_core.runtime_effects import RuntimeEffectKind, RuntimeEffectRequest, RuntimeProductMaterial
 from control_plane_kit_core.secret_installation import (
     SecretInstallationReceipt, secret_installation_correlation_for_request,
     secret_material_selection_fingerprint,
@@ -29,12 +34,17 @@ from control_plane_kit_core.secrets import SecretFileDelivery, SecretFileMode, S
 from control_plane_kit_core.topology.changes import FieldSubject, ModifiedChange, StructuralField
 from control_plane_kit_core.topology.diff import diff_graphs
 from control_plane_kit_core.topology.validation import NodeSubject
-from control_plane_kit_core.types import RuntimeKind
-from control_plane_kit_interpreters.docker.configuration import _container_incarnation_fingerprint
+from control_plane_kit_core.types import RuntimeKind, Protocol
+from control_plane_kit_interpreters.docker.configuration import (
+    _container_incarnation_fingerprint, configuration_volume_name, require_configuration_file,
+)
 from control_plane_kit_interpreters.docker.runtime import (
     _container_name, _network_name, _node_correlation_labels, _node_labels, _secret_volume_name,
 )
-from control_plane_kit_interpreters.docker.sdk import DockerSdkClient, DockerSdkSecretMount
+from control_plane_kit_interpreters.docker.sdk import (
+    ConnectorConnectionProfile, DockerSdkClient, DockerSdkSecretMount, DockerSdkConfigurationMount,
+    _MANAGED_CONNECTOR_CONFIGURATION_PATH,
+)
 
 
 class ConnectorConnectionOutcome(StrEnum):
@@ -67,10 +77,12 @@ class DockerConnectorConnectionObserver:
     product_reference: ProductReference
     image_reference: str
     clock: Callable[[], datetime]
+    profile: ConnectorConnectionProfile = ConnectorConnectionProfile.NATIVE_READER_V1
 
     def __post_init__(self):
         if (type(self.client) is not DockerSdkClient or type(self.product_reference) is not ProductReference
-                or type(self.image_reference) is not str or not callable(self.clock)):
+                or type(self.image_reference) is not str or not callable(self.clock)
+                or type(self.profile) is not ConnectorConnectionProfile):
             raise TypeError("native connection observer configuration is invalid")
 
     def qualify(self, *, activity_id, plan, current, desired, material,
@@ -101,9 +113,13 @@ class DockerConnectorConnectionObserver:
                     or document.product.image.execution_reference != self.image_reference
                     or node.metadata.get("product_identity") != reference.identity.key
                     or node.metadata.get("product_descriptor_digest") != reference.descriptor_sha256.value
-                    or node.public_environment or node.socket_environment
-                    or node.configuration_artifacts or node.runtime_authority_deliveries
-                    or contract.public_environment or contract.configuration_artifacts or contract.retained_data_mounts):
+                    or node.socket_environment or node.runtime_authority_deliveries
+                    or contract.retained_data_mounts):
+                raise ValueError
+            if self.profile is ConnectorConnectionProfile.MANAGED_WRAPPER_V1:
+                _managed_slot(contract, node)
+            elif (node.public_environment or node.configuration_artifacts
+                    or contract.public_environment or contract.configuration_artifacts):
                 raise ValueError
             # The graph declares the producer/consumer relation. Operations alone
             # later creates the delivery and selected version from durable facts.
@@ -184,9 +200,13 @@ class DockerConnectorConnectionObserver:
                 or material.product.image.execution_reference != self.image_reference
                 or node.metadata.get("product_identity") != material.reference.identity.key
                 or node.metadata.get("product_descriptor_digest") != material.reference.descriptor_sha256.value
-                or material.public_environment or material.socket_environment
+                or material.socket_environment
                 or material.runtime_authority_deliveries
-                or contract.public_environment or contract.configuration_artifacts or contract.retained_data_mounts):
+                or contract.retained_data_mounts):
+            raise ValueError
+        if self.profile is ConnectorConnectionProfile.MANAGED_WRAPPER_V1:
+            _managed_configuration(material, node)
+        elif material.public_environment or contract.public_environment or contract.configuration_artifacts:
             raise ValueError
         delivery, = contract.secret_deliveries
         _reader_token_slot(delivery)
@@ -217,6 +237,22 @@ class DockerConnectorConnectionObserver:
             else:
                 origin = _installation_origin(request, installation_request, installation_receipt)
                 incarnation = installation_receipt.current_realization_fingerprint
+            artifact, configuration_volume = None, None
+            if self.profile is ConnectorConnectionProfile.MANAGED_WRAPPER_V1:
+                artifact = _managed_configuration(material, node, workspace_id=request.source.workspace_id)
+                if mode is ConnectorConnectionQualification.RETAINED_CONTENT_UPDATE:
+                    # Invalid retained proof must never acquire fresh candidate semantics.
+                    if origin.kind is not RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1 or origin.configuration_instances is None:
+                        raise ValueError
+                    reference, = origin.configuration_instances.instances
+                    if (reference.workspace_id, reference.runtime_id, reference.node_id,
+                            reference.artifact_id, reference.target_path, reference.media_type,
+                            reference.file_mode, reference.content_digest) != (
+                            request.source.workspace_id, material.runtime_id, material.node_id,
+                            artifact.artifact_id, artifact.target_path, artifact.media_type,
+                            artifact.file_mode, artifact.content_digest):
+                        raise ValueError
+                    configuration_volume = configuration_volume_name(reference)
             expected_name = _container_name(origin, node.node_id)
             expected_labels = _node_correlation_labels(_node_labels(origin, material))
             network = _network_name(origin, material.runtime_id)
@@ -226,21 +262,36 @@ class DockerConnectorConnectionObserver:
         correlation = dict(effect_id=request.effect_id, activity_id=request.activity_id.value)
         unknown = ConnectorConnectionObservation(ConnectorConnectionOutcome.UNKNOWN, **correlation)
         try:
-            first = self.client.inspect_connector_container(expected_name)
+            first = self.client.inspect_connector_container(expected_name, profile=self.profile)
             if (first.name != "/" + expected_name or first.network != network
                     or _node_correlation_labels(dict(first.labels)) != expected_labels):
                 return unknown
             if incarnation is not None and _container_incarnation_fingerprint(first.container_id) != incarnation:
                 return unknown
             _fresh(first, self.clock())
-            image = self.client.inspect_connector_image(self.image_reference, token_path=delivery.target_path)
+            image = self.client.inspect_connector_image(self.image_reference, token_path=delivery.target_path,
+                profile=self.profile)
             mount = DockerSdkSecretMount(delivery.target_path,
                 _secret_volume_name(origin, node.node_id, delivery, owner_uid=image.owner_uid))
             _fresh(first, self.clock())
             if (first.image_id != image.image_id or first.launch_digest != image.launch_digest
                     or first.secret_mount != mount):
                 return unknown
-            final = self.client.inspect_connector_container(first.container_id)
+            if artifact is not None:
+                selected = first.configuration_mount
+                if (selected is None or selected.target_path != artifact.target_path
+                        or (configuration_volume is not None and selected.volume_name != configuration_volume)):
+                    return unknown
+                # Fresh volume is an observed candidate, not an allocated reference.
+                mounted = DockerSdkConfigurationMount(artifact, selected.volume_name)
+                content = self.client.inspect_configuration_mount(first.container_id, mounted)
+                _fresh(first, self.clock())
+                if (content is None or content.container_id != first.container_id
+                        or content.volume_name != selected.volume_name or content.target_path != artifact.target_path
+                        or content.subpath != "content" or content.read_only is not True):
+                    return unknown
+                require_configuration_file(content.file, artifact)
+            final = self.client.inspect_connector_container(first.container_id, profile=self.profile)
             _fresh(final, self.clock())
             # Equality includes latest sample, incarnation, effective program,
             # ownership and immutable ID; a new failed sample loses old success.
@@ -255,6 +306,63 @@ class DockerConnectorConnectionObserver:
             # Provider exceptions, candidate values and their hashes never cross
             # the observation boundary. No retries or fallback effects.
             return unknown
+
+
+_MANAGED_REQUIREMENT = ConfigurationArtifactRequirement("cloudflared-control",
+    _MANAGED_CONNECTOR_CONFIGURATION_PATH, ConfigurationMediaType.JSON, ConfigurationFileMode.READ_ONLY)
+_MANAGED_ENVIRONMENT = (PublicStaticEnvironmentBinding(
+    "CPK_WRAPPER_CONFIGURATION_FILE", _MANAGED_CONNECTOR_CONFIGURATION_PATH),)
+_MANAGED_DECLARATION = core.WorkloadNodeControlSurfaceDeclaration(
+    core.WorkloadNodeControlSurfaceDescriptor(
+        core.NodeControlGraphReference(core.NodeControlGraphReferenceRole.PROVIDER_SOCKET, "control"),
+        (), (core.NodeHealthReadKind.LIVENESS, core.NodeHealthReadKind.READINESS)),
+    profile=core.WorkloadNodeControlSurfaceDeclarationProfile.V2)
+
+
+def _slot_fields(value):
+    return value.artifact_id, value.target_path, value.media_type, value.file_mode
+
+
+def _managed_slot(contract, node):
+    """Pure structural capability; declared requirements do not resolve material."""
+    surfaces = (_MANAGED_DECLARATION.surface,)
+    if (contract.public_environment != _MANAGED_ENVIRONMENT
+            or node.public_environment != _MANAGED_ENVIRONMENT or node.socket_environment
+            or node.runtime_authority_deliveries or contract.control_surfaces != surfaces
+            or node.block_spec.control_surfaces != surfaces
+            or contract.sockets != BlockSockets(providers=(ProviderSocket("control", Protocol.HTTP),))
+            or node.sockets != contract.sockets
+            or contract.provider_ports != (ProviderRuntimePort("control", 8000),)
+            or len(contract.configuration_artifacts) + len(contract.configuration_requirements) != 1
+            or len(node.configuration_artifacts) != 1):
+        raise ValueError
+    declared = select_receiver_node_control_configuration_slot(
+        artifacts=contract.configuration_artifacts, requirements=contract.configuration_requirements,
+        environment=contract.public_environment, control_surfaces=surfaces)
+    authored = select_receiver_node_control_configuration_slot(artifacts=node.configuration_artifacts,
+        environment=node.public_environment, control_surfaces=surfaces)
+    if _slot_fields(declared) != _slot_fields(_MANAGED_REQUIREMENT) or _slot_fields(authored) != _slot_fields(declared):
+        raise ValueError
+    if contract.configuration_artifacts and contract.configuration_artifacts != node.configuration_artifacts:
+        raise ValueError
+    return authored
+
+
+def _managed_configuration(material, node, *, workspace_id=None):
+    contract = material.product.runtime_contract
+    _managed_slot(contract, node)
+    if (contract.configuration_requirements or material.public_environment != _MANAGED_ENVIRONMENT
+            or contract.configuration_artifacts != node.configuration_artifacts):
+        raise ValueError
+    artifact = select_receiver_node_control_configuration_artifact(
+        artifacts=contract.configuration_artifacts, environment=material.public_environment,
+        control_surfaces=contract.control_surfaces)
+    value = core.ReceiverNodeControlConfigurationCodec().decode_bytes(artifact.content.encode("utf-8"))
+    if (value.declaration != _MANAGED_DECLARATION or value.target.runtime_id.value != material.runtime_id
+            or value.target.node_id.value != material.node_id
+            or (workspace_id is not None and value.target.workspace_id.value != workspace_id)):
+        raise ValueError
+    return artifact
 
 
 def _reader_token_slot(delivery):
