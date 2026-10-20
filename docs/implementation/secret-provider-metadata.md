@@ -1,6 +1,13 @@
 # Exact metadata and resolution (#190)
 
-Current Interpreters #207 dependency adoption selects Core #2005 merge
+Current Interpreters #211 selects accepted Core
+`ec61e2b17c3a3f1bdea1dd6bc8fc64ac1b9528b0`. Declared configuration requirements
+do not replace actual metadata/grant contracts or grant provider authority.
+This adapter's validation, exact-version resolution, bounded errors and no-retry
+semantics are unchanged. Selected Secrets/SDK dependency compatibility awaits
+the unchanged owning gate; no new provider or live evidence is claimed.
+
+Historical Interpreters #207 dependency adoption selects Core #2005 merge
 `73d87e99bf711ff8a88112ca56c5eee8055ac5b7`. Its private declaration relation
 and controller selection/planning changes leave consumed metadata/grant
 contracts unchanged. This adapter's validation, exact-version resolution,

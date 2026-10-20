@@ -1,6 +1,15 @@
 Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py).
 
-Interpreters #207 advances installed-owner expectations to actual Secrets #61
+Interpreters #211 advances installed-owner expectations to accepted Secrets #63
+merge `b30e62664da50cfdda347509a17fa70888cb169a` and SDK #65 merge
+`eff09090755eb21028695f0224eec7b81f2db535`, sharing accepted Core
+`ec61e2b17c3a3f1bdea1dd6bc8fc64ac1b9528b0`. Only the two coordinate constants
+change. Exact installed archive equality, candidate origin, signing/composition
+and denial assertions remain intact. The historical Servers fixture and its
+existing `--no-deps` boundary are unchanged. Owning validation remains pending;
+selected manifests alone do not prove installed compatibility or live behavior.
+
+Historical Interpreters #207 advances installed-owner expectations to actual Secrets #61
 merge `7ff1e771874e5963ee840d7148d2d4052278baa1` and SDK #63 merge
 `1657cb91b143931bafcdb32108950d2bbbb66d95`, sharing Core
 `73d87e99bf711ff8a88112ca56c5eee8055ac5b7`. Exact installed provenance,

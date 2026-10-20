@@ -1,6 +1,12 @@
 Source: [test_support/tests/test_gate_contract.py](../../../../test_support/tests/test_gate_contract.py).
 
-Interpreters #207 advances only CORE_REQUIREMENT to accepted Core
+Interpreters #211 advances only CORE_REQUIREMENT to accepted Core
+`ec61e2b17c3a3f1bdea1dd6bc8fc64ac1b9528b0`, matching the direct dependency.
+Exact equality, pinned resolution, gate and provider-opt-in assertions remain
+unchanged. This mechanical alignment needs no artificial target-red.
+Ordinary owning-gate validation remains pending at this source checkpoint.
+
+Historical Interpreters #207 advances only CORE_REQUIREMENT to accepted Core
 `73d87e99bf711ff8a88112ca56c5eee8055ac5b7`. Exact equality, pinned resolution,
 gate and provider-opt-in assertions are unchanged. The ordinary owning gate
 must validate the new dependency combination; no artificial red is required.
