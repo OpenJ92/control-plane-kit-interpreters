@@ -62,6 +62,8 @@ from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkImageInspection,
     DockerSdkResourceInspection,
     DockerTlsClientConfig,
+    DockerUnixSocketClientConfig,
+    _DockerUnixClientAcquisitionError,
     _is_canonical_sha256_image_id,
     _network_attachments,
     _network_identity,
@@ -146,10 +148,23 @@ _SDK_INSPECTION_ORIGINS = frozenset({
 class DockerRuntimeEffectObserver:
     """Confirm resource postconditions, never content, readiness, or endpoints."""
 
-    client: DockerSdkClient = field(repr=False)
+    client: DockerSdkClient | None = field(default=None, repr=False)
     authorized_secret_resolver: AuthorizedSecretResolver | None = field(
         default=None, repr=False,
     )
+    local_client_config: DockerUnixSocketClientConfig | None = field(
+        default=None, repr=False, kw_only=True,
+    )
+    docker_module: object | None = field(default=None, repr=False, kw_only=True)
+
+    def __post_init__(self) -> None:
+        if (self.client is None) == (self.local_client_config is None):
+            raise ValueError("Docker observer requires exactly one client or local policy")
+        if self.local_client_config is not None:
+            if not isinstance(self.local_client_config, DockerUnixSocketClientConfig):
+                raise TypeError("Docker observer local policy is invalid")
+        elif self.docker_module is not None:
+            raise ValueError("Docker observer module injection requires a local policy")
 
     def observe(
         self,
@@ -204,7 +219,7 @@ class DockerRuntimeEffectObserver:
     ) -> tuple[DockerSdkClient, bool] | _Postcondition:
         request = observation.runtime_request
         if authority is None:
-            if request.authority_ref is not None:
+            if request.authority_ref is not None or self.local_client_config is not None:
                 return _Postcondition.UNESTABLISHED
             return self.client, False
         runtime_kind = getattr(authority, "runtime_kind", None)
@@ -212,6 +227,12 @@ class DockerRuntimeEffectObserver:
             return _Postcondition.UNSUPPORTED
         authority_kind = getattr(authority, "authority_kind", None)
         authority_kind = getattr(authority_kind, "value", authority_kind)
+        if self.local_client_config is not None:
+            if authority_kind != "local-docker-socket":
+                return _Postcondition.UNSUPPORTED
+            return DockerSdkClient.from_authority(
+                self.local_client_config, docker_module=self.docker_module,
+            ), True
         if authority_kind == "local-docker-socket":
             return self.client, False
         if authority_kind != "remote-docker-tls":
@@ -397,6 +418,8 @@ def _ownership(
 
 
 def _provider_error(error: BaseException) -> bool:
+    if type(error) is _DockerUnixClientAcquisitionError:
+        return True
     if isinstance(error, OSError):
         return True
     if not isinstance(error, Exception):

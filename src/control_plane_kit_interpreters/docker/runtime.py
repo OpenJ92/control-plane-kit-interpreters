@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 import hashlib
 import json
@@ -82,6 +82,7 @@ from control_plane_kit_interpreters.docker.sdk import (
     DockerSdkImageInspection,
     DockerSdkResourceInspection,
     DockerTlsClientConfig,
+    DockerUnixSocketClientConfig,
     DockerSdkConfigurationMount,
     DockerSdkConfigurationEvidenceError,
     DockerSdkPortBinding,
@@ -195,12 +196,25 @@ def _start_node_provider_call(
 class DockerRuntimeInterpreter:
     """Interpret pure runtime-effect requests with the Python Docker SDK."""
 
-    client: DockerSdkClient
+    client: DockerSdkClient | None = None
     http_transport: object | None = None
     postgres_transport: PostgresSelectOneTransport | None = None
     image_pull_credentials: ImagePullCredentialResolver | None = None
     secret_resolver: SecretResolver | None = None
     authorized_secret_resolver: AuthorizedSecretResolver | None = None
+    local_client_config: DockerUnixSocketClientConfig | None = field(
+        default=None, repr=False, kw_only=True,
+    )
+    docker_module: object | None = field(default=None, repr=False, kw_only=True)
+
+    def __post_init__(self) -> None:
+        if (self.client is None) == (self.local_client_config is None):
+            raise ValueError("Docker runtime requires exactly one client or local policy")
+        if self.local_client_config is not None:
+            if not isinstance(self.local_client_config, DockerUnixSocketClientConfig):
+                raise TypeError("Docker runtime local policy is invalid")
+        elif self.docker_module is not None:
+            raise ValueError("Docker runtime module injection requires a local policy")
 
     def execute(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         if not isinstance(request, RuntimeEffectRequest):
@@ -213,6 +227,8 @@ class DockerRuntimeInterpreter:
         try:
             runtime_effect_intent_for_request(request)
             _admit_selected_secrets(request, self.authorized_secret_resolver)
+            if self.local_client_config is not None:
+                return _unsupported(request, "docker.runtime-authority-required")
             if type(request.operation) is CleanupConfigurationInstances:
                 return cleanup_configuration(self.client, request)
             if request.kind is RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1 or _has_selected_secrets(request):
@@ -294,6 +310,8 @@ class DockerRuntimeInterpreter:
                 request,
                 self.authorized_secret_resolver,
                 self.secret_resolver,
+                local_client_config=self.local_client_config,
+                docker_module=self.docker_module,
             )
         except RuntimeEffectContractError:
             return _failed(request, "docker.runtime-request-invalid", "Docker runtime request is invalid")
@@ -310,13 +328,15 @@ class DockerRuntimeInterpreter:
                 ),
             )
         if not client_binding.close_after_execution:
-            return replace(self, client=client_binding.client).execute(request)
+            return replace(self, client=client_binding.client,
+                           local_client_config=None, docker_module=None).execute(request)
 
         result: RuntimeEffectResult | None = None
         execution_error: Exception | None = None
         close_error: Exception | None = None
         try:
-            result = replace(self, client=client_binding.client).execute(request)
+            result = replace(self, client=client_binding.client,
+                             local_client_config=None, docker_module=None).execute(request)
         except Exception as error:
             execution_error = error
         finally:
@@ -1472,17 +1492,29 @@ def _single_product(request: RuntimeEffectRequest) -> RuntimeProductMaterial:
 
 
 def _client_for_runtime_authority(
-    ambient_client: DockerSdkClient,
+    ambient_client: DockerSdkClient | None,
     authority: object,
     request: RuntimeEffectRequest,
     authorized_resolver: AuthorizedSecretResolver | None,
     legacy_resolver: SecretResolver | None,
+    *,
+    local_client_config: DockerUnixSocketClientConfig | None = None,
+    docker_module: object | None = None,
 ) -> _RuntimeAuthorityClientBinding:
     if _authority_value(getattr(authority, "runtime_kind", None)) != RuntimeKind.DOCKER.value:
         raise _DockerInterpreterUnsupportedAuthorityError(
             "docker.runtime-authority-runtime-unsupported"
         )
     authority_kind = _authority_value(getattr(authority, "authority_kind", None))
+    if local_client_config is not None:
+        if authority_kind != "local-docker-socket":
+            raise _DockerInterpreterUnsupportedAuthorityError(
+                "docker.runtime-authority-kind-unsupported"
+            )
+        return _RuntimeAuthorityClientBinding(
+            DockerSdkClient.from_authority(local_client_config, docker_module=docker_module),
+            close_after_execution=True,
+        )
     if authority_kind == "local-docker-socket":
         return _RuntimeAuthorityClientBinding(
             ambient_client,
