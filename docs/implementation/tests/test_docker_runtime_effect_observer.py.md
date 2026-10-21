@@ -7,3 +7,8 @@ Owned construction is pure and exclusive while retaining positional borrowed cal
 Real SDK-wrapper acquisition tests inject transport mismatch, incompatible version, handshake, constructor and cleanup failures; none may inspect a resource or report absence. Unexpected factory/read/close errors retain identity and close-before-propagation behavior. Sequential/overlapping calls use independent clients; bounded barriers require both calls in flight before construction returns. Shared policy is not shared mutable client state.
 
 Targets intentionally assert missing API within test execution rather than failing collection. Only unchanged owning Docker ./test.sh after independent target review supplies evidence. The installed-SDK no-contact witness is owned by the companion SDK suite; these cases do not claim real Engine compatibility, native qualification, Servers cancellation handling or live225. No provider/resource mutation or history/schema change.
+
+Causal-red update: owner39610482883 ran584 methods,21 intentional missing-policy
+failures and0 errors; the563 prior methods passed. Kepler acceptance6317675525
+confirms API absence only. Source now exists and unchanged deeper targets still
+require the complete owner gate; initial unexecuted wording is historical.

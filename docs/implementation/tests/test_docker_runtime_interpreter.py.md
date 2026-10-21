@@ -7,3 +7,9 @@ Owned construction preserves positional borrowed clients, rejects ambiguous poli
 The selected-secret/configuration target reuses existing materialization fixtures through the public owned execute_with_authority entrance. It verifies recipient execution, stripped completion receipts/observations, authority_close_unknown, and redaction after close failure. It patches only SDK acquisition, not the authority-binding helper. Unexpected execution errors close then propagate. Sequential and overlapping operations use distinct real SDK wrappers, with bounded barriers and separate resources/close counts.
 
 Normal unchanged owner Docker ./test.sh is the only execution gate after independent target review. No source change, provider action, durable semantics, broad lifecycle manager or live startup claim is represented by this target checkpoint.
+
+Causal-red update: owner39610482883 ran584 methods with21 intentional
+missing-policy failures and0 errors, preserving563 prior green methods.
+Independent acceptance6317675525 precedes source; targets stay unchanged into
+full validation. Earlier statements about unexecuted targets describe the
+initial target-only checkpoint, not current evidence.

@@ -151,6 +151,69 @@ class DockerLocalAmbientClientConfig:
 
 
 @dataclass(frozen=True, repr=False)
+class DockerUnixSocketClientConfig:
+    """Pure explicit endpoint policy, not runtime authority or daemon identity."""
+
+    socket_path: str
+    request_timeout: float
+
+    def __post_init__(self) -> None:
+        path = self.socket_path
+        if type(path) is not str:
+            raise TypeError("Docker Unix socket path must be a string")
+        if (not 1 < len(path) <= 4096 or not path.startswith("/")
+                or any(part in ("", ".", "..") for part in path.split("/")[1:])
+                or any(ord(char) < 32 or 127 <= ord(char) <= 159 or char in "?#" for char in path)):
+            raise ValueError("Docker Unix socket path must be canonical and absolute")
+        timeout = self.request_timeout
+        if type(timeout) not in (int, float):
+            raise TypeError("Docker Unix request timeout must be numeric")
+        # Bound integers before conversion in isfinite, including enormous ones.
+        if not 0 < timeout <= 60 or not math.isfinite(timeout):
+            raise ValueError("Docker Unix request timeout must be finite and within bounds")
+
+    def __repr__(self) -> str:
+        return "DockerUnixSocketClientConfig(<redacted>)"
+
+
+class _DockerUnixClientAcquisitionError(RuntimeError):
+    """Only fixed acquisition/cleanup failures, never arbitrary SDK faults."""
+
+
+def _uses_unix_socket(client: Any, path: str) -> bool:
+    api = getattr(client, "api", None)
+    base_url = getattr(api, "base_url", None)
+    get_adapter = getattr(api, "get_adapter", None)
+    if not isinstance(base_url, str) or not callable(get_adapter):
+        return False
+    from docker.transport import UnixHTTPAdapter
+    from requests.exceptions import InvalidSchema
+
+    try:
+        adapter = get_adapter(base_url)
+    except InvalidSchema:
+        return False
+    return isinstance(adapter, UnixHTTPAdapter) and adapter.socket_path == path
+
+
+def _unix_api_version(value: object) -> tuple[int, int]:
+    if type(value) is str and len(value) <= 7:
+        match = re.fullmatch(r"(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})", value)
+        if match is not None:
+            return int(match[1]), int(match[2])
+    raise _DockerUnixClientAcquisitionError("Docker Unix API compatibility is unavailable")
+
+
+def _verify_unix_api_range(version: object) -> None:
+    if not isinstance(version, Mapping):
+        raise _DockerUnixClientAcquisitionError("Docker Unix API compatibility is unavailable")
+    minimum = _unix_api_version(version.get("MinAPIVersion"))
+    maximum = _unix_api_version(version.get("ApiVersion"))
+    if not minimum <= (1, 45) <= maximum:
+        raise _DockerUnixClientAcquisitionError("Docker Unix API compatibility is unsupported")
+
+
+@dataclass(frozen=True, repr=False)
 class DockerTlsClientConfig:
     """Ephemeral remote Docker TLS client material with redacted representation."""
 
@@ -480,8 +543,16 @@ class DockerSdkClient:
         "python:3.14-slim@sha256:"
         "cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6"
     )
+    local_client_config: DockerUnixSocketClientConfig | None = field(
+        default=None, repr=False, kw_only=True,
+    )
 
     def __post_init__(self) -> None:
+        if self.local_client_config is not None:
+            if not isinstance(self.local_client_config, DockerUnixSocketClientConfig):
+                raise TypeError("Docker Unix client policy is invalid")
+            if self.client is not None or self.tls_config is not None:
+                raise ValueError("Docker Unix client policy requires an unbound client")
         docker_module = self.docker_module
         if docker_module is None:
             docker_module = import_module("docker")
@@ -495,11 +566,14 @@ class DockerSdkClient:
     @classmethod
     def from_authority(
         cls,
-        authority: DockerLocalAmbientClientConfig | DockerTlsClientConfig,
+        authority: DockerLocalAmbientClientConfig | DockerTlsClientConfig | DockerUnixSocketClientConfig,
         *,
         docker_module: Any | None = None,
         connect_on_init: bool = True,
     ) -> "DockerSdkClient":
+        if isinstance(authority, DockerUnixSocketClientConfig):
+            return cls(docker_module=docker_module, local_client_config=authority,
+                       connect_on_init=connect_on_init)
         if isinstance(authority, DockerLocalAmbientClientConfig):
             return cls(
                 docker_module=docker_module,
@@ -520,9 +594,44 @@ class DockerSdkClient:
         if docker_module is None:
             docker_module = import_module("docker")
             self.docker_module = docker_module
+        if self.local_client_config is not None:
+            return self._unix_client(docker_module, self.local_client_config)
         if self.tls_config is None:
             return docker_module.from_env()
         return self._remote_tls_client(docker_module, self.tls_config)
+
+    def _unix_client(self, docker_module: Any, policy: DockerUnixSocketClientConfig) -> Any:
+        client = None
+        try:
+            # An explicit API avoids Engine negotiation inside the constructor.
+            # Construction may still read the SDK's ordinary config/auth files.
+            client = docker_module.DockerClient(
+                base_url="unix://" + policy.socket_path,
+                timeout=policy.request_timeout,
+                version="1.45",
+            )
+            if not _uses_unix_socket(client, policy.socket_path):
+                raise _DockerUnixClientAcquisitionError("Docker Unix transport is unverified")
+            _verify_unix_api_range(client.version(api_version=False))
+            return client
+        except BaseException as error:
+            # Failed deferred acquisition is terminal even without a returned
+            # handle. Never retry implicitly or expose an unverified client.
+            self._closed = True
+            self.client = None
+            close_error = None
+            if client is not None:
+                try:
+                    client.close()
+                except BaseException as caught:
+                    close_error = caught
+            if not isinstance(error, Exception):
+                raise
+            if close_error is not None:
+                if not isinstance(close_error, Exception):
+                    raise close_error
+                raise _DockerUnixClientAcquisitionError("Docker Unix acquisition cleanup is uncertain") from None
+            raise
 
     def _client(self) -> Any:
         if self._closed:
@@ -575,19 +684,7 @@ class DockerSdkClient:
         """
         if self.tls_config is not None:
             return False
-        api = getattr(self._client(), "api", None)
-        base_url = getattr(api, "base_url", None)
-        get_adapter = getattr(api, "get_adapter", None)
-        if not isinstance(base_url, str) or not callable(get_adapter):
-            return False
-        from docker.transport import UnixHTTPAdapter
-        from requests.exceptions import InvalidSchema
-
-        try:
-            adapter = get_adapter(base_url)
-        except InvalidSchema:
-            return False
-        return isinstance(adapter, UnixHTTPAdapter) and adapter.socket_path == path
+        return _uses_unix_socket(self._client(), path)
 
     def inspect_authority_provider_facts(self) -> DockerAuthorityProviderFacts | None:
         """Read compatibility facts from this bound client; never cache or reconnect."""
@@ -646,6 +743,7 @@ class DockerSdkClient:
         directory = self._tls_directory
         self.client = None
         self.tls_config = None
+        self.local_client_config = None
         self._tls_directory = None
 
         client_error: Exception | None = None
