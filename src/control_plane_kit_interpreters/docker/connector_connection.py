@@ -17,7 +17,8 @@ from control_plane_kit_core.environment import PublicStaticEnvironmentBinding
 from control_plane_kit_core.planning import (
     ActivityId, ActivityPlan, ManagementBootstrapStage, ObserveManagementBootstrap,
     PlanGraphSide, resolve_management_observation, compile_graph_activity_plan,
-    compile_managed_update_activity_plan, AllocatePublicIngress, StartNode, StartRuntime,
+    compile_managed_update_activity_plan, compile_retained_image_ingress_activity_plan,
+    AllocatePublicIngress, ReconcileNode, StartNode, StartRuntime,
 )
 from control_plane_kit_core.products import ProductDescriptorCodec, ProductDescriptorDocument, ProductReference, ProviderRuntimePort
 from control_plane_kit_core.receiver_configuration import (
@@ -57,6 +58,7 @@ class ConnectorConnectionOutcome(StrEnum):
 class ConnectorConnectionQualification(StrEnum):
     FRESH = "fresh"
     RETAINED_CONTENT_UPDATE = "retained_content_update"
+    RETAINED_IMAGE_INGRESS_UPDATE = "retained_image_ingress_update"
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,15 +175,27 @@ class DockerConnectorConnectionObserver:
                 raise ValueError
             mode = ConnectorConnectionQualification.FRESH
         else:
-            compiled = compile_managed_update_activity_plan(current, desired)
-            if (plan != compiled or not compiled.ready_for_execution
-                    or current.graph.runtimes[runtime_id] != runtime
+            if (current.graph.runtimes[runtime_id] != runtime
                     or current.graph.nodes.get(gateway_id) != resolved.gateway_node
                     or current.graph.nodes.get(node.node_id) != node
-                    or resolved.ingress not in current.graph.public_ingresses
-                    or not _retained_content_change(current, desired, runtime_id, gateway_id, node.node_id)):
+                    or resolved.ingress not in current.graph.public_ingresses):
                 raise ValueError
-            mode = ConnectorConnectionQualification.RETAINED_CONTENT_UPDATE
+            image_plan = compile_retained_image_ingress_activity_plan(current, desired)
+            if plan == image_plan and image_plan.ready_for_execution and image_plan.activities:
+                # Core owns the image relation and ordering. Bound this reader to
+                # the retained management path of the one affected workload.
+                replacement, = (value.operation for value in image_plan.activities
+                    if type(value.operation) is ReconcileNode)
+                affected = desired.graph.nodes[replacement.target.node_id]
+                if affected.runtime_id != runtime_id or affected.node_id in (gateway_id, node.node_id):
+                    raise ValueError
+                mode = ConnectorConnectionQualification.RETAINED_IMAGE_INGRESS_UPDATE
+            else:
+                compiled = compile_managed_update_activity_plan(current, desired)
+                if (plan != compiled or not compiled.ready_for_execution
+                        or not _retained_content_change(current, desired, runtime_id, gateway_id, node.node_id)):
+                    raise ValueError
+                mode = ConnectorConnectionQualification.RETAINED_CONTENT_UPDATE
         return mode, resolved
 
     def _qualify(self, *, activity_id, plan, current, desired, material, authority_ref):
@@ -240,7 +254,8 @@ class DockerConnectorConnectionObserver:
             artifact, configuration_volume = None, None
             if self.profile is ConnectorConnectionProfile.MANAGED_WRAPPER_V1:
                 artifact = _managed_configuration(material, node, workspace_id=request.source.workspace_id)
-                if mode is ConnectorConnectionQualification.RETAINED_CONTENT_UPDATE:
+                if mode in (ConnectorConnectionQualification.RETAINED_CONTENT_UPDATE,
+                            ConnectorConnectionQualification.RETAINED_IMAGE_INGRESS_UPDATE):
                     # Invalid retained proof must never acquire fresh candidate semantics.
                     if origin.kind is not RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1 or origin.configuration_instances is None:
                         raise ValueError

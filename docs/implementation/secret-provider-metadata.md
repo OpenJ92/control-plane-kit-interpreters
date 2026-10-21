@@ -1,6 +1,12 @@
 # Exact metadata and resolution (#190)
 
-Current Interpreters #211 selects accepted Core
+Current Interpreters #214 selects accepted Core
+`955666898218e4f2956b6e9fcd33bdba97ffdb06`. The added pure retained-image
+compiler does not change this adapter's consumed metadata/grant contracts,
+exact-version resolution, redaction or no-retry semantics. SDK/Secrets
+predecessors are accepted; Interpreter installation still requires its own gate.
+
+Historical Interpreters #211 selects accepted Core
 `ec61e2b17c3a3f1bdea1dd6bc8fc64ac1b9528b0`. Declared configuration requirements
 do not replace actual metadata/grant contracts or grant provider authority.
 This adapter's validation, exact-version resolution, bounded errors and no-retry
