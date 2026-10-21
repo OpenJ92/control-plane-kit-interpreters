@@ -6,7 +6,7 @@ import unittest
 
 import control_plane_kit_core as core
 from control_plane_kit_core.configuration import ConfigurationFileMode, ConfigurationMediaType
-from control_plane_kit_core.planning import ActivityPlan, ObserveManagementBootstrap, ManagementBootstrapStage
+from control_plane_kit_core.planning import ActivityPlan, ObserveManagementBootstrap, ManagementBootstrapStage, ReconcileNode
 from control_plane_kit_core.runtime_effects import RuntimeEffectKind
 from control_plane_kit_core.secret_selections import UnselectedSecretUse
 from control_plane_kit_core.topology import validate_graph
@@ -118,7 +118,7 @@ class RetainedImageConnectorTests(unittest.TestCase):
                         if value.activity_id == world.request.activity_id))
                 elif case == "dependencies":
                     world.plan = ActivityPlan(tuple(replace(value, dependencies=())
-                        if type(value.operation) is core.ReconcileNode else value for value in world.plan.activities))
+                        if type(value.operation) is ReconcileNode else value for value in world.plan.activities))
                     self.assertTrue(world.plan.ready_for_execution)
                 elif case == "foreign-graph": world.desired = world.current
                 else:

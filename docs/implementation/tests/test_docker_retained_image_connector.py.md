@@ -35,3 +35,11 @@ Kepler target review precedes one unchanged full pinned ./test.sh run. Intended
 red must be missing image qualification/observation, with valid fixture setup,
 dependency installation and collection. Installed compatibility and subsequent
 green remain evidence to record on the issue/PR, not claims made by these notes.
+
+Initial checkpoint `6c0d271` ran 26 policy and 563 package tests. Eighteen
+assertion failures were missing image qualification/observation, but one
+dependency-tampering subcase used the nonexistent root `core.ReconcileNode`
+instead of the public `control_plane_kit_core.planning.ReconcileNode`.
+The corrected import preserves the same plan mutation and refusal assertions.
+That mixed first run is retained as evidence and is not clean causal red;
+review of the correction and an unchanged owner rerun precede implementation.
