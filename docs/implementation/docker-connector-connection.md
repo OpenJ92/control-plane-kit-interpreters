@@ -1,16 +1,32 @@
 # Native connection observation (#167)
 
-## Retained-image target checkpoint (#214)
+## Retained-image ingress observation (#214)
 
-The accepted dependency cohort now supplies Core's separate
-`compile_retained_image_ingress_activity_plan`. The
-[target laws](tests/test_docker_retained_image_connector.py.md) require pure
-qualification of that complete plan and retention of original installation
-proof through both launch profiles, including managed configuration-instance
-checks. Production qualification still supports only fresh and retained-content
-transitions at this target-only checkpoint. No semantic source has changed;
-independent target review and causal red precede implementation. Historical
-coordinates and evidence below describe their original checkpoints.
+`ConnectorConnectionQualification.RETAINED_IMAGE_INGRESS_UPDATE` names the
+separate image transition. Qualification compares the supplied nonempty ready
+plan to the entire `compile_retained_image_ingress_activity_plan` result. Core
+owns image metadata relations and ordering; the observer bounds the affected
+workload to the same retained runtime/management path and excludes gateway and
+connector replacements. There is no fixed activity count, product-name dispatch
+or duplicate registry/contract lookup. Old V1 image plans remain refused by the
+existing content-only relation; fresh and retained-content behavior is preserved.
+
+Both retained modes require the original typed secret installation request and
+receipt. Under MANAGED_WRAPPER_V1, both also require the original configuration
+effect kind and exact configuration instance, deriving the selected volume
+before SDK reads. Invalid supplied proof refuses before I/O; observed volume or
+incarnation mismatch is UNKNOWN without archive read. The existing bounded
+content/freshness/final-sample read path and current observation correlation are
+unchanged. Qualification neither grants current authority nor proves registered
+workload contract equality, which remains Operations-owned.
+
+The [target laws](tests/test_docker_retained_image_connector.py.md) passed
+independent review. Corrected target `eac62f9` reached 18 missing-image assertion
+failures and zero errors across 563 package tests, with the 555 prior methods
+passing. The initial import-error run is preserved separately. This source
+checkpoint follows independently accepted causal red; source review and full
+owning green remain pending. Historical coordinates below describe their
+original checkpoints, not current dependency selection or live deployment.
 
 ## Explicit managed wrapper profile (#148)
 

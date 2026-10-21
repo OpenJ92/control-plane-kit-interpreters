@@ -30,11 +30,11 @@ continuous availability or Operations registered-workload contract equality.
 That full registered-contract comparison belongs to accepted Operations #2017.
 Existing fresh/content/old-image negative tests remain unchanged.
 
-This is target-only source: no semantic observer implementation accompanies it.
-Kepler target review precedes one unchanged full pinned ./test.sh run. Intended
-red must be missing image qualification/observation, with valid fixture setup,
-dependency installation and collection. Installed compatibility and subsequent
-green remain evidence to record on the issue/PR, not claims made by these notes.
+The target-only checkpoint preceded semantic observer implementation. Kepler
+target review preceded the unchanged full pinned ./test.sh run. Intended red
+must be missing image qualification/observation, with valid fixture setup,
+dependency installation and collection. Full subsequent green remains evidence
+to record on the issue/PR, not a claim made by these notes.
 
 Initial checkpoint `6c0d271` ran 26 policy and 563 package tests. Eighteen
 assertion failures were missing image qualification/observation, but one
@@ -42,4 +42,12 @@ dependency-tampering subcase used the nonexistent root `core.ReconcileNode`
 instead of the public `control_plane_kit_core.planning.ReconcileNode`.
 The corrected import preserves the same plan mutation and refusal assertions.
 That mixed first run is retained as evidence and is not clean causal red;
-review of the correction and an unchanged owner rerun precede implementation.
+review of the correction and an unchanged owner rerun preceded implementation.
+
+Corrected checkpoint `eac62f9` ran 26 policy tests green and 563 package tests
+with 18 assertion failures and zero errors. Failures were confined to missing
+image qualification/observation in four new methods; the 555 prior methods and
+four remaining new methods passed. Kepler independently accepted causal red.
+Assertions after each initial failure, isolated imports and actual Docker
+witnesses still require the subsequent green gate. Targets remain unchanged
+after this corrected checkpoint while the observer implementation is reviewed.
