@@ -1279,3 +1279,160 @@ class DockerObservationGrantContractTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     getattr(sdk, "inspect_" + phase)(coordinate)
                 _assert_sdk_no_mutation(self, raw)
+
+
+class DockerUnixObserverTests(unittest.TestCase):
+    def policy(self):
+        from test_docker_sdk_client import unix_policy
+        return unix_policy(self)
+
+    def request(self):
+        return _request(StartRuntime(RuntimeTarget("docker")), products=(),
+                        authority_ref=RuntimeAuthorityReference("local-docker"))
+
+    def observer(self, policy, **kwargs):
+        return docker_interpreters.DockerRuntimeEffectObserver(local_client_config=policy, **kwargs)
+
+    def test_owned_observer_constructor_is_pure_exclusive_and_preserves_borrowed(self):
+        import control_plane_kit_interpreters.docker.sdk as sdk_module
+        policy = self.policy()
+        client, resolver = _ReadClient(self.request()), _Resolver()
+        borrowed = docker_interpreters.DockerRuntimeEffectObserver(client, resolver)
+        self.assertIs(borrowed.client, client)
+        self.assertIs(borrowed.authorized_secret_resolver, resolver)
+        with patch.object(sdk_module, "import_module", side_effect=AssertionError("import")), \
+                patch.object(DockerSdkClient, "from_authority", side_effect=AssertionError("acquire")):
+            owned = self.observer(policy)
+        self.assertNotIn(policy.socket_path, repr(owned))
+        for kwargs in ({}, {"client": client, "local_client_config": policy},
+                       {"local_client_config": object()}, {"client": client, "docker_module": object()}):
+            with self.subTest(keys=tuple(kwargs)):
+                with self.assertRaises((TypeError, ValueError)):
+                    docker_interpreters.DockerRuntimeEffectObserver(**kwargs)
+
+    def test_owned_observer_rejects_absent_or_nonlocal_authority_before_resolution(self):
+        policy, resolver = self.policy(), _Resolver()
+        observer = self.observer(policy, authorized_secret_resolver=resolver)
+        with patch.object(DockerSdkClient, "from_authority", side_effect=AssertionError("acquire")) as factory:
+            for authority in (None, _remote_tls_runtime_authority(), _unsupported_runtime_authority(),
+                              replace(_local_runtime_authority(), runtime_kind="other")):
+                for referenced in (False, True):
+                    with self.subTest(authority=type(authority).__name__, referenced=referenced):
+                        request = self.request()
+                        if not referenced:
+                            request = replace(request, authority_ref=None)
+                        result = observer.observe(RuntimeEffectObservationRequest(request), authority)
+                        self.assertEqual(result.descriptor()["kind"],
+                                         "indeterminate" if authority is None else "observer-unsupported")
+            factory.assert_not_called()
+        self.assertEqual(resolver.calls, [])
+
+    def test_owned_observer_closes_on_confirmed_absent_read_and_close_faults(self):
+        policy = self.policy()
+        request = self.request()
+        resolver = _Resolver()
+        for fault in (None, "absent", "inspect_network", "close"):
+            with self.subTest(fault=fault):
+                client = _ReadClient(request, fault=fault)
+                if fault == "absent":
+                    client.network = None
+                with patch.object(DockerSdkClient, "from_authority", return_value=client) as factory:
+                    result = self.observer(policy, authorized_secret_resolver=resolver).observe(
+                        RuntimeEffectObservationRequest(request), _local_runtime_authority())
+                self.assertEqual(factory.call_count, 1)
+                self.assertIs(factory.call_args.args[0], policy)
+                self.assertEqual(client.close_calls, 1)
+                self.assertEqual(client.calls, [("inspect_network", _network_name(request, "docker"))])
+                self.assertEqual(client.mutations, [])
+                self.assertEqual(result.descriptor()["kind"],
+                                 {None: "succeeded", "absent": "absent"}.get(fault, "indeterminate"))
+                self.assertNotIn("private", repr(result.descriptor()))
+        self.assertEqual(resolver.calls, [])
+
+    def test_owned_observer_real_acquisition_faults_never_establish_absence(self):
+        from test_docker_sdk_client import UnixAcquisitionRawClient
+        policy = self.policy()
+        for fault in ("transport", "compatibility", "handshake", "cleanup", "constructor"):
+            with self.subTest(fault=fault):
+                raw = UnixAcquisitionRawClient(path="/another.sock" if fault == "transport" else policy.socket_path)
+                module = FakeDockerModule(raw)
+                if fault == "compatibility":
+                    raw.version_value = {"MinAPIVersion": "1.46", "ApiVersion": "1.50"}
+                if fault in ("handshake", "cleanup"):
+                    raw.version_error = OSError("private-read")
+                if fault == "cleanup":
+                    raw.close_error = RuntimeError("private-close")
+                with patch.object(module, "DockerClient", wraps=module.DockerClient) as factory, \
+                        patch.object(raw.networks, "get", side_effect=AssertionError("resource access")) as read:
+                    if fault == "constructor":
+                        factory.side_effect = DockerException("private-constructor")
+                    result = self.observer(policy, docker_module=module).observe(
+                        RuntimeEffectObservationRequest(self.request()), _local_runtime_authority())
+                    self.assertEqual(factory.call_count, 1)
+                    read.assert_not_called()
+                self.assertEqual(result.descriptor()["kind"], "indeterminate")
+                self.assertNotIn("private-", repr(result.descriptor()))
+                self.assertEqual(raw.close_calls, int(fault != "constructor"))
+                self.assertEqual(module.from_env_calls, 0)
+                raw.adapter.close()
+
+    def test_owned_observer_preserves_unexpected_factory_and_read_error_identity(self):
+        policy, request = self.policy(), self.request()
+        for phase in ("factory", "read", "close"):
+            for close_fault in (None, "close"):
+                with self.subTest(phase=phase, close_fault=close_fault):
+                    client = _ReadClient(request, fault=close_fault)
+                    error = RuntimeError("programming defect")
+                    if phase == "read":
+                        client.inspect_network = lambda name: (_ for _ in ()).throw(error)
+                    if phase == "close":
+                        def close():
+                            client.close_calls += 1
+                            raise error
+                        client.close = close
+                    with patch.object(DockerSdkClient, "from_authority", return_value=client) as factory:
+                        if phase == "factory":
+                            factory.side_effect = error
+                        with self.assertRaises(RuntimeError) as caught:
+                            self.observer(policy).observe(RuntimeEffectObservationRequest(request), _local_runtime_authority())
+                    self.assertIs(caught.exception, error)
+                    self.assertEqual(client.close_calls, int(phase != "factory"))
+                    self.assertEqual(client.mutations, [])
+
+    def test_owned_observer_uses_distinct_clients_for_sequential_and_overlapping_calls(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier, Lock
+        from test_docker_sdk_client import UnixAcquisitionRawClient
+        policy, request = self.policy(), self.request()
+        for overlapping in (False, True):
+            with self.subTest(overlapping=overlapping):
+                clients, lock, barrier = [], Lock(), Barrier(2, timeout=10)
+                module = FakeDockerModule(None)
+
+                def construct(**kwargs):
+                    raw = UnixAcquisitionRawClient()
+                    with lock:
+                        clients.append(raw)
+                    if overlapping:
+                        barrier.wait()
+                    return raw
+
+                with patch.object(module, "DockerClient", side_effect=construct) as factory:
+                    observer = self.observer(policy, docker_module=module)
+
+                    def observe():
+                        return observer.observe(RuntimeEffectObservationRequest(request), _local_runtime_authority())
+
+                    if overlapping:
+                        with ThreadPoolExecutor(max_workers=2) as pool:
+                            futures = [pool.submit(observe) for _ in range(2)]
+                            results = [future.result(timeout=15) for future in futures]
+                    else:
+                        results = [observe(), observe()]
+                    self.assertEqual(factory.call_count, 2)
+                self.assertEqual([result.descriptor()["kind"] for result in results], ["absent", "absent"])
+                self.assertEqual(len(clients), 2)
+                self.assertIsNot(clients[0], clients[1])
+                self.assertEqual([raw.close_calls for raw in clients], [1, 1])
+                self.assertEqual([len(raw.networks.created) for raw in clients], [0, 0])
+                self.assertEqual(module.from_env_calls, 0)

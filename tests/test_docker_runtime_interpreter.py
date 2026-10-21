@@ -3414,5 +3414,153 @@ def _bind_mounts(record: dict[str, object]) -> list[object]:
     return [mount for mount in mounts if isinstance(mount, dict) and mount.get("Type") == "bind"]
 
 
+class DockerUnixRuntimeTests(unittest.TestCase):
+    def policy(self):
+        from test_docker_sdk_client import unix_policy
+        return unix_policy(self)
+
+    def request(self):
+        return _request(StartRuntime(RuntimeTarget("docker")), products=(),
+                        authority_ref=RuntimeAuthorityReference("local-docker"))
+
+    def test_owned_runtime_constructor_is_pure_exclusive_and_positional_compatible(self):
+        import control_plane_kit_interpreters.docker.sdk as sdk_module
+        policy = self.policy()
+        raw = FakeDockerClient()
+        borrowed = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+        transport = object()
+        self.assertIs(DockerRuntimeInterpreter(borrowed, transport).http_transport, transport)
+        with patch.object(sdk_module, "import_module", side_effect=AssertionError("import")), \
+                patch.object(DockerSdkClient, "from_authority", side_effect=AssertionError("acquire")):
+            owned = DockerRuntimeInterpreter(local_client_config=policy)
+        self.assertNotIn(policy.socket_path, repr(owned))
+        for kwargs in ({}, {"client": borrowed, "local_client_config": policy},
+                       {"local_client_config": object()}, {"client": borrowed, "docker_module": object()}):
+            with self.subTest(keys=tuple(kwargs)):
+                with self.assertRaises((TypeError, ValueError)):
+                    DockerRuntimeInterpreter(**kwargs)
+
+    def test_owned_runtime_rejects_missing_or_nonlocal_authority_without_resolution(self):
+        policy = self.policy()
+        resolver = Mock()
+        interpreter = DockerRuntimeInterpreter(local_client_config=policy,
+            authorized_secret_resolver=resolver, secret_resolver=resolver)
+        request = self.request()
+        with patch.object(DockerSdkClient, "from_authority", side_effect=AssertionError("acquire")) as factory:
+            direct = interpreter.execute(request)
+            self.assertIs(direct.kind, EffectResultKind.UNSUPPORTED)
+            self.assertEqual(direct.failure.code, "docker.runtime-authority-required")
+            for authority in (None, _remote_tls_runtime_authority(), _unsupported_runtime_authority(),
+                              replace(_local_runtime_authority(), runtime_kind="other")):
+                with self.subTest(authority=type(authority).__name__):
+                    result = interpreter.execute_with_authority(request, authority)
+                    self.assertIs(result.kind, EffectResultKind.UNSUPPORTED)
+            factory.assert_not_called()
+        self.assertEqual(resolver.mock_calls, [])
+
+    def test_owned_runtime_executes_bound_copy_and_closes_on_success_or_uncertainty(self):
+        from test_docker_sdk_client import UnixAcquisitionRawClient
+        policy = self.policy()
+        for fault in (None, "effect", "close", "acquisition"):
+            with self.subTest(fault=fault):
+                raw = UnixAcquisitionRawClient()
+                module = FakeDockerModule(raw)
+                if fault == "effect":
+                    raw.networks.create = Mock(side_effect=OSError("private-effect"))
+                if fault == "close":
+                    raw.close_error = OSError("private-close")
+                if fault == "acquisition":
+                    raw.version_value = {"MinAPIVersion": "1.46", "ApiVersion": "1.50"}
+                interpreter = DockerRuntimeInterpreter(local_client_config=policy, docker_module=module)
+                result = interpreter.execute_with_authority(self.request(), _local_runtime_authority())
+                self.assertIs(result.kind, EffectResultKind.SUCCEEDED if fault is None else EffectResultKind.UNCERTAIN)
+                self.assertEqual(len(raw.networks.created), int(fault in (None, "close")))
+                self.assertEqual(raw.close_calls, 1)
+                self.assertEqual(module.from_env_calls, 0)
+                self.assertEqual(len(module.docker_clients), 1)
+                self.assertNotIn("private-", repr(result.descriptor()))
+                if fault == "close":
+                    self.assertEqual(result.failure.code, "docker.runtime-authority-client-close-uncertain")
+
+    def test_owned_runtime_closes_before_propagating_unexpected_execution_error(self):
+        from test_docker_sdk_client import UnixAcquisitionRawClient
+        raw = UnixAcquisitionRawClient()
+        interpreter = DockerRuntimeInterpreter(local_client_config=self.policy(), docker_module=FakeDockerModule(raw))
+        error = AssertionError("unexpected execution")
+        with patch.object(DockerRuntimeInterpreter, "execute", side_effect=error):
+            with self.assertRaises(AssertionError) as caught:
+                interpreter.execute_with_authority(self.request(), _local_runtime_authority())
+        self.assertIs(caught.exception, error)
+        self.assertEqual(raw.close_calls, 1)
+
+    def test_owned_runtime_close_failure_strips_selected_completion_evidence(self):
+        from test_docker_selected_secrets import request_for, selected_fixture
+        policy = self.policy()
+        for configuration in (False, True):
+            with self.subTest(configuration=configuration):
+                request = request_for(configuration=configuration)
+                raw, sdk, borrowed, events, resolver = selected_fixture(request)
+                owned = DockerRuntimeInterpreter(local_client_config=policy, authorized_secret_resolver=resolver)
+                verified = []
+                verify = sdk.verify_secret_recipient
+
+                def verify_recipient(*args, **kwargs):
+                    verify(*args, **kwargs)
+                    verified.append(True)
+
+                with patch.object(DockerSdkClient, "from_authority", return_value=sdk) as factory, \
+                        patch.object(sdk, "verify_secret_recipient", side_effect=verify_recipient), \
+                        patch.object(sdk, "close", side_effect=TimeoutError("private-close")) as close:
+                    result = owned.execute_with_authority(request, _local_runtime_authority())
+                self.assertEqual(factory.call_count, 1)
+                self.assertIs(factory.call_args.args[0], policy)
+                self.assertEqual(close.call_count, 1)
+                self.assertEqual(verified, [True])
+                self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+                self.assertTrue(result.evidence["secret_attempt"]["authority_close_unknown"])
+                for key in ("secret_installation_receipt", "secret_resolution_receipt",
+                            "configuration_installation_receipt", "configuration_invocation_completion"):
+                    self.assertNotIn(key, result.evidence)
+                self.assertEqual(result.observations, ())
+                self.assertNotIn("private-close", repr(result))
+
+    def test_owned_runtime_uses_distinct_clients_for_sequential_and_overlapping_calls(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier, Lock
+        from test_docker_sdk_client import UnixAcquisitionRawClient
+        policy = self.policy()
+        for overlapping in (False, True):
+            with self.subTest(overlapping=overlapping):
+                clients, lock, barrier = [], Lock(), Barrier(2, timeout=10)
+                module = FakeDockerModule(None)
+
+                def construct(**kwargs):
+                    raw = UnixAcquisitionRawClient()
+                    with lock:
+                        clients.append(raw)
+                    if overlapping:
+                        barrier.wait()
+                    return raw
+
+                module.DockerClient = Mock(side_effect=construct)
+                interpreter = DockerRuntimeInterpreter(local_client_config=policy, docker_module=module)
+
+                def execute():
+                    return interpreter.execute_with_authority(self.request(), _local_runtime_authority())
+
+                if overlapping:
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        futures = [pool.submit(execute) for _ in range(2)]
+                        results = [future.result(timeout=15) for future in futures]
+                else:
+                    results = [execute(), execute()]
+                self.assertEqual([result.kind for result in results], [EffectResultKind.SUCCEEDED] * 2)
+                self.assertEqual(len(clients), 2)
+                self.assertIsNot(clients[0], clients[1])
+                self.assertEqual([raw.close_calls for raw in clients], [1, 1])
+                self.assertEqual([len(raw.networks.created) for raw in clients], [1, 1])
+                self.assertEqual(module.from_env_calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

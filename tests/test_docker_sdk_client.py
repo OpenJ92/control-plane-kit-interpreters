@@ -2201,5 +2201,265 @@ class ProviderContractObservationTests(unittest.TestCase):
                           fixture.api.create_container, fixture.api.inspect_container), originals)
 
 
+def unix_policy(test, path="/var/run/cpk-owned.sock", timeout=5.0):
+    config = getattr(docker_sdk, "DockerUnixSocketClientConfig", None)
+    test.assertIsNotNone(config, "I216 missing explicit Unix policy")
+    return config(path, timeout)
+
+
+class UnixAcquisitionRawClient(FakeDockerClient):
+    """Existing resource fake plus a real Unix adapter and ordered handshake."""
+
+    def __init__(self, *, path="/var/run/cpk-owned.sock", version=None):
+        super().__init__()
+        from docker.transport import UnixHTTPAdapter
+        self.adapter = UnixHTTPAdapter("http+unix://" + path)
+        self.api.base_url = "http+docker://localhost"
+        self.events = []
+        self.api.get_adapter = self.get_adapter
+        self.version_value = version if version is not None else {
+            "MinAPIVersion": "1.24", "ApiVersion": "1.45",
+        }
+        self.version_error = None
+        self.close_error = None
+
+    def get_adapter(self, url):
+        self.events.append("transport")
+        return self.adapter
+
+    def version(self, *, api_version):
+        if api_version is not False or "transport" not in self.events:
+            raise AssertionError("compatibility read preceded transport verification")
+        self.events.append("version")
+        if self.version_error is not None:
+            raise self.version_error
+        return self.version_value
+
+    def close(self):
+        super().close()
+        self.events.append("close")
+        self.adapter.close()
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class DockerUnixAcquisitionTests(unittest.TestCase):
+    def test_sdk_rejects_contradictory_unix_configuration_before_construction(self):
+        policy = unix_policy(self)
+        raw = FakeDockerClient()
+        module = FakeDockerModule(raw)
+        tls = DockerTlsClientConfig("tcp://remote.invalid:2376", SecretValue("ca"),
+                                    SecretValue("cert"), SecretValue("key"))
+        for kwargs in ({"client": raw}, {"tls_config": tls}):
+            with self.subTest(keys=tuple(kwargs)):
+                with self.assertRaises((TypeError, ValueError)):
+                    DockerSdkClient(local_client_config=policy, docker_module=module, **kwargs)
+        self.assertEqual(module.from_env_calls, 0)
+        self.assertEqual(module.docker_clients, [])
+
+    def test_unix_policy_is_pure_frozen_redacted_and_exported(self):
+        from dataclasses import FrozenInstanceError
+        import control_plane_kit_interpreters.docker as public
+        policy = unix_policy(self)
+        with patch.object(docker_sdk, "import_module", side_effect=AssertionError("import")), \
+                patch("os.stat", side_effect=AssertionError("stat")), \
+                patch("pathlib.Path.resolve", side_effect=AssertionError("resolve")), \
+                patch("os.getenv", side_effect=AssertionError("environment")):
+            self.assertEqual(unix_policy(self), policy)
+        self.assertIs(public.DockerUnixSocketClientConfig, type(policy))
+        self.assertNotIn(policy.socket_path, repr(policy))
+        with self.assertRaises(FrozenInstanceError):
+            policy.socket_path = "/other.sock"
+
+    def test_unix_policy_rejects_invalid_paths_and_timeouts_without_value_echo(self):
+        config = type(unix_policy(self))
+        paths = (None, 42, b"/socket", "", "/", "relative", "//sock", "/a//b", "/a/./b",
+                 "/a/../b", "/socket/", "/sock?secret", "/sock#secret", "/a\x00b",
+                 "/a\nb", "/a\x7fb", "/" + "x" * 4096)
+        for path in paths:
+            with self.subTest(path_type=type(path).__name__):
+                with self.assertRaises((TypeError, ValueError)) as caught:
+                    config(path, 5)
+                self.assertLess(len(str(caught.exception)), 160)
+                if isinstance(path, str) and len(path) > 3:
+                    self.assertNotIn(path, str(caught.exception))
+        for timeout in (True, False, None, "5", 0, -1, 60.001, float("nan"),
+                        float("inf"), -float("inf"), 10 ** 1000):
+            with self.subTest(timeout_type=type(timeout).__name__):
+                with self.assertRaises((TypeError, ValueError)) as caught:
+                    config("/socket", timeout)
+                self.assertLess(len(str(caught.exception)), 160)
+        for timeout in (0.001, 1, 60):
+            self.assertEqual(config("/" + "x" * 4095, timeout).request_timeout, timeout)
+
+    def test_unix_eager_and_lazy_acquisition_use_explicit_endpoint_and_version(self):
+        policy = unix_policy(self)
+        for eager in (False, True):
+            with self.subTest(eager=eager):
+                raw = UnixAcquisitionRawClient()
+                module = FakeDockerModule(raw)
+                with patch.dict(os.environ, {"DOCKER_HOST": "tcp://hostile.invalid:2376",
+                        "DOCKER_TLS_VERIFY": "1", "DOCKER_CERT_PATH": "/nonexistent/private"}):
+                    sdk = DockerSdkClient.from_authority(policy, docker_module=module, connect_on_init=eager)
+                    self.assertEqual(len(module.docker_clients), int(eager))
+                    self.assertIsNone(sdk.inspect_network("missing"))
+                self.assertEqual(module.from_env_calls, 0)
+                self.assertEqual(module.docker_clients, [{"base_url": "unix://" + policy.socket_path,
+                    "timeout": 5.0, "version": "1.45"}])
+                self.assertEqual(raw.events, ["transport", "version"])
+                sdk.close()
+                sdk.close()
+                self.assertEqual(raw.close_calls, 1)
+                with self.assertRaises(RuntimeError):
+                    sdk.inspect_network("missing")
+                self.assertEqual(len(module.docker_clients), 1)
+
+    def test_actual_installed_sdk_returns_and_verifies_transport_before_handshake(self):
+        import docker
+        from docker.api.client import APIClient
+        from docker.transport import UnixHTTPAdapter
+        from requests.sessions import Session
+        policy = unix_policy(self)
+        events, handles, arguments = [], [], []
+        constructor, adapter_lookup = docker.DockerClient, APIClient.get_adapter
+
+        def construct(**kwargs):
+            arguments.append(kwargs)
+            handle = constructor(**kwargs)
+            handles.append(handle)
+            events.append("returned")
+            return handle
+
+        def lookup(api, url):
+            adapter = adapter_lookup(api, url)
+            self.assertIsInstance(adapter, UnixHTTPAdapter)
+            self.assertEqual(adapter.socket_path, policy.socket_path)
+            events.append("verified")
+            return adapter
+
+        def version(api, api_version=True):
+            self.assertEqual(events, ["returned", "verified"])
+            self.assertIs(api_version, False)
+            events.append("version")
+            return {"MinAPIVersion": "1.24", "ApiVersion": "1.45"}
+
+        try:
+            with patch.dict(os.environ, {"DOCKER_HOST": "tcp://hostile.invalid:2376",
+                    "DOCKER_TLS_VERIFY": "1", "DOCKER_CERT_PATH": "/nonexistent/private"}), \
+                    patch.object(docker, "DockerClient", side_effect=construct), \
+                    patch.object(docker, "from_env", side_effect=AssertionError("ambient")), \
+                    patch.object(APIClient, "get_adapter", lookup), \
+                    patch.object(APIClient, "version", version), \
+                    patch.object(Session, "send", side_effect=AssertionError("Engine contact")):
+                sdk = DockerSdkClient.from_authority(policy, docker_module=docker)
+                self.assertEqual(events, ["returned", "verified", "version"])
+                self.assertIs(sdk.client, handles[0])
+                self.assertEqual(arguments, [{"base_url": "unix://" + policy.socket_path,
+                    "timeout": 5.0, "version": "1.45"}])
+                sdk.close()
+        finally:
+            for handle in handles:
+                handle.close()
+
+    def test_transport_mismatch_closes_before_handshake_or_resources(self):
+        from requests.adapters import HTTPAdapter
+        policy = unix_policy(self)
+        for wrong_path in (True, False):
+            with self.subTest(wrong_path=wrong_path):
+                raw = UnixAcquisitionRawClient(path="/another.sock")
+                if not wrong_path:
+                    raw.adapter.close()
+                    raw.adapter = HTTPAdapter()
+                module = FakeDockerModule(raw)
+                with self.assertRaises(RuntimeError) as caught:
+                    DockerSdkClient.from_authority(policy, docker_module=module)
+                self.assertNotIn("/another.sock", str(caught.exception))
+                self.assertEqual(raw.events, ["transport", "close"])
+                self.assertEqual(raw.close_calls, 1)
+                self.assertEqual(raw.networks.created, [])
+
+    def test_compatibility_range_is_strict_bounded_and_numeric(self):
+        policy = unix_policy(self)
+        invalid = [None, [], {}, {"ApiVersion": "1.45"}]
+        for value in (None, True, 1.45, b"1.45", " 1.45", "1.45\n", "+1.45", "1e0.45",
+                      "1.45.0", "01.45", "1.045", "١.45", "1." + "9" * 1000):
+            invalid.extend(({"MinAPIVersion": value, "ApiVersion": "1.45"},
+                            {"MinAPIVersion": "1.24", "ApiVersion": value}))
+        invalid.extend({"MinAPIVersion": low, "ApiVersion": high} for low, high in
+                       (("1.46", "1.50"), ("1.24", "1.44"), ("1.50", "1.24"), ("1.9", "1.10")))
+        cases = [(value, False) for value in invalid]
+        cases.extend(({"MinAPIVersion": low, "ApiVersion": high, "Version": "ordinary"}, True)
+                     for low, high in (("1.45", "1.45"), ("1.9", "1.100"), ("1.24", "1.45")))
+        for index, (value, valid) in enumerate(cases):
+            with self.subTest(index=index, valid=valid):
+                raw = UnixAcquisitionRawClient()
+                raw.version_value = value
+                module = FakeDockerModule(raw)
+                if valid:
+                    sdk = DockerSdkClient.from_authority(policy, docker_module=module)
+                    self.assertEqual(raw.close_calls, 0)
+                    sdk.close()
+                else:
+                    with self.assertRaises(RuntimeError) as caught:
+                        DockerSdkClient.from_authority(policy, docker_module=module)
+                    self.assertLess(len(str(caught.exception)), 160)
+                self.assertEqual(raw.events, ["transport", "version", "close"])
+                self.assertEqual(raw.close_calls, 1)
+                self.assertEqual(raw.networks.created, [])
+
+    def test_failed_lazy_acquisition_is_terminal_even_without_returned_handle(self):
+        policy = unix_policy(self)
+        for phase in ("constructor", "handshake", "cleanup"):
+            with self.subTest(phase=phase):
+                raw = UnixAcquisitionRawClient()
+                module = FakeDockerModule(raw)
+                error = RuntimeError("unexpected-private-detail")
+                raw.version_error = error
+                if phase == "cleanup":
+                    raw.close_error = OSError("private-close-detail")
+                sdk = DockerSdkClient.from_authority(policy, docker_module=module, connect_on_init=False)
+                with patch.object(module, "DockerClient", wraps=module.DockerClient) as factory:
+                    if phase == "constructor":
+                        factory.side_effect = error
+                    with self.assertRaises(RuntimeError) as caught:
+                        sdk.inspect_network("missing")
+                    if phase != "cleanup":
+                        self.assertIs(caught.exception, error)
+                    else:
+                        self.assertNotIn("private", str(caught.exception))
+                    with self.assertRaises(RuntimeError):
+                        sdk.inspect_network("missing")
+                    sdk.close()
+                    sdk.close()
+                    self.assertEqual(factory.call_count, 1)
+                self.assertEqual(raw.close_calls, int(phase != "constructor"))
+                raw.adapter.close()
+
+    def test_acquisition_interruptions_survive_cleanup_faults(self):
+        policy = unix_policy(self)
+        for interruption_at in ("constructor", "version", "close"):
+            for close_fault in (False, True):
+                with self.subTest(interruption_at=interruption_at, close_fault=close_fault):
+                    raw = UnixAcquisitionRawClient()
+                    module = FakeDockerModule(raw)
+                    interrupt = KeyboardInterrupt("private-interruption")
+                    raw.version_error = interrupt if interruption_at == "version" else OSError("private-read")
+                    raw.close_error = interrupt if interruption_at == "close" else (
+                        OSError("private-close") if close_fault else None)
+                    sdk = DockerSdkClient.from_authority(policy, docker_module=module, connect_on_init=False)
+                    with patch.object(module, "DockerClient", wraps=module.DockerClient) as factory:
+                        if interruption_at == "constructor":
+                            factory.side_effect = interrupt
+                        with self.assertRaises(KeyboardInterrupt) as caught:
+                            sdk.inspect_network("missing")
+                        self.assertIs(caught.exception, interrupt)
+                        with self.assertRaises(RuntimeError):
+                            sdk.inspect_network("missing")
+                        sdk.close()
+                        self.assertEqual(factory.call_count, 1)
+                    self.assertEqual(raw.close_calls, int(interruption_at != "constructor"))
+                    raw.adapter.close()
+
+
 if __name__ == "__main__":
     unittest.main()
