@@ -256,3 +256,223 @@ class ConnectorShapeQualificationTests(unittest.TestCase):
                         world.desired.graph.nodes["connector"], runtime_authority_deliveries=(delivery,))))
                     world.recompile()
                 self.assertIsNone(self.shape(world, document))
+
+
+class ClientFreeConnectorQualificationTests(unittest.TestCase):
+    """#218: one pure capability owner with compatible observer entrances."""
+
+    def qualifier_type(self):
+        from control_plane_kit_interpreters.docker import connector_connection as module
+        qualifier = getattr(module, "DockerConnectorConnectionQualifier", None)
+        self.assertIsNotNone(qualifier, "I218 missing client-free connection qualifier")
+        return qualifier
+
+    def world(self, *, managed=False, mode="fresh", reverse=False):
+        from managed_connector_fixtures import managed_world
+        from test_docker_retained_image_connector import image_transition
+        if managed:
+            world = managed_world(retained=mode != "fresh", lazy=True)
+            document = world.document
+        else:
+            world, document = shape_world(World if mode == "fresh" else RetainedWorld)
+        if mode == "retained_image_ingress_update":
+            image_transition(world, reverse=reverse)
+        return world, document
+
+    def profile(self, managed):
+        from control_plane_kit_interpreters.docker.sdk import ConnectorConnectionProfile
+        return (ConnectorConnectionProfile.MANAGED_WRAPPER_V1 if managed
+                else ConnectorConnectionProfile.NATIVE_READER_V1)
+
+    def options(self, world):
+        return dict(activity_id=world.request.activity_id, plan=world.plan,
+                    current=world.current, desired=world.desired,
+                    authority_ref=world.request.authority_ref)
+
+    def snapshot(self, world, document):
+        return declared_snapshot(world, document) + (
+            json.dumps(world.material.descriptor(), sort_keys=True),)
+
+    def query_pair(self, world, document, *, managed=False, shape_changes=None, full_changes=None,
+                   image_reference=None):
+        qualifier_type = self.qualifier_type()
+        image = image_reference if image_reference is not None else world.material.product.image.execution_reference
+        profile = self.profile(managed)
+
+        def no_clock():
+            raise AssertionError("pure qualifier read time")
+
+        observer = DockerConnectorConnectionObserver(world.client, world.reference, image, no_clock, profile)
+        pure = qualifier_type(world.reference, image, profile)
+        shape = dict(self.options(world), product_document=document)
+        full = dict(self.options(world), material=world.material)
+        shape.update(shape_changes or {})
+        full.update(full_changes or {})
+        before = self.snapshot(world, document)
+        mode = pure.qualify(**full)
+        shape_mode = pure.qualify_shape(**shape)
+        self.assertIs(observer.qualify(**full), mode)
+        self.assertIs(observer.qualify_shape(**shape), shape_mode)
+        self.assertEqual(self.snapshot(world, document), before)
+        self.assertEqual(world.initializations + world.api.calls + getattr(world, "archive_calls", []), [])
+        return mode, shape_mode
+
+    def test_standalone_construction_and_queries_need_no_client_clock_or_io(self):
+        from dataclasses import FrozenInstanceError
+        from unittest.mock import patch
+        from control_plane_kit_interpreters.docker import sdk
+        qualifier_type = self.qualifier_type()
+        world, document = self.world()
+        options = self.options(world)
+        before = self.snapshot(world, document)
+        with patch.object(sdk.DockerSdkClient, "__init__", side_effect=AssertionError("SDK construction")), \
+                patch.object(sdk, "import_module", side_effect=AssertionError("SDK import")), \
+                patch("builtins.open", side_effect=AssertionError("filesystem")), \
+                patch("os.stat", side_effect=AssertionError("stat")), \
+                patch("os.getenv", side_effect=AssertionError("environment")):
+            pure = qualifier_type(world.reference, world.material.product.image.execution_reference)
+            self.assertIs(pure.qualify(**options, material=world.material), ConnectorConnectionQualification.FRESH)
+            self.assertIs(pure.qualify_shape(**options, product_document=document), ConnectorConnectionQualification.FRESH)
+        self.assertNotIn(world.material.product.image.execution_reference, repr(pure))
+        with self.assertRaises(FrozenInstanceError):
+            pure.image_reference = "changed"
+        self.assertEqual(self.snapshot(world, document), before)
+        self.assertEqual(world.initializations + world.api.calls, [])
+        with self.assertRaises(TypeError):
+            qualifier_type(world.reference, world.material.product.image.execution_reference, client=world.client)
+        with self.assertRaises(TypeError):
+            qualifier_type(world.reference, world.material.product.image.execution_reference, clock=lambda: world.now)
+
+    def test_constructor_types_and_observer_fixed_error_surface_are_preserved(self):
+        qualifier_type = self.qualifier_type()
+        world, _ = self.world()
+        reference, image, profile = world.reference, world.material.product.image.execution_reference, self.profile(False)
+        for field, value in (("product_reference", object()), ("image_reference", object()),
+                             ("profile", "native-reader-v1")):
+            with self.subTest(field=field):
+                options = dict(product_reference=reference, image_reference=image, profile=profile)
+                options[field] = value
+                with self.assertRaises(TypeError):
+                    qualifier_type(**options)
+                with self.assertRaisesRegex(TypeError, "^native connection observer configuration is invalid$"):
+                    DockerConnectorConnectionObserver(world.client, clock=lambda: world.now, **options)
+        for client, clock in ((object(), lambda: world.now), (world.client, None)):
+            with self.assertRaisesRegex(TypeError, "^native connection observer configuration is invalid$"):
+                DockerConnectorConnectionObserver(client, reference, image, clock, profile)
+        # Preserve existing exact-str acceptance; extraction adds no image grammar.
+        qualifier_type(reference, "", profile)
+        first = DockerConnectorConnectionObserver(world.client, reference, image, lambda: world.now)
+        second = replace(first)
+        self.assertEqual(first, second)
+
+    def test_all_modes_and_profiles_are_pure_and_match_both_observer_queries(self):
+        self.qualifier_type()
+        for managed in (False, True):
+            for mode in ("fresh", "retained_content_update", "retained_image_ingress_update"):
+                for reverse in ((False, True) if mode == "retained_image_ingress_update" else (False,)):
+                    with self.subTest(managed=managed, mode=mode, reverse=reverse):
+                        world, document = self.world(managed=managed, mode=mode, reverse=reverse)
+                        for _ in range(2):
+                            full, shape = self.query_pair(world, document, managed=managed)
+                            self.assertEqual(full.value, mode)
+                            self.assertIs(shape, full)
+
+    def test_standalone_refuses_foreign_document_plan_authority_and_image(self):
+        self.qualifier_type()
+        for case in ("malformed", "noncanonical", "foreign-product", "activity", "plan", "authority", "image"):
+            with self.subTest(case=case):
+                world, document = self.world()
+                shape_changes, full_changes = {}, {}
+                image = None
+                if case == "malformed":
+                    document = replace(document, content=b"PRIVATE-CANDIDATE")
+                elif case == "noncanonical":
+                    document = replace(document, content=document.content + b"\n")
+                elif case == "foreign-product":
+                    document = replace(document, product=replace(document.product, display_name="foreign"))
+                elif case == "activity":
+                    shape_changes = full_changes = {"activity_id": ActivityId("missing")}
+                elif case == "plan":
+                    shape_changes = full_changes = {"plan": ActivityPlan(())}
+                elif case == "authority":
+                    shape_changes = full_changes = {"authority_ref": replace(world.request.authority_ref, reference_id="foreign")}
+                else:
+                    image = "ghcr.io/fixture/other@sha256:" + "f" * 64
+                full, shape = self.query_pair(world, document, shape_changes=shape_changes,
+                    full_changes=full_changes, image_reference=image)
+                self.assertIsNone(shape)
+                if case not in ("malformed", "noncanonical", "foreign-product"):
+                    self.assertIsNone(full)
+
+    def test_standalone_preserves_authored_slot_and_descriptor_only_asymmetry(self):
+        self.qualifier_type()
+        for case in ("generated", "authored", "matching", "mismatch", "descriptor-only"):
+            with self.subTest(case=case):
+                world, document = self.world()
+                if case == "authored":
+                    document = bind_document(world, authored=(world.file,))
+                elif case == "matching":
+                    document = bind_document(world, declared=(world.file,), authored=(world.file,))
+                elif case == "mismatch":
+                    document = bind_document(world, declared=(replace(world.file, target_path="/run/secrets/other"),),
+                                             authored=(world.file,))
+                elif case == "descriptor-only":
+                    document = bind_document(world, declared=(world.file,))
+                full, shape = self.query_pair(world, document)
+                self.assertIs(full, ConnectorConnectionQualification.FRESH)
+                self.assertIs(shape, None if case in ("mismatch", "descriptor-only") else full)
+
+    def test_standalone_full_query_keeps_exact_material_and_selected_token_requirements(self):
+        self.qualifier_type()
+        for managed in (False, True):
+            for case in ("node", "token", "image"):
+                with self.subTest(managed=managed, case=case):
+                    world, document = self.world(managed=managed)
+                    material = world.material
+                    if case == "node":
+                        material = replace(material, node_id="foreign")
+                    elif case == "token":
+                        material = replace(material, secret_selections=(
+                            UnselectedSecretUse(world.file.reference, world.file.intent),))
+                    else:
+                        material = replace(material, product=replace(material.product,
+                            image=replace(material.product.image, digest="sha256:" + "f" * 64)))
+                    full, shape = self.query_pair(world, document, managed=managed, full_changes={"material": material})
+                    self.assertIsNone(full)
+                    self.assertIs(shape, ConnectorConnectionQualification.FRESH)
+
+    def test_standalone_image_query_requires_whole_canonical_plan(self):
+        from control_plane_kit_core.planning import ReconcileNode
+        self.qualifier_type()
+        for case in ("old-v1", "filtered", "dependencies"):
+            with self.subTest(case=case):
+                world, document = self.world(managed=True, mode="retained_image_ingress_update")
+                if case == "old-v1":
+                    plan = core.compile_managed_update_activity_plan(world.current, world.desired)
+                elif case == "filtered":
+                    plan = ActivityPlan(tuple(value for value in world.plan.activities
+                                              if value.activity_id == world.request.activity_id))
+                else:
+                    plan = ActivityPlan(tuple(replace(value, dependencies=())
+                        if type(value.operation) is ReconcileNode else value for value in world.plan.activities))
+                full, shape = self.query_pair(world, document, managed=True,
+                    shape_changes={"plan": plan}, full_changes={"plan": plan})
+                self.assertIsNone(full)
+                self.assertIsNone(shape)
+
+    def test_qualification_does_not_supply_retained_installation_proof(self):
+        self.qualifier_type()
+        for managed in (False, True):
+            for mode in ("retained_content_update", "retained_image_ingress_update"):
+                with self.subTest(managed=managed, mode=mode):
+                    world, document = self.world(managed=managed, mode=mode)
+                    full, shape = self.query_pair(world, document, managed=managed)
+                    self.assertEqual(full.value, mode)
+                    self.assertIs(shape, full)
+                    observer = DockerConnectorConnectionObserver(world.client, world.reference,
+                        world.material.product.image.execution_reference, lambda: world.now, self.profile(managed))
+                    result = observer.observe(world.request, plan=world.plan, current=world.current, desired=world.desired)
+                    self.assertEqual(result.outcome.value, "refused")
+                    self.assertIsNone(result.effect_id)
+                    self.assertIsNone(result.activity_id)
+                    self.assertEqual(world.initializations + world.api.calls + getattr(world, "archive_calls", []), [])

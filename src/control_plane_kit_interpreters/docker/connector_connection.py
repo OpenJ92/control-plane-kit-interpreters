@@ -2,7 +2,7 @@
 
 Construction is not admission. Operations owns current authority and folding.
 """
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 import json
@@ -74,18 +74,18 @@ class ConnectorConnectionObservation:
 
 
 @dataclass(frozen=True, repr=False)
-class DockerConnectorConnectionObserver:
-    client: DockerSdkClient
+class DockerConnectorConnectionQualifier:
+    """Pure closed-profile capability selection without client or clock custody."""
+
     product_reference: ProductReference
     image_reference: str
-    clock: Callable[[], datetime]
     profile: ConnectorConnectionProfile = ConnectorConnectionProfile.NATIVE_READER_V1
 
     def __post_init__(self):
-        if (type(self.client) is not DockerSdkClient or type(self.product_reference) is not ProductReference
-                or type(self.image_reference) is not str or not callable(self.clock)
+        if (type(self.product_reference) is not ProductReference
+                or type(self.image_reference) is not str
                 or type(self.profile) is not ConnectorConnectionProfile):
-            raise TypeError("native connection observer configuration is invalid")
+            raise TypeError("native connection qualifier configuration is invalid")
 
     def qualify(self, *, activity_id, plan, current, desired, material,
                 authority_ref) -> ConnectorConnectionQualification | None:
@@ -230,6 +230,40 @@ class DockerConnectorConnectionObserver:
             raise ValueError
         return mode, resolved, delivery
 
+
+@dataclass(frozen=True, repr=False)
+class DockerConnectorConnectionObserver:
+    client: DockerSdkClient
+    product_reference: ProductReference
+    image_reference: str
+    clock: Callable[[], datetime]
+    profile: ConnectorConnectionProfile = ConnectorConnectionProfile.NATIVE_READER_V1
+    _qualification: DockerConnectorConnectionQualifier = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        if type(self.client) is not DockerSdkClient or not callable(self.clock):
+            raise TypeError("native connection observer configuration is invalid")
+        try:
+            qualification = DockerConnectorConnectionQualifier(
+                self.product_reference, self.image_reference, self.profile,
+            )
+        except TypeError:
+            raise TypeError("native connection observer configuration is invalid") from None
+        object.__setattr__(self, "_qualification", qualification)
+
+    def qualify(self, *, activity_id, plan, current, desired, material,
+                authority_ref) -> ConnectorConnectionQualification | None:
+        """Compatibility entrance to the same pure capability selection."""
+        return self._qualification.qualify(activity_id=activity_id, plan=plan,
+            current=current, desired=desired, material=material, authority_ref=authority_ref)
+
+    def qualify_shape(self, *, activity_id, plan, current, desired,
+                      product_document, authority_ref) -> ConnectorConnectionQualification | None:
+        """Compatibility entrance to the same declared capability query."""
+        return self._qualification.qualify_shape(activity_id=activity_id, plan=plan,
+            current=current, desired=desired, product_document=product_document,
+            authority_ref=authority_ref)
+
     def observe(self, request, *, plan, current, desired,
                 installation_request: RuntimeEffectRequest | None = None,
                 installation_receipt: SecretInstallationReceipt | None = None):
@@ -241,7 +275,7 @@ class DockerConnectorConnectionObserver:
                     or request.operation != plan.activity(request.activity_id).operation):
                 raise ValueError
             material, = request.products
-            mode, resolved, delivery = self._qualify(activity_id=request.activity_id, plan=plan,
+            mode, resolved, delivery = self._qualification._qualify(activity_id=request.activity_id, plan=plan,
                 current=current, desired=desired, material=material, authority_ref=request.authority_ref)
             node = resolved.connector_node
             origin, incarnation = request, None
