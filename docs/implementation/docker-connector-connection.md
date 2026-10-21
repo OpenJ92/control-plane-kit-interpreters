@@ -1,5 +1,58 @@
 # Native connection observation (#167)
 
+## Client-free qualification (#218)
+
+`DockerConnectorConnectionQualifier` is the pure capability owner in
+`docker.connector_connection`. It takes the trusted product reference, image
+reference and closed launch profile, without a Docker client, clock, resolver,
+factory or acquisition policy:
+
+```python
+from control_plane_kit_interpreters.docker.connector_connection import (
+    DockerConnectorConnectionQualifier,
+)
+from control_plane_kit_interpreters.docker.sdk import ConnectorConnectionProfile
+
+qualifier = DockerConnectorConnectionQualifier(
+    product_reference, image_reference,
+    ConnectorConnectionProfile.MANAGED_WRAPPER_V1,
+)
+mode = qualifier.qualify_shape(
+    activity_id=activity_id, plan=plan, current=current, desired=desired,
+    product_document=product_document, authority_ref=authority_ref,
+)
+```
+
+This uses supplied canonical Core values and performs no provider, clock,
+secret, environment or filesystem operation. `qualify(..., material=...)`
+retains the exact full-material query. Both return an existing qualification
+mode or `None`; neither grants authority or supplies installation proof.
+Shape remains deliberately narrower outside the supported declaration domain.
+
+The four existing pure methods moved intact to this frozen, redacted value.
+`DockerConnectorConnectionObserver` keeps its positional constructor and fixed
+configuration error, storing a private immutable qualifier excluded from init,
+repr and equality. Its two public qualification methods delegate to that value;
+observation uses the same full preflight. There is one plan/material/shape
+algorithm. Original retained receipts and workspace-specific managed
+configuration proof still precede SDK access. All later sample freshness,
+incarnation, final-drift and bounded unknown behavior remains unchanged.
+
+Eight targets supplement the unchanged584 current tests. Reviewed target
+`0e94e4c1` ran in owner39614565856:26 policy pass,592 package methods/43.016s,
+exactly8 intentional missing-qualifier assertions and0 errors. That initial red
+proves API absence, not every deeper branch. Targets remain unchanged through
+source extraction; full green and independent final review are still required
+at this checkpoint. The tests compare public semantic results and detached
+material/graph/plan/document snapshots, not a private method layout.
+
+No dependency, root export, SDK acquisition, admission/history, schema, retry,
+cleanup, credential or network surface changes. Together with accepted I216,
+the pure value enables later Servers2B selection before per-operation client
+acquisition. It does not itself wire startup, worker cancellation, complete
+installation or live225/291/284. Earlier observer-bound descriptions below are
+historical interfaces retained as delegating compatibility entrances.
+
 ## Retained-image ingress observation (#214)
 
 `ConnectorConnectionQualification.RETAINED_IMAGE_INGRESS_UPDATE` names the

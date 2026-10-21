@@ -4,8 +4,8 @@ Source: [test_docker_connector_shape.py](../../../tests/test_docker_connector_sh
 Plan218 and Kepler PLAN PASS6318063029 govern the new eight-method
 ClientFreeConnectorQualificationTests class. Existing tests/fixtures are unchanged.
 Accepted baseline is I216ad9a5da8, owner39611713669:26 policy+584 package+existing
-Docker witnesses; no baseline rerun. This is a target-only checkpoint, not an
-executed result.
+Docker witnesses; no baseline rerun. The initial target-only checkpoint preceded
+the execution evidence recorded below.
 
 Q1 tests the new public frozen/redacted qualifier without a client, clock,
 acquisition policy or factory. Fixture data is built before I/O guards; actual
@@ -28,9 +28,12 @@ laws remain owned by the unchanged observation suites. Tests assert semantic
 agreement, not private helper layout. Missing public API fails an intentional
 in-test assertion; no collection-time dependency on unimplemented names.
 
-No source edit, validation dispatch, new provider or credential action accompanies
-these targets. Independent TARGET review precedes unchanged normal Docker
-./test.sh causal red; source then preserves the reviewed targets through green.
+Independent TARGET PASS6318158938 preceded unchanged normal Docker ./test.sh
+run39614565856:26 policy tests pass,592 package methods/43.016s with8 intentional
+missing-qualifier assertions and0 errors; all584 prior methods pass. Source
+extraction preserves the reviewed test SHA83a1f1142ccce33b2603b3ba3c0dbd5c03c6b40fcce355bb5572a0918acb0352.
+Full green and independent source/final review remain pending at this checkpoint.
+No new provider or credential action accompanies these targets.
 No host Python, duplicate planner/algorithm, lifecycle framework, Core/Operations
 emulator or live/Servers2B claim. Qualification remains capability selection,
 not admission, current authority or exact retained installation provenance.
