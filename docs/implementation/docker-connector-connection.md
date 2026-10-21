@@ -1,5 +1,17 @@
 # Native connection observation (#167)
 
+## Retained-image target checkpoint (#214)
+
+The accepted dependency cohort now supplies Core's separate
+`compile_retained_image_ingress_activity_plan`. The
+[target laws](tests/test_docker_retained_image_connector.py.md) require pure
+qualification of that complete plan and retention of original installation
+proof through both launch profiles, including managed configuration-instance
+checks. Production qualification still supports only fresh and retained-content
+transitions at this target-only checkpoint. No semantic source has changed;
+independent target review and causal red precede implementation. Historical
+coordinates and evidence below describe their original checkpoints.
+
 ## Explicit managed wrapper profile (#148)
 
 `ConnectorConnectionProfile.MANAGED_WRAPPER_V1` explicitly selects the accepted

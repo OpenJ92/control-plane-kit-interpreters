@@ -1,6 +1,16 @@
 # Selected secret installation checkpoint (#191)
 
-Current Interpreters #211 selects Core
+Current Interpreters #214 selects Core
+`955666898218e4f2956b6e9fcd33bdba97ffdb06`, accepted Secrets #65 merge
+`f4747b23872aca537786f86017feb25e0ae83fbd` and SDK #67 merge
+`cad5cc3dacbff1da79e6cc8b4c0c88526363e033`. The added pure planning compiler
+leaves consumed selection/grant/request/receipt contracts unchanged. No secret
+installation, readback or cleanup implementation changes accompany this pin.
+The unchanged full owner gate must establish installation and existing Docker
+witnesses; provider-contract opt-in stays off. Retained-image observation is
+the separate #214 target, not a provider or live deployment claim.
+
+Historical Interpreters #211 selects Core
 `ec61e2b17c3a3f1bdea1dd6bc8fc64ac1b9528b0`, accepted Secrets #63 merge
 `b30e62664da50cfdda347509a17fa70888cb169a` and its accepted SDK #65 merge
 `eff09090755eb21028695f0224eec7b81f2db535`. Installation continues to consume

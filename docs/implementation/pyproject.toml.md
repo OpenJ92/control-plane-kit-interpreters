@@ -2,7 +2,20 @@ Source: [pyproject.toml](../../pyproject.toml).
 
 Maintain this document alongside its source and selected dependencies.
 
-Interpreters #211 selects accepted Core
+Interpreters #214 selects accepted Core
+`955666898218e4f2956b6e9fcd33bdba97ffdb06`, accepted Secrets #65 merge
+`f4747b23872aca537786f86017feb25e0ae83fbd` in the existing test extra, and its
+accepted SDK #67 merge `cad5cc3dacbff1da79e6cc8b4c0c88526363e033`.
+All three owners select the same Core archive. SDK and Secrets pin-only changes
+passed their unchanged owning gates and independent final review before merge.
+The compiler is now available for the retained-image target tests; this pin
+does not implement native qualification or original-proof enforcement.
+Metadata, strict gate/provenance expectations and current notes move together.
+The historical Servers9921911d test-only installation boundary, runner, extras
+and provider opt-in remain unchanged. One full unchanged pinned gate follows
+target review; missing semantic behavior must cause red, not dependency setup.
+
+Historical Interpreters #211 selects accepted Core
 `ec61e2b17c3a3f1bdea1dd6bc8fc64ac1b9528b0` and accepted Secrets #63 merge
 `b30e62664da50cfdda347509a17fa70888cb169a` in the existing test extra.
 Secrets selects accepted SDK #65 merge

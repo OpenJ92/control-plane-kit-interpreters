@@ -1,6 +1,15 @@
 Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py).
 
-Interpreters #211 advances installed-owner expectations to accepted Secrets #63
+Interpreters #214 advances installed-owner expectations to accepted Secrets #65
+merge `f4747b23872aca537786f86017feb25e0ae83fbd` and SDK #67 merge
+`cad5cc3dacbff1da79e6cc8b4c0c88526363e033`, sharing accepted Core
+`955666898218e4f2956b6e9fcd33bdba97ffdb06`. Only the two URL constants change;
+archive equality, candidate origin, real signing/composition and denial
+assertions remain intact. The existing Servers fixture boundary is unchanged.
+The full pinned owning gate must prove installation; these expectations alone
+establish neither retained-image observation nor live behavior.
+
+Historical Interpreters #211 advances installed-owner expectations to accepted Secrets #63
 merge `b30e62664da50cfdda347509a17fa70888cb169a` and SDK #65 merge
 `eff09090755eb21028695f0224eec7b81f2db535`, sharing accepted Core
 `ec61e2b17c3a3f1bdea1dd6bc8fc64ac1b9528b0`. Only the two coordinate constants

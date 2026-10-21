@@ -1,6 +1,12 @@
 Source: [test_support/tests/test_gate_contract.py](../../../../test_support/tests/test_gate_contract.py).
 
-Interpreters #211 advances only CORE_REQUIREMENT to accepted Core
+Interpreters #214 advances CORE_REQUIREMENT to accepted Core
+`955666898218e4f2956b6e9fcd33bdba97ffdb06`, matching the sole metadata-owned
+Core URL. Exact equality, pinned resolution, runner and provider-opt-in
+assertions remain unchanged. This pin-only prerequisite is not semantic red;
+the new observation targets must establish that independently.
+
+Historical Interpreters #211 advances only CORE_REQUIREMENT to accepted Core
 `ec61e2b17c3a3f1bdea1dd6bc8fc64ac1b9528b0`, matching the direct dependency.
 Exact equality, pinned resolution, gate and provider-opt-in assertions remain
 unchanged. This mechanical alignment needs no artificial target-red.
