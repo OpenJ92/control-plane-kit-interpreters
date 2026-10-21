@@ -414,7 +414,7 @@ class ClientFreeConnectorQualificationTests(unittest.TestCase):
                 elif case == "matching":
                     document = bind_document(world, declared=(world.file,), authored=(world.file,))
                 elif case == "mismatch":
-                    document = bind_document(world, declared=(replace(world.file, target_path="/other"),),
+                    document = bind_document(world, declared=(replace(world.file, target_path="/run/secrets/other"),),
                                              authored=(world.file,))
                 elif case == "descriptor-only":
                     document = bind_document(world, declared=(world.file,))

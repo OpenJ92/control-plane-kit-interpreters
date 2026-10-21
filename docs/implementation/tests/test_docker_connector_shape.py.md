@@ -37,3 +37,20 @@ No new provider or credential action accompanies these targets.
 No host Python, duplicate planner/algorithm, lifecycle framework, Core/Operations
 emulator or live/Servers2B claim. Qualification remains capability selection,
 not admission, current authority or exact retained installation provenance.
+
+The first full source run39615450202 ran592 package methods in46.636s with one
+fixture error and zero assertion failures; the other591 methods passed. The
+new mismatch branch used `/other`, which Core rejects before qualification
+because secret file targets require the protected namespace. Initial red only
+proved API absence and did not reach that deeper fixture branch. Later owning
+gate stages were not reached; this run is not full-green evidence.
+
+The reviewed correction changes only that declared path to `/run/secrets/other`,
+already used by the governing pre-existing negative. It remains different from
+the authored `/run/secrets/cloudflare-tunnel-token`; all assertions and production
+source remain unchanged. This preserves the intended well-formed declaration
+mismatch rather than bypassing Core validation. North released this exact target
+correction subject to Kepler CORRECTION review, then one ordinary full owner
+rerun. Failed evidence remains on PR219 comment6318383809; no silent retry or
+alternate runner. Current corrected test hash and final result belong to the
+subsequent exact checkpoint, not the earlier original hash above.
