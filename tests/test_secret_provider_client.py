@@ -101,7 +101,8 @@ class SecretProviderClientTests(unittest.TestCase):
         reference = SecretReference("secret://provider-a/keys/gateway-b")
         secret_id = canonical_provider_secret_id(reference)
         for purpose, intent in _GENERATION_FAMILIES:
-            wrong_purpose, wrong_intent = next(pair for pair in _GENERATION_FAMILIES if pair[0] != purpose)
+            wrong_purpose = next(pair[0] for pair in _GENERATION_FAMILIES if pair[0] != purpose)
+            wrong_intent = next(pair[1] for pair in _GENERATION_FAMILIES if pair[1] != intent)
             for field in ("intent", "purpose", "correlation_id", "issuer", "secret_reference",
                           "workspace_id", "secret_id", "label_key_id", "fingerprint_sha256"):
                 with self.subTest(purpose=purpose, field=field):

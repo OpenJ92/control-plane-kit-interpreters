@@ -1,9 +1,9 @@
 Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py).
 
-Interpreters #214 advances installed-owner expectations to accepted Secrets #65
-merge `f4747b23872aca537786f86017feb25e0ae83fbd` and SDK #67 merge
+Interpreters #220 advances the installed Secrets owner expectation to accepted
+Secrets #66 merge `b73cfc183931c019c786885297d458a9a43c5039` and retains SDK #67 merge
 `cad5cc3dacbff1da79e6cc8b4c0c88526363e033`, sharing accepted Core
-`955666898218e4f2956b6e9fcd33bdba97ffdb06`. Only the two URL constants change;
+`955666898218e4f2956b6e9fcd33bdba97ffdb06`. Only the Secrets URL constant changes;
 archive equality, candidate origin, real signing/composition and denial
 assertions remain intact. The existing Servers fixture boundary is unchanged.
 The full pinned owning gate must prove installation; these expectations alone

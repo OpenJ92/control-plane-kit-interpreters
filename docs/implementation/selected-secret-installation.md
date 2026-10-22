@@ -1,11 +1,12 @@
 # Selected secret installation checkpoint (#191)
 
-Current Interpreters #214 selects Core
-`955666898218e4f2956b6e9fcd33bdba97ffdb06`, accepted Secrets #65 merge
-`f4747b23872aca537786f86017feb25e0ae83fbd` and SDK #67 merge
-`cad5cc3dacbff1da79e6cc8b4c0c88526363e033`. The added pure planning compiler
-leaves consumed selection/grant/request/receipt contracts unchanged. No secret
-installation, readback or cleanup implementation changes accompany this pin.
+Current Interpreters #220 retains Core
+`955666898218e4f2956b6e9fcd33bdba97ffdb06`, advances to accepted Secrets #66
+merge `b73cfc183931c019c786885297d458a9a43c5039`, and retains SDK #67 merge
+`cad5cc3dacbff1da79e6cc8b4c0c88526363e033`. Consumed
+selection/grant/request/receipt contracts remain unchanged. The pin adds only
+the provider family used by the surface-read client witness; no secret
+installation, readback or cleanup implementation changes accompany it.
 The unchanged full owner gate must establish installation and existing Docker
 witnesses; provider-contract opt-in stays off. Retained-image observation is
 the separate #214 target, not a provider or live deployment claim.
