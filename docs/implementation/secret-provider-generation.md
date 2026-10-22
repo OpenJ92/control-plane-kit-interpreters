@@ -1,10 +1,11 @@
 # Delegation generation purpose validation (#158)
 
 `secret_provider/client.py` keeps the existing generation request and result
-types. Its private closed `_GENERATION_INTENTS` table maps the three existing
-probe/control families explicitly and uses Core's `health_signing_intent_for`
-for the two health families. `_generation_intent` rejects untyped values and
-unsupported enum members without a fallback or provider import.
+types. The target contract extends its private closed `_GENERATION_INTENTS`
+table from the five existing probe/control/health families to the exact
+surface-read family, reusing `GATEWAY_PROBE_SIGNING_KEY` as required by Core's
+legacy compatibility mapping. `_generation_intent` still rejects untyped values
+and unsupported enum members without a fallback or provider import.
 
 `generate_delegation_key` checks this selection before `_request_json`, which
 owns credential loading and the single HTTP request. Unsupported purpose is
@@ -15,7 +16,7 @@ is `MALFORMED_RESPONSE/UNCERTAIN`; existing wire identity and fingerprint checks
 remain in the client. No public signature or dependency coordinate changes.
 
 The six added methods in `tests/test_secret_provider_client.py` strengthen the
-existing probe/public-identity/error laws with all five supported mappings,
+existing probe/public-identity/error laws with all six supported mappings,
 truthful replay flags, credential-before-dispatch refusal, family/identity
 substitution, generation-specific one-send timeout/malformed/conflict behavior,
 and unsupported result construction. The last method reuses the existing

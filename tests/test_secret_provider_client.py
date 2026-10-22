@@ -38,6 +38,7 @@ _GENERATION_FAMILIES = (
     (DelegationKeyPurpose.GATEWAY_PROBE, SecretUseIntent.GATEWAY_PROBE_SIGNING_KEY),
     (DelegationKeyPurpose.GATEWAY_NODE_CONTROL_TRANSIT, SecretUseIntent.GATEWAY_NODE_CONTROL_TRANSIT_SIGNING_KEY),
     (DelegationKeyPurpose.WORKLOAD_NODE_CONTROL, SecretUseIntent.WORKLOAD_NODE_CONTROL_SIGNING_KEY),
+    (DelegationKeyPurpose.WORKLOAD_NODE_CONTROL_SURFACE_READ, SecretUseIntent.GATEWAY_PROBE_SIGNING_KEY),
     (DelegationKeyPurpose.GATEWAY_NODE_HEALTH_READ_TRANSIT, SecretUseIntent.GATEWAY_NODE_HEALTH_READ_TRANSIT_SIGNING_KEY),
     (DelegationKeyPurpose.WORKLOAD_NODE_HEALTH_READ, SecretUseIntent.WORKLOAD_NODE_HEALTH_READ_SIGNING_KEY),
 )
@@ -80,8 +81,7 @@ class SecretProviderClientTests(unittest.TestCase):
                     self.assertNotIn("PRIVATE", repr(result))
 
     def test_generation_unsupported_purpose_refuses_before_credential_or_send(self) -> None:
-        for purpose in (DelegationKeyPurpose.WORKLOAD_NODE_CONTROL_SURFACE_READ,
-                        "gateway-probe", "unknown", None, []):
+        for purpose in ("gateway-probe", "unknown", None, []):
             with self.subTest(purpose=purpose):
                 requests = []
                 with _client(lambda request: requests.append(request) or _response({})) as client:
@@ -160,7 +160,7 @@ class SecretProviderClientTests(unittest.TestCase):
                     self.assertNotIn(protected, repr(raised.exception))
                 self.assertIsNone(raised.exception.__cause__)
 
-    def test_generated_result_rejects_unsupported_purpose(self) -> None:
+    def test_generated_result_rejects_untyped_purpose(self) -> None:
         reference = SecretReference("secret://provider-a/keys/gateway-b")
         payload = _generated_delegation_key_response(
             reference=reference, secret_id=canonical_provider_secret_id(reference))
@@ -168,8 +168,8 @@ class SecretProviderClientTests(unittest.TestCase):
             result = client.generate_delegation_key(
                 workspace_id="workspace-1", reference=reference, purpose=DelegationKeyPurpose.GATEWAY_PROBE,
                 issuer="cpk-server", caller_subject="cpk-server", correlation_id="rotation-key-b")
-        unsupported = DelegationKeyPurpose.WORKLOAD_NODE_CONTROL_SURFACE_READ
-        metadata = replace(result.metadata, labels={**result.metadata.labels, "purpose": unsupported.value})
+        unsupported = "gateway-probe"
+        metadata = replace(result.metadata, labels={**result.metadata.labels, "purpose": unsupported})
         with self.assertRaises(SecretProviderClientError) as raised:
             replace(result, purpose=unsupported, metadata=metadata)
         self.assertIs(raised.exception.code, SecretProviderClientCode.MALFORMED_RESPONSE)
