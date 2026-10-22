@@ -59,6 +59,8 @@ _GENERATION_INTENTS = MappingProxyType({
         SecretUseIntent.GATEWAY_NODE_CONTROL_TRANSIT_SIGNING_KEY,
     DelegationKeyPurpose.WORKLOAD_NODE_CONTROL:
         SecretUseIntent.WORKLOAD_NODE_CONTROL_SIGNING_KEY,
+    DelegationKeyPurpose.WORKLOAD_NODE_CONTROL_SURFACE_READ:
+        SecretUseIntent.GATEWAY_PROBE_SIGNING_KEY,
     DelegationKeyPurpose.GATEWAY_NODE_HEALTH_READ_TRANSIT:
         health_signing_intent_for(DelegationKeyPurpose.GATEWAY_NODE_HEALTH_READ_TRANSIT),
     DelegationKeyPurpose.WORKLOAD_NODE_HEALTH_READ:

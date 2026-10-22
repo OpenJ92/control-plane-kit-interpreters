@@ -135,7 +135,7 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                 generated = client.generate_delegation_key(
                     workspace_id="workspace-1",
                     reference=delegation_reference,
-                    purpose=DelegationKeyPurpose.GATEWAY_PROBE,
+                    purpose=DelegationKeyPurpose.WORKLOAD_NODE_CONTROL_SURFACE_READ,
                     issuer="cpk-server",
                     caller_subject="cpk-server",
                     correlation_id="rotation-key-b",
@@ -225,6 +225,14 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                     )
 
                 self.assertEqual(written.reference, reference)
+                self.assertIs(
+                    generated.purpose,
+                    DelegationKeyPurpose.WORKLOAD_NODE_CONTROL_SURFACE_READ,
+                )
+                self.assertEqual(
+                    generated.metadata.labels["intent"],
+                    SecretUseIntent.GATEWAY_PROBE_SIGNING_KEY.value,
+                )
                 private_key = serialization.load_pem_private_key(
                     generated_private.value.reveal().encode("ascii"),
                     password=None,

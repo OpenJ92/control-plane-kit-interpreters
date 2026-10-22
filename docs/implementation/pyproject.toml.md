@@ -2,14 +2,15 @@ Source: [pyproject.toml](../../pyproject.toml).
 
 Maintain this document alongside its source and selected dependencies.
 
-Interpreters #214 selects accepted Core
-`955666898218e4f2956b6e9fcd33bdba97ffdb06`, accepted Secrets #65 merge
-`f4747b23872aca537786f86017feb25e0ae83fbd` in the existing test extra, and its
-accepted SDK #67 merge `cad5cc3dacbff1da79e6cc8b4c0c88526363e033`.
+Interpreters #220 retains accepted Core
+`955666898218e4f2956b6e9fcd33bdba97ffdb06`, advances the existing test extra
+to accepted Secrets #66 merge `b73cfc183931c019c786885297d458a9a43c5039`,
+and retains accepted SDK #67 merge
+`cad5cc3dacbff1da79e6cc8b4c0c88526363e033`.
 All three owners select the same Core archive. SDK and Secrets pin-only changes
 passed their unchanged owning gates and independent final review before merge.
-The compiler is now available for the retained-image target tests; this pin
-does not implement native qualification or original-proof enforcement.
+The Secrets pin supplies the surface-read provider family used by the existing
+real-provider client witness; it does not authorize live provider activity.
 Metadata, strict gate/provenance expectations and current notes move together.
 The historical Servers9921911d test-only installation boundary, runner, extras
 and provider opt-in remain unchanged. One full unchanged pinned gate follows

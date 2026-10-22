@@ -306,9 +306,11 @@ metadata to the provider. It validates the returned core `DelegationPublicKey`,
 fingerprint, provider version, and exact reference identity; it never generates
 or receives the private key in the generation response. Supported purposes are
 gateway probe, gateway node-control transit, workload node-control, gateway
-node-health-read transit, and workload node-health-read. Each requires its exact
-Core signing-key intent. Surface-read and untyped purposes refuse before
-credential loading or HTTP; provider credential scope still governs permission.
+node-health-read transit, workload node-health-read, and workload node-control
+surface-read. Surface-read deliberately uses the legacy gateway probe signing
+intent; every other family keeps its exact Core signing-key intent. Untyped and
+unsupported purposes refuse before credential loading or HTTP; provider
+credential scope still governs permission.
 Transport ambiguity is reported as uncertain. The client never automatically
 retries generation; any deliberate replay requires separate authority and the
 original correlation, with provider idempotency remaining provider-owned.
