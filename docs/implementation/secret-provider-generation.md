@@ -13,7 +13,9 @@ owns credential loading and the single HTTP request. Unsupported purpose is
 same selection for response metadata, preserving exact reference, issuer,
 purpose and public key bindings. Unsupported or mismatched response metadata
 is `MALFORMED_RESPONSE/UNCERTAIN`; existing wire identity and fingerprint checks
-remain in the client. No public signature or dependency coordinate changes.
+remain in the client. No public signature changes. The test dependency selects
+accepted Secrets merge `b73cfc183931c019c786885297d458a9a43c5039`, which
+admits the same exact pair.
 
 The six added methods in `tests/test_secret_provider_client.py` strengthen the
 existing probe/public-identity/error laws with all six supported mappings,
@@ -29,6 +31,15 @@ passed and 386 package tests collected. Six assertion failures and ten bounded
 client exceptions expose the missing mapping/preflight behavior. The earlier
 f0a38f3 real-client context-manager fixture error was corrected before this
 evidence; it is not accepted as causal red.
+
+#220 target-only commit `f0113e6` ran the pinned Docker owner suite against the
+previous accepted Secrets pin: all 26 policy tests passed and 592 package tests
+ran in 95.095 seconds. Only the new surface-read cases failed (two preflight
+errors and nine substitution assertions) because the client sent zero requests.
+This localizes the missing client map without claiming provider support. The
+source change adds only that map entry; the existing real-provider process
+witness selects accepted Secrets #66 and generates surface-read with the legacy
+gateway probe intent before verifying private/public correspondence.
 
 Generation remains an explicitly requested provider mutation. Provider scope,
 transactions, idempotency and audit remain provider-owned. This client returns
