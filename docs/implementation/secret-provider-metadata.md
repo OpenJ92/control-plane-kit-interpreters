@@ -1,6 +1,12 @@
 # Exact metadata and resolution (#190)
 
-Current Interpreters #214 selects accepted Core
+Current Interpreters #222 selects accepted Core
+`879efb9576ac0580a6236d0a7372c036537b4dfe`. New control-plane command/read facts
+do not change this adapter's metadata/grant inputs, exact-version resolution,
+bounded redaction or no-retry semantics. Accepted Secrets/SDK pin-only changes
+select the same Core; the normal Interpreter gate still must prove installation.
+
+Historical Interpreters #214 selects accepted Core
 `955666898218e4f2956b6e9fcd33bdba97ffdb06`. The added pure retained-image
 compiler does not change this adapter's consumed metadata/grant contracts,
 exact-version resolution, redaction or no-retry semantics. SDK/Secrets
