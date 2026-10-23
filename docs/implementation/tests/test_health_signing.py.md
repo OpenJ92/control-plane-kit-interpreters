@@ -1,6 +1,15 @@
 Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py).
 
-Interpreters #220 advances the installed Secrets owner expectation to accepted
+Interpreters #222 selects actual Secrets #69 merge
+`78a2ed7c8abee6da31f8661993ed4c5426edd7ee` and SDK #69 merge
+`43838fd0f4391428cfffa87f8c4dbd5cc6d5eab1`, sharing accepted Core
+`879efb9576ac0580a6236d0a7372c036537b4dfe`. Only the two owner coordinate
+constants change; exact installed archive equality, candidate source origin,
+real signing/composition and denial assertions remain intact. The historical
+Servers fixture is unchanged. Normal owner CI must establish actual installed
+compatibility; metadata alone is not live provider or deployment evidence.
+
+Historical Interpreters #220 advances the installed Secrets owner expectation to accepted
 Secrets #66 merge `b73cfc183931c019c786885297d458a9a43c5039` and retains SDK #67 merge
 `cad5cc3dacbff1da79e6cc8b4c0c88526363e033`, sharing accepted Core
 `955666898218e4f2956b6e9fcd33bdba97ffdb06`. Only the Secrets URL constant changes;

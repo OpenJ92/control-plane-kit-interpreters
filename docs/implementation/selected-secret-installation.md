@@ -1,6 +1,16 @@
 # Selected secret installation checkpoint (#191)
 
-Current Interpreters #220 retains Core
+Current Interpreters #222 selects Core
+`879efb9576ac0580a6236d0a7372c036537b4dfe`, actual Secrets #69 merge
+`78a2ed7c8abee6da31f8661993ed4c5426edd7ee` and SDK #69 merge
+`43838fd0f4391428cfffa87f8c4dbd5cc6d5eab1`. Consumed selection, grant,
+request, receipt and receiver contracts are unchanged. No secret installation,
+readback, cleanup or provider-family implementation change accompanies this
+adoption. Normal pinned owner validation and its existing cleanup/completion
+evidence are required; provider-contract opt-in stays off. Historical product
+images and live deployment acceptance remain separate.
+
+Historical Interpreters #220 retains Core
 `955666898218e4f2956b6e9fcd33bdba97ffdb06`, advances to accepted Secrets #66
 merge `b73cfc183931c019c786885297d458a9a43c5039`, and retains SDK #67 merge
 `cad5cc3dacbff1da79e6cc8b4c0c88526363e033`. Consumed

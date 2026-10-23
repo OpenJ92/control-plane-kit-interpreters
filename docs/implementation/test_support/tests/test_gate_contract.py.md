@@ -1,6 +1,12 @@
 Source: [test_support/tests/test_gate_contract.py](../../../../test_support/tests/test_gate_contract.py).
 
-Interpreters #214 advances CORE_REQUIREMENT to accepted Core
+Interpreters #222 advances CORE_REQUIREMENT to accepted Core
+`879efb9576ac0580a6236d0a7372c036537b4dfe`. Exact equality, normal pinned
+resolution, runner and provider-opt-in assertions are unchanged. Existing
+Docker validation establishes dependency adoption; no pin-mirror test or
+artificial target-red is added.
+
+Historical Interpreters #214 advances CORE_REQUIREMENT to accepted Core
 `955666898218e4f2956b6e9fcd33bdba97ffdb06`, matching the sole metadata-owned
 Core URL. Exact equality, pinned resolution, runner and provider-opt-in
 assertions remain unchanged. This pin-only prerequisite is not semantic red;
