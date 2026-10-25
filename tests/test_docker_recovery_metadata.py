@@ -1,5 +1,4 @@
 """#224 current metadata laws, exercised at actual SDK request boundaries."""
-from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
 import json
@@ -260,3 +259,78 @@ class DockerRecoveryMetadataTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "internal bug"):
             method(RuntimeEffectObservationRequest(request), LOCAL, expected_daemon_id=DAEMON)
         self.assertEqual(raw.close_calls, 1)
+
+    def test_malformed_provider_fields_are_closed_unknown_not_absence(self):
+        for change in (lambda row: row.update(Id=CANARY),
+                       lambda row: row["Config"].update(Labels={str(i): "x" for i in range(65)}),
+                       lambda row: row["Config"].update(Labels={"x": "y" * 2049}),
+                       lambda row: row["Config"].update(Labels={str(i): "y" * 2048 for i in range(9)})):
+            request, raw, _, method = self.fixture()
+            change(raw.rows["container", _container_name(request, request.products[0].node_id)])
+            _, evidence = self.observe(method, request)
+            row = evidence["resources"][0]
+            self.assertEqual((row["state"], row["reason"]), ("unknown", "malformed"))
+            self.assertEqual(evidence["coverage"], "incomplete")
+
+    def test_wrong_digest_cannot_supply_file_uid(self):
+        request, raw, _, method = self.fixture()
+        raw.rows["image", request.products[0].product.image.execution_reference]["RepoDigests"] = ["example.invalid/other@sha256:" + "f" * 64]
+        _, evidence = self.observe(method, request)
+        self.assertEqual(evidence["resources"][2]["ownership"], "conflicting")
+        self.assertIsNone(evidence["resources"][-1]["selector"])
+        self.assertEqual(evidence["coverage"], "incomplete")
+
+    def test_environment_delivery_needs_no_uid_or_resource_row(self):
+        request, raw, _, method = self.fixture(request_for(files=False, grants=False))
+        raw.rows["image", request.products[0].product.image.execution_reference]["Config"]["User"] = "named-user"
+        _, evidence = self.observe(method, request)
+        self.assertEqual(evidence["coverage"], "selected-addresses-observed")
+        self.assertEqual(len(evidence["resources"]), 3)
+        self.assertEqual(len(raw.calls), 8)
+
+    def test_duplicate_uid_dependent_selectors_stop_before_volume_read(self):
+        request, raw, _, method = self.fixture(request_for(file_count=2, grants=False))
+        with patch("control_plane_kit_interpreters.docker.recovery_metadata._secret_volume_name",
+                   return_value="cpk-sec-collision"):
+            _, evidence = self.observe(method, request)
+        self.assertEqual(evidence["coverage"], "incomplete")
+        self.assertFalse(any(role in ("volume", "attachment") for role, _ in raw.calls))
+        self.assertEqual(len(evidence["resources"]), 5)
+
+    def test_nonfinite_backwards_or_failed_clock_never_schedules_unbounded_reads(self):
+        for ticks in ([float("nan")], [10, 9], [0, 0, 0, 0, float("inf")],
+                      [0, 0, 0, 0, OSError(CANARY)]):
+            with self.subTest(ticks=ticks):
+                request, raw, module, method = self.fixture()
+                with patch("control_plane_kit_interpreters.docker.recovery_metadata.monotonic", side_effect=ticks):
+                    _, evidence = self.observe(method, request)
+                self.assertEqual(evidence["coverage"], "incomplete")
+                self.assertEqual(raw.calls, [])
+                self.assertEqual(raw.close_calls, len(module.docker_clients))
+
+    def test_deadline_after_returned_client_stops_before_negotiation(self):
+        request, raw, module, method = self.fixture()
+        with patch("control_plane_kit_interpreters.docker.recovery_metadata.monotonic", side_effect=[0, 0, 0, 30]):
+            _, evidence = self.observe(method, request)
+        self.assertEqual(evidence["coverage"], "incomplete")
+        self.assertEqual(len(module.docker_clients), 1)
+        self.assertNotIn("version", raw.events)
+        self.assertEqual(raw.close_calls, 1)
+
+    def test_provider_binding_drift_discards_selected_coverage(self):
+        request, raw, _, method = self.fixture()
+        def drift(role, name):
+            if role == "daemon" and raw.calls.count((role, name)) == 2:
+                raw.rows[role, name]["ID"] = "another-daemon"
+        raw.hook = drift
+        _, evidence = self.observe(method, request)
+        self.assertIsNone(evidence["provider_binding_fingerprint"])
+        self.assertEqual(evidence["coverage"], "incomplete")
+        self.assertTrue(all(row["state"] == "unknown" for row in evidence["resources"]))
+
+    def test_attachment_fault_is_incomplete_and_stopped_holders_count(self):
+        request, raw, _, method = self.fixture()
+        raw.api.containers = lambda **kwargs: [{"Id": CANARY}]
+        _, evidence = self.observe(method, request)
+        self.assertEqual(evidence["coverage"], "incomplete")
+        self.assertTrue(all(row["attachment"] == "unknown" for row in evidence["resources"][3:]))

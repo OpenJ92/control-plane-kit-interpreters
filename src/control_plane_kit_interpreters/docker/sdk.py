@@ -539,6 +539,8 @@ class DockerSdkClient:
     connect_on_init: bool = field(default=True, repr=False)
     _tls_directory: tempfile.TemporaryDirectory[str] | None = field(default=None, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
+    # Private per-call orchestration; ordinary runtime/observer clients omit it.
+    _before_provider_call: Any = field(default=None, init=False, repr=False)
     configuration_helper_image: str = (
         "python:3.14-slim@sha256:"
         "cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6"
@@ -603,6 +605,8 @@ class DockerSdkClient:
     def _unix_client(self, docker_module: Any, policy: DockerUnixSocketClientConfig) -> Any:
         client = None
         try:
+            if self._before_provider_call is not None:
+                self._before_provider_call()
             # An explicit API avoids Engine negotiation inside the constructor.
             # Construction may still read the SDK's ordinary config/auth files.
             client = docker_module.DockerClient(
@@ -612,6 +616,8 @@ class DockerSdkClient:
             )
             if not _uses_unix_socket(client, policy.socket_path):
                 raise _DockerUnixClientAcquisitionError("Docker Unix transport is unverified")
+            if self._before_provider_call is not None:
+                self._before_provider_call()
             _verify_unix_api_range(client.version(api_version=False))
             return client
         except BaseException as error:
