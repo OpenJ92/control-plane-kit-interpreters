@@ -15,6 +15,9 @@ from control_plane_kit_core.runtime_effect_observation import (
     RuntimeEffectObserverUnsupported, runtime_effect_observation_fingerprint,
 )
 from control_plane_kit_core.runtime_effects import RuntimeEffectKind
+from control_plane_kit_core.configuration_invocation import (
+    configuration_invocation_correlation_for_request, configuration_invocation_selection_fingerprint,
+)
 from control_plane_kit_interpreters.docker import DockerRuntimeEffectObserver
 from control_plane_kit_interpreters.docker.configuration import (
     configuration_volume_labels, configuration_volume_name,
@@ -56,6 +59,10 @@ class MetadataRaw(UnixAcquisitionRawClient):
         self.api.containers = self.holders
         self.images = self.containers = self.volumes = self.networks = Forbidden()
         material, = request.products
+        node_labels = _node_labels(request, material)
+        if request.kind is RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1:
+            correlation = configuration_invocation_correlation_for_request(request)
+            node_labels[PREFIX + "configuration.selection"] = configuration_invocation_selection_fingerprint(correlation.selection)
         image = material.product.image.execution_reference
         self.rows["daemon", None] = {"ID": DAEMON, "Private": CANARY}
         self.rows["image", image] = {"Id": "sha256:" + "a" * 64,
@@ -65,7 +72,7 @@ class MetadataRaw(UnixAcquisitionRawClient):
             "Image": "sha256:" + "a" * 64,
             "NetworkSettings": {"Networks": {_network_name(request, material.runtime_id): {"NetworkID": "c" * 64}}},
             "Mounts": [], "State": {"Running": True, "Status": "running"},
-            "Config": {"Labels": _node_labels(request, material), "Env": Forbidden()}}
+            "Config": {"Labels": dict(node_labels), "Env": Forbidden()}}
         self.rows["network", _network_name(request, material.runtime_id)] = {
             "Id": "c" * 64, "Name": _network_name(request, material.runtime_id),
             "Labels": _runtime_labels(request, material.runtime_id)}
@@ -80,7 +87,7 @@ class MetadataRaw(UnixAcquisitionRawClient):
             selection, = (s for s in material.secret_selections
                           if s.reference == secret.reference and s.intent is secret.intent)
             name = _secret_volume_name(request, material.node_id, secret, owner_uid=10006)
-            labels = {**_node_labels(request, material), PREFIX + "volume.kind": "secret-file",
+            labels = {**node_labels, PREFIX + "volume.kind": "secret-file",
                 PREFIX + "secret.target": secret.target_path,
                 PREFIX + "secret.reference": secret.reference.reference_id,
                 PREFIX + "secret.identity": _selected_secret_identity(
@@ -156,6 +163,7 @@ class DockerRecoveryMetadataTests(unittest.TestCase):
         self.assertEqual([r["role"] for r in evidence["resources"]],
                          ["container", "network", "image", "configuration-volume", "secret-volume"])
         self.assertTrue(all(r["state"] == "present" for r in evidence["resources"]))
+        self.assertTrue(all(r["ownership"] == "matching" for r in evidence["resources"] if r["role"] != "image"))
         self.assertEqual(len(raw.calls), 16)
         self.assertEqual(raw.events.count("version"), 1)
         self.assertEqual(raw.close_calls, 1)
@@ -456,3 +464,34 @@ class DockerRecoveryMetadataTests(unittest.TestCase):
             _, evidence = self.observe(method, request)
             self.assertEqual(evidence["coverage"], "selected-addresses-observed" if supported else "incomplete")
             self.assertEqual(evidence["resources"][-1]["selector"] is not None, supported)
+
+    def test_unavailable_uid_does_not_erase_independent_container_conflicts(self):
+        for unavailable in ("image", "uid"):
+            for conflict in (None, "name", "labels"):
+                request, raw, _, method = self.fixture()
+                image = request.products[0].product.image.execution_reference
+                if unavailable == "image":
+                    del raw.rows["image", image]
+                else:
+                    raw.rows["image", image]["Config"]["User"] = "named-user"
+                container = raw.rows["container", _container_name(request, request.products[0].node_id)]
+                if conflict == "name":
+                    container["Name"] = "/foreign-name"
+                elif conflict == "labels":
+                    container["Config"]["Labels"][PREFIX + "workspace"] = "foreign-workspace"
+                _, evidence = self.observe(method, request)
+                self.assertEqual(evidence["coverage"], "incomplete")
+                self.assertEqual(evidence["resources"][0]["ownership"], "conflicting" if conflict else "unestablished")
+
+    def test_wrong_configuration_selection_is_conflicting_on_container_and_file_volume(self):
+        for role in ("container", "secret-volume"):
+            request, raw, _, method = self.fixture()
+            if role == "container":
+                labels = raw.rows["container", _container_name(request, request.products[0].node_id)]["Config"]["Labels"]
+            else:
+                labels = next(value["Labels"] for (kind, name), value in raw.rows.items()
+                              if kind == "volume" and name.startswith("cpk-sec-"))
+            labels[PREFIX + "configuration.selection"] = "f" * 64
+            _, evidence = self.observe(method, request)
+            row = next(row for row in evidence["resources"] if row["role"] == role)
+            self.assertEqual(row["ownership"], "conflicting")

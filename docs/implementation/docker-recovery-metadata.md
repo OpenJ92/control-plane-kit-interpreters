@@ -106,3 +106,10 @@ bounded comparison facts, validate holder mounts, stop on faults, preserve
 role-specific indices and classify invalid provider Unicode as malformed.
 Official Docker Hub spellings reuse the existing `matches_image_reference`
 owner; unrelated registry/repository digests remain conflicts.
+
+The final ownership pass also preserves known name/label conflicts when image
+or UID context is unavailable. Allocation-aware container and file-volume labels
+include `configuration.selection`, derived through the existing pure Core
+configuration correlation/selection owner, just as runtime creation does. The
+positive fixture asserts matching ownership on that actual producer shape;
+wrong selection and unknown extra CPK labels remain conflicts.

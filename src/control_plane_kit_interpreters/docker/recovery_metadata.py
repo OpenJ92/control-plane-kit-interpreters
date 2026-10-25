@@ -8,6 +8,9 @@ from time import monotonic
 import rfc8785
 
 from control_plane_kit_core.planning import StartNode
+from control_plane_kit_core.configuration_invocation import (
+    configuration_invocation_correlation_for_request, configuration_invocation_selection_fingerprint,
+)
 from control_plane_kit_core.runtime_effect_observation import (
     RuntimeEffectObservationEvidence, RuntimeEffectObservationFailure,
     RuntimeEffectObservationRequest, RuntimeEffectObservedIndeterminate,
@@ -122,6 +125,14 @@ def _result(observation, rows, binding=None, *, complete=False, unsupported=Fals
         failure=RuntimeEffectObservationFailure(code, message), observations=())
 
 
+def _expected_node_labels(request, material):
+    labels = _node_labels(request, material)
+    if request.kind is RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1:
+        correlation = configuration_invocation_correlation_for_request(request)
+        labels[_PREFIX + "configuration.selection"] = configuration_invocation_selection_fingerprint(correlation.selection)
+    return labels
+
+
 def _targets(observer, observation, authority, expected):
     request = observation.runtime_request
     policy = observer.local_client_config
@@ -159,7 +170,7 @@ def _targets(observer, observation, authority, expected):
                for s in material.secret_selections) != 1:
             return None
     targets = [
-        _Target("container", 0, _container_name(request, material.node_id), _node_labels(request, material)),
+        _Target("container", 0, _container_name(request, material.node_id), _expected_node_labels(request, material)),
         _Target("network", 0, _network_name(request, material.runtime_id), _runtime_labels(request, material.runtime_id)),
         _Target("image", 0, material.product.image.execution_reference),
     ]
@@ -276,9 +287,12 @@ def _project(raw, target, context):
         identity = _identity(raw.get("Id"))
         facts = _container_facts(raw)
         coordinate_matches = (facts["name"] == "/" + target.coordinate
-            and facts["image"] == context["image_id"]
             and tuple(facts["networks"]) == (context["network"],)
-            and facts["mounts"] == context["mounts"])
+            and all(mount in facts["mounts"] for mount in context["mounts"]))
+        if context["image_id"] is not None:
+            coordinate_matches = coordinate_matches and facts["image"] == context["image_id"]
+        if context["complete"]:
+            coordinate_matches = coordinate_matches and facts["mounts"] == context["mounts"]
     elif target.role == "network":
         labels = _labels(raw.get("Labels"))
         identity = _identity(raw.get("Id"))
@@ -298,7 +312,7 @@ def _project(raw, target, context):
         and {key: value for key, value in labels.items() if key.startswith(_PREFIX)} == target.labels)
     row = _row(target, state="present", ownership="matching" if matches else "conflicting",
                identity=identity, reason="none" if matches else "ownership-conflict")
-    if target.role == "container" and not context["complete"]:
+    if target.role == "container" and matches and not context["complete"]:
         row.update(ownership="unestablished", reason="selector-unavailable")
     return row, None, facts
 
@@ -373,7 +387,7 @@ def _sweep(api, budget, targets, request, expected, rows):
         secret = target.file
         selection, = (s for s in material.secret_selections
                       if s.reference == secret.reference and s.intent is secret.intent)
-        labels = {**_node_labels(request, material), _PREFIX + "volume.kind": "secret-file",
+        labels = {**_expected_node_labels(request, material), _PREFIX + "volume.kind": "secret-file",
                   _PREFIX + "secret.target": secret.target_path,
                   _PREFIX + "secret.reference": secret.reference.reference_id,
                   _PREFIX + "secret.identity": _selected_secret_identity(request, material.node_id, secret, selection, uid)}
