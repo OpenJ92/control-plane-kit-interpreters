@@ -404,6 +404,12 @@ class DockerRecoveryMetadataTests(unittest.TestCase):
         del raw.rows["volume", name]
         _, evidence = self.observe(method, request)
         self.assertEqual(evidence["coverage"], "incomplete")
+        request, raw, _, method = self.fixture()
+        name = configuration_volume_name(request.configuration_instances.instances[0])
+        del raw.rows["volume", name]
+        raw.attached.remove(name)
+        _, evidence = self.observe(method, request)
+        self.assertEqual(evidence["coverage"], "incomplete")
 
     def test_every_failed_metadata_read_stops_all_later_calls(self):
         for role in ("image", "container", "network", "volume"):
@@ -418,7 +424,13 @@ class DockerRecoveryMetadataTests(unittest.TestCase):
                 self.assertEqual(raw.close_calls, 1)
 
     def test_file_indices_are_independent_of_environment_delivery_indices(self):
-        request, raw, _, method = self.fixture(request_for(file_count=2, grants=False))
+        request = request_for(file_count=2, grants=False)
+        material, = request.products
+        contract = material.product.runtime_contract
+        env = contract.secret_deliveries[0]
+        contract = replace(contract, secret_deliveries=tuple(replace(env, environment_name=f"TOKEN_{i}") for i in range(9)) + contract.secret_deliveries[1:])
+        request = replace(request, products=(replace(material, product=replace(material.product, runtime_contract=contract)),))
+        request, raw, _, method = self.fixture(request)
         _, evidence = self.observe(method, request)
         self.assertEqual([row["index"] for row in evidence["resources"] if row["role"] == "secret-volume"], [0, 1])
 
@@ -430,3 +442,17 @@ class DockerRecoveryMetadataTests(unittest.TestCase):
         self.assertEqual(evidence["coverage"], "incomplete")
         self.assertEqual(evidence["resources"][3]["reason"], "malformed")
         self.assertEqual(raw.calls[-1], key)
+
+    def test_official_image_spelling_reuses_existing_exact_repository_matching(self):
+        for spelling, supported in (("postgres", True), ("library/postgres", True),
+                                    ("docker.io/postgres", True), ("redis", False),
+                                    ("ghcr.io/library/postgres", False)):
+            request = request_for(grants=False)
+            material, = request.products
+            image = replace(material.product.image, registry="docker.io", repository="library/postgres")
+            request = replace(request, products=(replace(material, product=replace(material.product, image=image)),))
+            request, raw, _, method = self.fixture(request)
+            raw.rows["image", image.execution_reference]["RepoDigests"] = [spelling + "@" + image.digest]
+            _, evidence = self.observe(method, request)
+            self.assertEqual(evidence["coverage"], "selected-addresses-observed" if supported else "incomplete")
+            self.assertEqual(evidence["resources"][-1]["selector"] is not None, supported)

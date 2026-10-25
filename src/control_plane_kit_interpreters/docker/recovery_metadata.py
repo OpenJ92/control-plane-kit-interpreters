@@ -25,7 +25,9 @@ from control_plane_kit_interpreters.docker.runtime import (
     _container_name, _network_name, _node_labels, _runtime_labels,
     _secret_volume_name, _selected_secret_identity,
 )
-from control_plane_kit_interpreters.docker.sdk import DockerSdkClient, _secret_file_owner_uid
+from control_plane_kit_interpreters.docker.sdk import (
+    DockerSdkClient, _secret_file_owner_uid, matches_image_reference,
+)
 
 
 _PREFIX = "org.openj92.cpk."
@@ -47,6 +49,11 @@ class _Malformed(Exception):
 class _Unavailable(Exception):
     def __init__(self, reason):
         self.reason = reason
+
+
+class _ResourceUnavailable(Exception):
+    def __init__(self, row):
+        self.row = row
 
 
 class _Budget:
@@ -82,6 +89,7 @@ class _Target:
     coordinate: str | None
     labels: dict | None = None
     file: object | None = None
+    destination: str | None = None
 
 
 def _commit(domain, value):
@@ -133,11 +141,15 @@ def _targets(observer, observation, authority, expected):
     contract = material.product.runtime_contract
     if material.node_id != request.operation.target.node_id or contract.retained_data_mounts:
         return None
+    if contract.configuration_artifacts and request.configuration_instances is None:
+        # Legacy runtime preparation creates additional configuration volumes;
+        # this capability deliberately admits only exact allocation selections.
+        return None
     if any(type(delivery) not in (SecretEnvironmentDelivery, SecretReferenceEnvironmentDelivery, SecretFileDelivery)
            for delivery in contract.secret_deliveries):
         return None
-    files = [(index, delivery) for index, delivery in enumerate(contract.secret_deliveries)
-             if type(delivery) is SecretFileDelivery]
+    files = list(enumerate(delivery for delivery in contract.secret_deliveries
+                           if type(delivery) is SecretFileDelivery))
     configurations = (() if request.configuration_instances is None else request.configuration_instances.instances)
     if len(configurations) + len(files) > 8:
         return None
@@ -151,9 +163,9 @@ def _targets(observer, observation, authority, expected):
         _Target("network", 0, _network_name(request, material.runtime_id), _runtime_labels(request, material.runtime_id)),
         _Target("image", 0, material.product.image.execution_reference),
     ]
-    targets += [_Target("configuration-volume", index, configuration_volume_name(ref), configuration_volume_labels(ref))
+    targets += [_Target("configuration-volume", index, configuration_volume_name(ref), configuration_volume_labels(ref), destination=ref.target_path)
                 for index, ref in enumerate(configurations)]
-    targets += [_Target("secret-volume", index, None, file=delivery) for index, delivery in files]
+    targets += [_Target("secret-volume", index, None, file=delivery, destination=delivery.target_path) for index, delivery in files]
     coordinates = [t.coordinate for t in targets[3:] if t.coordinate is not None]
     if len(coordinates) != len(set(coordinates)):
         return None
@@ -169,6 +181,10 @@ def _mapping(value, limit=64):
 def _text(value, limit):
     if type(value) is not str or len(value) > limit:
         raise _Malformed
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise _Malformed from None
     return value
 
 
@@ -194,7 +210,45 @@ def _identity(value, *, image=False):
     return value
 
 
-def _project(raw, target):
+def _mounts(value, *, holder=False):
+    if type(value) is not list or len(value) > 64:
+        raise _Malformed
+    result = []
+    for mount in value:
+        mount = _mapping(mount, 16)
+        kind = _text(mount.get("Type"), 32)
+        name = _text(mount.get("Name", ""), 256)
+        if holder:
+            result.append((kind, name))
+        else:
+            destination = _text(mount.get("Destination"), 1024)
+            read_write = mount.get("RW")
+            if type(read_write) is not bool:
+                raise _Malformed
+            result.append((kind, name, destination, read_write))
+    if len(result) != len(set(result)):
+        raise _Malformed
+    return sorted(result)
+
+
+def _container_facts(raw):
+    image = _identity(raw.get("Image"), image=True)
+    name = _text(raw.get("Name"), 256)
+    networks = _mapping(_mapping(raw.get("NetworkSettings")).get("Networks"), 32)
+    network_ids = {}
+    for network, data in networks.items():
+        network_ids[_text(network, 256)] = _identity(_mapping(data).get("NetworkID"))
+    mounts = _mounts(raw.get("Mounts"))
+    state = _mapping(raw.get("State"))
+    running = state.get("Running")
+    status = _text(state.get("Status"), 32)
+    if type(running) is not bool or not status:
+        raise _Malformed
+    return dict(name=name, image=image, networks=network_ids, mounts=mounts,
+                running=running, status=status)
+
+
+def _project(raw, target, context):
     raw = _mapping(raw)
     if target.role == "image":
         identity = _identity(raw.get("Id"), image=True)
@@ -203,7 +257,7 @@ def _project(raw, target):
             raise _Malformed
         for digest in digests:
             _text(digest, 1024)
-        matches = target.coordinate in digests or target.coordinate == identity
+        matches = matches_image_reference(target.coordinate, tuple(digests))
         config = _mapping(raw.get("Config"))
         user = config.get("User", "")
         # User affects selectors, never public evidence. Unsupported values do
@@ -212,28 +266,44 @@ def _project(raw, target):
             uid = _secret_file_owner_uid(user) if matches else None
         except ValueError:
             uid = None
-        return _row(target, state="present", ownership="not-applicable" if matches else "conflicting",
-                    identity=identity, reason="none" if matches else "ownership-conflict"), uid
+        return (_row(target, state="present", ownership="not-applicable" if matches else "conflicting",
+                     identity=identity, reason="none" if matches else "ownership-conflict"), uid,
+                dict(identity=identity, uid=uid, matches=matches))
+    facts = None
+    coordinate_matches = True
     if target.role == "container":
         labels = _labels(_mapping(raw.get("Config")).get("Labels"))
         identity = _identity(raw.get("Id"))
+        facts = _container_facts(raw)
+        coordinate_matches = (facts["name"] == "/" + target.coordinate
+            and facts["image"] == context["image_id"]
+            and tuple(facts["networks"]) == (context["network"],)
+            and facts["mounts"] == context["mounts"])
     elif target.role == "network":
         labels = _labels(raw.get("Labels"))
         identity = _identity(raw.get("Id"))
+        coordinate_matches = _text(raw.get("Name"), 256) == target.coordinate
     else:
         labels = _labels(raw.get("Labels"))
         name = _text(raw.get("Name"), 256)
         driver = _text(raw.get("Driver"), 128)
         scope = _text(raw.get("Scope"), 128)
+        created = _text(raw.get("CreatedAt"), 128)
+        if not created or "\x00" in created:
+            raise _Malformed
         if name != target.coordinate:
             raise _Malformed
-        identity = _commit(_VOLUME_DOMAIN, dict(name=name, labels=labels, driver=driver, scope=scope))
-    matches = all(labels.get(key) == value for key, value in target.labels.items())
-    return _row(target, state="present", ownership="matching" if matches else "conflicting",
-                identity=identity, reason="none" if matches else "ownership-conflict"), None
+        identity = _commit(_VOLUME_DOMAIN, dict(name=name, labels=labels, driver=driver, scope=scope, created_at=created))
+    matches = (coordinate_matches
+        and {key: value for key, value in labels.items() if key.startswith(_PREFIX)} == target.labels)
+    row = _row(target, state="present", ownership="matching" if matches else "conflicting",
+               identity=identity, reason="none" if matches else "ownership-conflict")
+    if target.role == "container" and not context["complete"]:
+        row.update(ownership="unestablished", reason="selector-unavailable")
+    return row, None, facts
 
 
-def _resource(api, budget, target):
+def _resource(api, budget, target, context):
     from docker.errors import NotFound
     from control_plane_kit_interpreters.docker.observer import _provider_error
 
@@ -241,33 +311,41 @@ def _resource(api, budget, target):
     try:
         raw = budget.call(method, target.coordinate)
     except NotFound:
-        row, uid = _row(target, state="absent", ownership="not-applicable", reason="not-found"), None
+        row, uid, facts = _row(target, state="absent", ownership="not-applicable", reason="not-found"), None, None
     except Exception as error:
         if not _provider_error(error):
             raise
-        return _row(target), None
+        raise _ResourceUnavailable(_row(target)) from None
     else:
         try:
-            row, uid = _project(raw, target)
+            row, uid, facts = _project(raw, target, context)
         except _Malformed:
-            return _row(target, reason="malformed"), None
+            raise _ResourceUnavailable(_row(target, reason="malformed")) from None
     if target.role.endswith("-volume"):
         try:
             holders = budget.call(api.containers, all=True, filters={"volume": target.coordinate}, limit=1)
             if type(holders) is not list or len(holders) > 1:
                 raise _Malformed
             if holders:
-                _identity(_mapping(holders[0]).get("Id"))
+                holder = _mapping(holders[0])
+                _identity(holder.get("Id"))
+                if ("volume", target.coordinate) not in _mounts(holder.get("Mounts"), holder=True):
+                    raise _Malformed
             row["attachment"] = "observed" if holders else "not-observed"
+            if holders and row["state"] == "absent":
+                raise _ResourceUnavailable(_row(target, attachment="observed", reason="drift"))
         except Exception as error:
+            if isinstance(error, _ResourceUnavailable):
+                raise
             if not isinstance(error, _Malformed) and not _provider_error(error):
                 raise
             row["attachment"] = "unknown"
             row["reason"] = "malformed" if isinstance(error, _Malformed) else "provider-unavailable"
-    return row, uid
+            raise _ResourceUnavailable(row) from None
+    return row, uid, facts
 
 
-def _sweep(api, budget, targets, request, expected):
+def _sweep(api, budget, targets, request, expected, rows):
     from control_plane_kit_interpreters.docker.observer import _provider_error
 
     try:
@@ -278,8 +356,12 @@ def _sweep(api, budget, targets, request, expected):
         if isinstance(error, _Malformed) or _provider_error(error):
             raise _Unavailable("provider-binding-unavailable") from None
         raise
-    rows = [_row(target) for target in targets]
-    rows[2], uid = _resource(api, budget, targets[2])
+    facts = [None] * len(targets)
+    try:
+        rows[2], uid, facts[2] = _resource(api, budget, targets[2], {})
+    except _ResourceUnavailable as error:
+        rows[2] = error.row
+        raise
     concrete = list(targets)
     material, = request.products
     for index, target in enumerate(targets[3:], 3):
@@ -300,11 +382,31 @@ def _sweep(api, budget, targets, request, expected):
     coordinates = [t.coordinate for t in concrete[3:] if t.coordinate is not None]
     if len(coordinates) != len(set(coordinates)):
         raise _Unavailable("unsupported")
+    context = dict(image_id=rows[2]["identity"] if rows[2]["ownership"] == "not-applicable" else None,
+        network=targets[1].coordinate,
+        mounts=sorted(("volume", t.coordinate, t.destination, False) for t in concrete[3:] if t.coordinate is not None),
+        complete=rows[2]["state"] == "present" and rows[2]["ownership"] == "not-applicable"
+                 and all(t.coordinate is not None for t in concrete[3:]))
+    for index, target in enumerate(concrete[3:], 3):
+        if target.coordinate is not None:
+            rows[index] = _row(target)
     for index, target in enumerate(concrete):
         if index == 2 or target.coordinate is None:
             continue
-        rows[index], _ = _resource(api, budget, target)
-    return rows, uid
+        try:
+            rows[index], _, facts[index] = _resource(api, budget, target, context)
+        except _ResourceUnavailable as error:
+            rows[index] = error.row
+            raise
+    if facts[0] is not None and rows[1]["state"] == "present":
+        if facts[0]["networks"].get(targets[1].coordinate) != rows[1]["identity"]:
+            rows[0].update(ownership="conflicting", reason="ownership-conflict")
+    if facts[0] is not None:
+        mounted = {mount[1] for mount in facts[0]["mounts"] if mount[0] == "volume"}
+        for index, target in enumerate(concrete[3:], 3):
+            if rows[index]["state"] == "absent" and target.coordinate in mounted:
+                rows[index] = _row(target, reason="drift")
+    return facts
 
 
 def observe_metadata(observer, observation, authority, expected):
@@ -327,16 +429,22 @@ def observe_metadata(observer, observation, authority, expected):
             docker_module=observer.docker_module, connect_on_init=False)
         client._before_provider_call = budget.check
         api = client._client().api
-        first, first_uid = _sweep(api, budget, targets, observation.runtime_request, expected)
-        second, second_uid = _sweep(api, budget, targets, observation.runtime_request, expected)
+        first_facts = _sweep(api, budget, targets, observation.runtime_request, expected, rows)
+        first = rows
+        rows = [_row(t, reason="selector-unavailable" if t.coordinate is None else "provider-unavailable") for t in targets]
+        second_facts = _sweep(api, budget, targets, observation.runtime_request, expected, rows)
         binding = sha256(_BINDING_DOMAIN + expected.encode("ascii")).hexdigest()
-        rows = second
-        for index, (before, after) in enumerate(zip(first, second, strict=True)):
-            if before != after or (index == 2 and first_uid != second_uid):
+        for index, (before, after) in enumerate(zip(first, rows, strict=True)):
+            if before != after or first_facts[index] != second_facts[index]:
                 rows[index] = {**after, "state": "unknown", "ownership": "unestablished",
                                "identity": None, "attachment": "unknown" if targets[index].role.endswith("-volume") else "not-applicable",
                                "reason": "drift"}
-        complete = all(row["state"] in ("present", "absent") and row["attachment"] != "unknown" for row in rows)
+        complete = all(row["state"] in ("present", "absent") and row["attachment"] != "unknown"
+                       and row["ownership"] != "unestablished" for row in rows)
+    except _ResourceUnavailable:
+        # The current sweep already retained the failed row and earlier facts.
+        # No later coordinate or second sweep is scheduled after this failure.
+        pass
     except (_Stopped, _Unavailable) as error:
         reason = error.reason if isinstance(error, _Unavailable) else "provider-unavailable"
         rows = [_row(t, reason="selector-unavailable" if t.coordinate is None else reason) for t in targets]

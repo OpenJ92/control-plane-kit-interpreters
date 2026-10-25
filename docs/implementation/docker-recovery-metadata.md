@@ -55,12 +55,13 @@ by the exact ASCII identifier. There is no normalization or alternate algorithm.
 The selector is SHA256 of `b"control-plane-kit.docker-recovery-selector.v1\0"`
 followed by RFC8785 bytes of `[role, exact_lookup_coordinate]`. Volume identity is
 SHA256 of `b"control-plane-kit.docker-recovery-volume.v1\0"` followed by RFC8785
-bytes of `{name, labels, driver, scope}`. These hashes never include file bytes,
+bytes of `{name, labels, driver, scope, created_at}`. These hashes never include file bytes,
 Env, mountpoints or an installed-content assertion. Image/container/network
 identities are canonical SHA256 image IDs or 64 lowercase hexadecimal IDs.
 
 Targets are ordered container/network/image, then original configuration indices,
-then original secret-delivery indices. File selectors use only the exact local
+then file-role indices in original file-delivery order (environment deliveries
+do not shift those indices). File selectors use only the exact local
 image's supported numeric user and existing selected-secret naming. Missing UID
 leaves explicit null-selector rows. At most eight combined volumes are admitted;
 the eleven-row maximum passes through the actual Core 4096-byte evidence codec.
@@ -74,6 +75,15 @@ not recursively copied. These are projection bounds, not raw HTTP allocation
 limits. Each volume has at most one attachment existence query per sweep, with
 all container states, exact volume filter, and limit one.
 
+Returned container/network names and all CPK ownership labels must agree.
+Container image identity, network identity, selected mounts and state are bounded
+internal comparison facts. They detect conflict/drift without exposing private
+addresses or mount paths. Volume identity includes its creation timestamp.
+Attachment evidence requires a bounded exact volume mount on the returned holder;
+contradictory absence/attachment facts cannot earn complete coverage. Known
+provider faults or malformed projections stop all later reads, including the
+second sweep, and preserve the current partial rows before closing.
+
 Two sweeps cost `8 + 4N` Engine reads plus at most one API compatibility call,
 maximum 41. The explicitly owned local policy must have timeout at most 10 seconds.
 A private monotonic budget starts before acquisition, checks construction,
@@ -85,3 +95,14 @@ produced exactly 23 missing-capability assertion failures across the twelve new
 test methods and their subcases, with no errors. This establishes causal absence
 of the new API, not independent execution of each deeper law. Implementation and
 additional negative targets must pass the subsequent owning gate.
+
+Independent review found omitted legacy configuration scope, incomplete exact
+correlation/attachment/drift facts, continued reads after faults, file-index
+mapping and malformed Unicode handling. The pre-fix regression checkpoint
+`2f4b882` produced six intended assertion failures and one provider-Unicode
+encoding error across 619 tests; that error was a source defect, not an apparatus
+failure. The repairs reject legacy unallocated configuration before I/O, retain
+bounded comparison facts, validate holder mounts, stop on faults, preserve
+role-specific indices and classify invalid provider Unicode as malformed.
+Official Docker Hub spellings reuse the existing `matches_image_reference`
+owner; unrelated registry/repository digests remain conflicts.
