@@ -14,6 +14,7 @@ from control_plane_kit_core.runtime_effect_observation import (
     RuntimeEffectObservationRequest, RuntimeEffectObservedIndeterminate,
     RuntimeEffectObserverUnsupported, runtime_effect_observation_fingerprint,
 )
+from control_plane_kit_core.runtime_effects import RuntimeEffectKind
 from control_plane_kit_interpreters.docker import DockerRuntimeEffectObserver
 from control_plane_kit_interpreters.docker.configuration import (
     configuration_volume_labels, configuration_volume_name,
@@ -60,12 +61,19 @@ class MetadataRaw(UnixAcquisitionRawClient):
         self.rows["image", image] = {"Id": "sha256:" + "a" * 64,
             "RepoDigests": [image], "Config": {"User": "10006", "Env": Forbidden()}}
         self.rows["container", _container_name(request, material.node_id)] = {
-            "Id": "b" * 64, "Config": {"Labels": _node_labels(request, material), "Env": Forbidden()}}
+            "Id": "b" * 64, "Name": "/" + _container_name(request, material.node_id),
+            "Image": "sha256:" + "a" * 64,
+            "NetworkSettings": {"Networks": {_network_name(request, material.runtime_id): {"NetworkID": "c" * 64}}},
+            "Mounts": [], "State": {"Running": True, "Status": "running"},
+            "Config": {"Labels": _node_labels(request, material), "Env": Forbidden()}}
         self.rows["network", _network_name(request, material.runtime_id)] = {
-            "Id": "c" * 64, "Labels": _runtime_labels(request, material.runtime_id)}
+            "Id": "c" * 64, "Name": _network_name(request, material.runtime_id),
+            "Labels": _runtime_labels(request, material.runtime_id)}
+        mounts = self.rows["container", _container_name(request, material.node_id)]["Mounts"]
         if request.configuration_instances is not None:
             for ref in request.configuration_instances.instances:
                 self.volume(configuration_volume_name(ref), configuration_volume_labels(ref))
+                mounts.append({"Type": "volume", "Name": configuration_volume_name(ref), "Destination": ref.target_path, "RW": False})
         for secret in material.product.runtime_contract.secret_deliveries:
             if not hasattr(secret, "target_path"):
                 continue
@@ -78,10 +86,11 @@ class MetadataRaw(UnixAcquisitionRawClient):
                 PREFIX + "secret.identity": _selected_secret_identity(
                     request, material.node_id, secret, selection, 10006)}
             self.volume(name, labels)
+            mounts.append({"Type": "volume", "Name": name, "Destination": secret.target_path, "RW": False})
 
     def volume(self, name, labels):
         self.rows["volume", name] = {"Name": name, "Labels": labels,
-            "Driver": "local", "Scope": "local", "Mountpoint": CANARY}
+            "Driver": "local", "Scope": "local", "CreatedAt": "2026-01-01T00:00:00Z", "Mountpoint": CANARY}
         self.attached.add(name)
 
     def read(self, role, name):
@@ -101,7 +110,7 @@ class MetadataRaw(UnixAcquisitionRawClient):
             raise AssertionError("attachment query widened")
         name = filters["volume"]
         self.calls.append(("attachment", name))
-        return [{"Id": "d" * 64, "Private": CANARY}] if name in self.attached else []
+        return [{"Id": "d" * 64, "Mounts": [{"Type": "volume", "Name": name}], "Private": CANARY}] if name in self.attached else []
 
 
 class DockerRecoveryMetadataTests(unittest.TestCase):
@@ -334,3 +343,90 @@ class DockerRecoveryMetadataTests(unittest.TestCase):
         _, evidence = self.observe(method, request)
         self.assertEqual(evidence["coverage"], "incomplete")
         self.assertTrue(all(row["attachment"] == "unknown" for row in evidence["resources"][3:]))
+
+    def test_legacy_configuration_without_allocations_is_unsupported_before_io(self):
+        request = replace(selected_request(), kind=RuntimeEffectKind.REALIZE_ACTIVITY, configuration_instances=None)
+        request, raw, module, method = self.fixture(request)
+        result, _ = self.observe(method, request)
+        self.assertIs(type(result), RuntimeEffectObserverUnsupported)
+        self.assertEqual(module.docker_clients, [])
+        self.assertEqual(raw.calls, [])
+
+    def test_exact_names_extra_cpk_labels_and_container_image_network_mounts(self):
+        changes = (
+            lambda row: row.update(Name="/foreign-name"),
+            lambda row: row["Config"]["Labels"].update({PREFIX + "foreign": "unexpected"}),
+            lambda row: row.update(Image="sha256:" + "f" * 64),
+            lambda row: row["NetworkSettings"].update(Networks={"foreign-network": {"NetworkID": "c" * 64}}),
+            lambda row: row["Mounts"][0].update(Name="foreign-volume"),
+            lambda row: row["Mounts"][0].update(Destination="/foreign-path"),
+            lambda row: row["Mounts"][0].update(RW=True),
+        )
+        for change in changes:
+            request, raw, _, method = self.fixture()
+            change(raw.rows["container", _container_name(request, request.products[0].node_id)])
+            _, evidence = self.observe(method, request)
+            self.assertNotEqual(evidence["resources"][0]["ownership"], "matching")
+        request, raw, _, method = self.fixture()
+        raw.rows["network", _network_name(request, request.products[0].runtime_id)]["Name"] = "foreign-network"
+        _, evidence = self.observe(method, request)
+        self.assertNotEqual(evidence["resources"][1]["ownership"], "matching")
+
+    def test_selected_mount_and_volume_incarnation_drift_are_detected(self):
+        for which in ("mount", "created", "state", "network-identity"):
+            request, raw, _, method = self.fixture()
+            def drift(role, name):
+                if raw.calls.count((role, name)) != 2:
+                    return
+                if role == "container":
+                    if which == "mount":
+                        raw.rows[role, name]["Mounts"][0]["RW"] = True
+                    elif which == "state":
+                        raw.rows[role, name]["State"].update(Running=False, Status="exited")
+                    elif which == "network-identity":
+                        next(iter(raw.rows[role, name]["NetworkSettings"]["Networks"].values()))["NetworkID"] = "f" * 64
+                if role == "volume" and which == "created":
+                    raw.rows[role, name]["CreatedAt"] = "2026-01-02T00:00:00Z"
+            raw.hook = drift
+            _, evidence = self.observe(method, request)
+            self.assertEqual(evidence["coverage"], "incomplete", which)
+            self.assertTrue(any(row["reason"] == "drift" for row in evidence["resources"]), which)
+
+    def test_attachment_requires_exact_mount_and_cannot_contradict_absence(self):
+        for mounts in (None, [], [{"Type": "volume", "Name": "foreign-volume"}]):
+            request, raw, _, method = self.fixture()
+            raw.api.containers = lambda **kwargs: [{"Id": "d" * 64, "Mounts": mounts}]
+            _, evidence = self.observe(method, request)
+            self.assertEqual(evidence["coverage"], "incomplete")
+            self.assertEqual(evidence["resources"][3]["attachment"], "unknown")
+        request, raw, _, method = self.fixture()
+        name = configuration_volume_name(request.configuration_instances.instances[0])
+        del raw.rows["volume", name]
+        _, evidence = self.observe(method, request)
+        self.assertEqual(evidence["coverage"], "incomplete")
+
+    def test_every_failed_metadata_read_stops_all_later_calls(self):
+        for role in ("image", "container", "network", "volume"):
+            for malformed in (False, True):
+                request, raw, _, method = self.fixture()
+                key = next(key for key in raw.rows if key[0] == role)
+                raw.rows[key] = {} if malformed else Timeout(CANARY)
+                _, evidence = self.observe(method, request)
+                self.assertEqual(evidence["coverage"], "incomplete")
+                self.assertEqual(raw.calls[-1], key)
+                self.assertEqual(raw.calls.count(key), 1)
+                self.assertEqual(raw.close_calls, 1)
+
+    def test_file_indices_are_independent_of_environment_delivery_indices(self):
+        request, raw, _, method = self.fixture(request_for(file_count=2, grants=False))
+        _, evidence = self.observe(method, request)
+        self.assertEqual([row["index"] for row in evidence["resources"] if row["role"] == "secret-volume"], [0, 1])
+
+    def test_malformed_unicode_volume_label_is_closed_and_stops(self):
+        request, raw, _, method = self.fixture()
+        key = next(key for key in raw.rows if key[0] == "volume")
+        raw.rows[key]["Labels"]["provider.label"] = "\ud800"
+        _, evidence = self.observe(method, request)
+        self.assertEqual(evidence["coverage"], "incomplete")
+        self.assertEqual(evidence["resources"][3]["reason"], "malformed")
+        self.assertEqual(raw.calls[-1], key)
