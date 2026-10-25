@@ -166,6 +166,18 @@ class DockerRuntimeEffectObserver:
         elif self.docker_module is not None:
             raise ValueError("Docker observer module injection requires a local policy")
 
+    def observe_metadata(
+        self,
+        request: RuntimeEffectObservationRequest,
+        authority: object | None,
+        *,
+        expected_daemon_id: str | None,
+    ) -> RuntimeEffectObservedIndeterminate | RuntimeEffectObserverUnsupported:
+        """Observe selected current addresses without resolving a past effect."""
+        from control_plane_kit_interpreters.docker.recovery_metadata import observe_metadata
+
+        return observe_metadata(self, request, authority, expected_daemon_id)
+
     def observe(
         self,
         request: RuntimeEffectObservationRequest,
