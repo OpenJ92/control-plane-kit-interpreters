@@ -6,7 +6,7 @@ neutral, and operations owns durable authority admission and resource evidence.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from importlib import import_module
 import re
@@ -21,6 +21,7 @@ from control_plane_kit_core.secrets import (
     SecretCustodian,
     SecretCustodyGrant,
     SecretCustodyReceipt,
+    SecretCustodyStatus,
     SecretReference,
     SecretResolutionCode,
     SecretResolutionError,
@@ -29,6 +30,8 @@ from control_plane_kit_core.secrets import (
     SecretValue,
     require_authorized_secret,
 )
+from control_plane_kit_interpreters.invocations import InvocationPortError, control_errors
+from control_plane_kit_interpreters.secrets import _PreparedSecretResolver
 
 
 _BASE_URL = "https://api.cloudflare.com/client/v4"
@@ -39,6 +42,140 @@ _HOST_PATTERN_LABEL = re.compile(r"^[a-z0-9*](?:[a-z0-9-*]{0,61}[a-z0-9*])?$")
 
 class CloudflareApiError(RuntimeError):
     """Raised when Cloudflare API interpretation fails with bounded evidence."""
+
+
+@dataclass(frozen=True, repr=False)
+class _CreatedIngress:
+    tunnel_id: str
+    dns_record_id: str
+    token: SecretValue
+
+
+class _InvalidIngressResult(CloudflareApiError):
+    def __init__(self, reason):
+        super().__init__("Cloudflare custody returned invalid material")
+        self.reason = reason
+
+
+class _RemovalIncomplete(CloudflareApiError):
+    def __init__(self, stages):
+        super().__init__("Cloudflare exact provider cleanup is uncertain")
+        self.stages = stages
+
+
+def _ingress_controls(port, *, required=False):
+    controls = control_errors(port, required=required)
+    if port is None:
+        return ()
+    if port is not None and not callable(getattr(port, "record_result", None)):
+        raise InvocationPortError("ingress invocation port requires result recording")
+    return (InvocationPortError, *controls)
+
+
+def _provider_attempt(call, controls):
+    """Leave the provider exception handler before any cleanup can run."""
+    error = None
+    try:
+        return call(), None
+    except controls:
+        raise
+    except Exception as caught:
+        error = caught
+    return None, error
+
+
+def _invoke_ingress(port, kind, call, returned):
+    controls = _ingress_controls(port)
+    if port is None:
+        return call()
+    permit = port.admit(kind)
+    value, error = None, None
+    try:
+        value = call()
+    except controls:
+        raise
+    except BaseException as caught:
+        error = caught
+    if error is None:
+        outcome, payload, public_error = "returned", returned(value), None
+    else:
+        outcome, payload, public_error = _ingress_failure(kind, error)
+    # Recording is outside capability/compensation handlers. Never retry a
+    # failed acknowledgement or attach the provider error as its context.
+    if error is not None and not isinstance(error, Exception):
+        try:
+            port.record_result(permit, outcome, payload)
+        except Exception:
+            pass
+        raise error
+    port.record_result(permit, outcome, payload)
+    if public_error is not None:
+        raise public_error
+    return value
+
+
+def _ingress_failure(kind, error):
+    if kind == "ingress-provider-create":
+        evidence = error.provider_failure if type(error) is CloudflareProviderOperationError else None
+        if (type(error) is CloudflareProviderOperationError
+                and type(evidence) is CloudflareProviderFailureEvidence
+                and evidence.stage in (
+                    CloudflareProviderFailureStage.DNS_PRE_OBSERVATION,
+                    CloudflareProviderFailureStage.TUNNEL_ALLOCATION,
+                    CloudflareProviderFailureStage.TUNNEL_CONFIGURATION,
+                    CloudflareProviderFailureStage.DNS_PRE_MUTATION_OBSERVATION,
+                    CloudflareProviderFailureStage.DNS_RECONCILIATION,
+                    CloudflareProviderFailureStage.DNS_CREATE,
+                    CloudflareProviderFailureStage.TUNNEL_TOKEN,
+                    CloudflareProviderFailureStage.CLEANUP)):
+            provenance = "none" if evidence.dns_record_id is None else (
+                "owned" if evidence.stage in (CloudflareProviderFailureStage.TUNNEL_TOKEN,
+                    CloudflareProviderFailureStage.CLEANUP) else "observed-only")
+            payload = {"version": 1, "tag": "provider-create-stopped",
+                "stage": evidence.stage.value, "category": evidence.category.value,
+                "mutation_certainty": evidence.mutation_certainty.value,
+                "cleanup_result": evidence.cleanup_result.value,
+                "tunnel_id": evidence.tunnel_id, "dns_record_id": evidence.dns_record_id,
+                "dns_provenance": provenance}
+            outcome = "unknown" if "uncertain" in (
+                evidence.mutation_certainty.value, evidence.cleanup_result.value) else "failed"
+            return outcome, payload, CloudflareProviderOperationError(
+                "Cloudflare provider creation stopped", evidence)
+        return "unknown", {"version": 1, "tag": "provider-create-unclassified"}, CloudflareApiError(
+            "Cloudflare provider creation is uncertain")
+    tags = {"ingress-custody-write": "custody-write-unknown",
+        "ingress-custody-revoke": "custody-revoke-unknown",
+        "ingress-provider-remove": "provider-removal-unknown"}
+    reason = ("interrupted" if not isinstance(error, Exception) else
+        error.reason if type(error) is _InvalidIngressResult else "provider-error")
+    payload = {"version": 1, "tag": tags[kind], "reason": reason}
+    if kind == "ingress-provider-remove":
+        payload["failed_stages"] = list(error.stages) if type(error) is _RemovalIncomplete else None
+    return "unknown", payload, CloudflareApiError("Cloudflare ingress capability is uncertain")
+
+
+def _store_ingress_token(custodian, grant, token, controls):
+    receipt = custodian.store(grant, token)
+    valid = False
+    try:
+        if type(receipt) is SecretCustodyReceipt:
+            replace(receipt)
+            valid = (receipt.matches(grant) and receipt.status is SecretCustodyStatus.ACTIVE
+                and type(receipt.version_number) is int and 1 <= receipt.version_number <= 2**53 - 1
+                and type(receipt.reference) is SecretReference
+                and len(receipt.reference.reference_id) <= 1024)
+    except controls:
+        raise
+    except Exception:
+        pass
+    if not valid:
+        raise _InvalidIngressResult("invalid-receipt")
+    return receipt
+
+
+def _revoke_ingress_token(custodian, grant):
+    if custodian.revoke(grant) is not None:
+        raise _InvalidIngressResult("invalid-result")
 
 
 class CloudflareApiNotFound(CloudflareApiError):
@@ -326,6 +463,11 @@ class CloudflareNamedIngressInterpreter:
     transport: CloudflareHttpTransport | None = None
     authorized_secret_resolver: AuthorizedSecretResolver | None = None
     secret_custodian: SecretCustodian | None = None
+    require_invocations: bool = field(default=False, kw_only=True)
+
+    def __post_init__(self):
+        if type(self.require_invocations) is not bool:
+            raise TypeError("require_invocations must be a bool")
 
     def create(
         self,
@@ -336,7 +478,9 @@ class CloudflareNamedIngressInterpreter:
         origin_service_url: str,
         secret_resolution_grant: SecretResolutionGrant,
         secret_custody_grant: SecretCustodyGrant,
+        invocations=None,
     ) -> CloudflareIngressAllocation:
+        controls = _ingress_controls(invocations, required=self.require_invocations)
         if not isinstance(ingress, NamedPublicIngress):
             raise CloudflareApiError("create requires NamedPublicIngress")
         if not isinstance(authority, CloudflareZoneAuthority):
@@ -357,25 +501,54 @@ class CloudflareNamedIngressInterpreter:
             )
         _require_tunnel_token_custody_grant(secret_custody_grant)
 
-        api_token = _resolve_api_token(
-            self.authorized_secret_resolver,
-            authority,
-            secret_resolution_grant,
-        )
-        client = CloudflareApiClient(
-            authority,
-            api_token=api_token,
-            transport=self.transport,
-        )
-        tunnel_name = allocation_name
+        client = self._client(authority, secret_resolution_grant, invocations=invocations)
+        created = _invoke_ingress(invocations, "ingress-provider-create",
+            lambda: self._create_provider(client, ingress, allocation_name, origin_service_url),
+            lambda value: {"version": 1, "tag": "provider-created",
+                "tunnel_id": value.tunnel_id, "dns_record_id": value.dns_record_id})
+        if invocations is None:
+            receipt = self._store_legacy_token(client, created, secret_custody_grant)
+        else:
+            receipt = _invoke_ingress(invocations, "ingress-custody-write",
+                lambda: _store_ingress_token(self.secret_custodian, secret_custody_grant,
+                    created.token, controls),
+                lambda value: {"version": 1, "tag": "custody-write-returned", "receipt": value.descriptor()})
+        return CloudflareIngressAllocation(tunnel_id=created.tunnel_id, tunnel_name=allocation_name,
+            secret_custody_receipt=receipt, dns_record_id=created.dns_record_id,
+            hostname=ingress.hostname, endpoint_url=f"https://{ingress.hostname}")
+
+    def _store_legacy_token(self, client, created, secret_custody_grant):
         try:
-            pre_observation = _observe_exact_hostname(
-                client,
-                ingress.hostname,
-            )
-        except Exception as error:
+            custody_receipt = self.secret_custodian.store(secret_custody_grant, created.token)
+            if not custody_receipt.matches(secret_custody_grant):
+                raise CloudflareApiError("secret custodian returned mismatched receipt")
+        except client._control_errors:
+            raise
+        except Exception:
+            cleanup_result, failed_stages = _cleanup_created_ingress(client,
+                tunnel_id=created.tunnel_id, dns_record_id=created.dns_record_id,
+                custody=("custody", lambda: self.secret_custodian.revoke(secret_custody_grant)))
+            message = "Cloudflare generated secret custody failed"
+            stage = CloudflareProviderFailureStage.SECRET_CUSTODY
+            category = CloudflareProviderFailureCategory.SECRET_CUSTODY
+            certainty = CloudflareProviderMutationCertainty.DNS_AND_TUNNEL_CREATED
+            if failed_stages:
+                message = "Cloudflare exact cleanup is uncertain: " + ",".join(failed_stages)
+                stage = CloudflareProviderFailureStage.CLEANUP
+                category = CloudflareProviderFailureCategory.CLEANUP
+                certainty = CloudflareProviderMutationCertainty.UNCERTAIN
+            raise _provider_operation_error(message, stage=stage, category=category,
+                mutation_certainty=certainty, tunnel_id=created.tunnel_id,
+                dns_record_id=created.dns_record_id, cleanup_result=cleanup_result) from None
+        return custody_receipt
+
+    def _create_provider(self, client, ingress, allocation_name, origin_service_url):
+        tunnel_name = allocation_name
+        pre_observation, error = _provider_attempt(
+            lambda: _observe_exact_hostname(client, ingress.hostname), client._control_errors)
+        if error is not None:
             if not _is_provider_operation_failure(error):
-                raise
+                raise error
             raise _provider_operation_error(
                 str(error),
                 stage=CloudflareProviderFailureStage.DNS_PRE_OBSERVATION,
@@ -392,11 +565,10 @@ class CloudflareNamedIngressInterpreter:
                 cleanup_result=CloudflareProviderCleanupResult.NOT_REQUIRED,
             ) from None
 
-        try:
-            tunnel_id = client.create_tunnel(tunnel_name)
-        except Exception as error:
+        tunnel_id, error = _provider_attempt(lambda: client.create_tunnel(tunnel_name), client._control_errors)
+        if error is not None:
             if not _is_provider_operation_failure(error):
-                raise
+                raise error
             raise _provider_operation_error(
                 str(error),
                 stage=CloudflareProviderFailureStage.TUNNEL_ALLOCATION,
@@ -405,20 +577,18 @@ class CloudflareNamedIngressInterpreter:
                 cleanup_result=CloudflareProviderCleanupResult.WITHHELD,
             ) from None
 
-        try:
-            client.configure_tunnel(
-                tunnel_id,
-                hostname=ingress.hostname,
-                origin_service_url=origin_service_url,
-            )
-        except Exception as error:
+        if client._control_errors:
+            _validate_identifier(tunnel_id, "tunnel_id")
+        _, error = _provider_attempt(lambda: client.configure_tunnel(tunnel_id,
+            hostname=ingress.hostname, origin_service_url=origin_service_url), client._control_errors)
+        if error is not None:
             cleanup_result = _delete_known_tunnel(client, tunnel_id)
             if not _is_provider_operation_failure(error):
                 if cleanup_result is CloudflareProviderCleanupResult.UNCERTAIN:
                     raise CloudflareApiError(
                         "Cloudflare exact cleanup is uncertain: tunnel"
                     ) from None
-                raise
+                raise error
             certainty = CloudflareProviderMutationCertainty.TUNNEL_CREATED
             if isinstance(error, CloudflareApiTransportError):
                 certainty = CloudflareProviderMutationCertainty.UNCERTAIN
@@ -431,20 +601,16 @@ class CloudflareNamedIngressInterpreter:
                 cleanup_result=cleanup_result,
             ) from None
 
-        try:
-            pre_mutation_observation = _observe_exact_hostname(
-                client,
-                ingress.hostname,
-                tunnel_id=tunnel_id,
-            )
-        except Exception as error:
+        pre_mutation_observation, error = _provider_attempt(lambda: _observe_exact_hostname(
+            client, ingress.hostname, tunnel_id=tunnel_id), client._control_errors)
+        if error is not None:
             cleanup_result = _delete_known_tunnel(client, tunnel_id)
             if not _is_provider_operation_failure(error):
                 if cleanup_result is CloudflareProviderCleanupResult.UNCERTAIN:
                     raise CloudflareApiError(
                         "Cloudflare exact cleanup is uncertain: tunnel"
                     ) from None
-                raise
+                raise error
             raise _provider_operation_error(
                 str(error),
                 stage=(
@@ -474,21 +640,14 @@ class CloudflareNamedIngressInterpreter:
                 cleanup_result=cleanup_result,
             ) from None
 
-        try:
-            dns_record_id = client._create_dns_cname_unchecked(
-                hostname=ingress.hostname,
-                tunnel_id=tunnel_id,
-            )
-        except Exception as dns_create_error:
-            try:
-                reconciliation = _observe_reconciled_exact_hostname(
-                    client,
-                    ingress.hostname,
-                    tunnel_id=tunnel_id,
-                )
-            except Exception as reconciliation_error:
+        dns_record_id, dns_create_error = _provider_attempt(lambda: client._create_dns_cname_unchecked(
+            hostname=ingress.hostname, tunnel_id=tunnel_id), client._control_errors)
+        if dns_create_error is not None:
+            reconciliation, reconciliation_error = _provider_attempt(lambda: _observe_reconciled_exact_hostname(
+                client, ingress.hostname, tunnel_id=tunnel_id), client._control_errors)
+            if reconciliation_error is not None:
                 if not _is_provider_operation_failure(reconciliation_error):
-                    raise
+                    raise reconciliation_error
                 raise _provider_operation_error(
                     "Cloudflare DNS reconciliation failed",
                     stage=CloudflareProviderFailureStage.DNS_RECONCILIATION,
@@ -535,9 +694,10 @@ class CloudflareNamedIngressInterpreter:
                     cleanup_result=cleanup_result,
                 ) from None
 
-        try:
-            tunnel_token = client.get_tunnel_token(tunnel_id)
-        except Exception as error:
+        if client._control_errors:
+            _validate_identifier(dns_record_id, "dns_record_id")
+        tunnel_token, error = _provider_attempt(lambda: client.get_tunnel_token(tunnel_id), client._control_errors)
+        if error is not None:
             cleanup_result, failed_stages = _cleanup_created_ingress(
                 client,
                 tunnel_id=tunnel_id,
@@ -549,7 +709,7 @@ class CloudflareNamedIngressInterpreter:
                         "Cloudflare exact cleanup is uncertain: "
                         + ",".join(failed_stages)
                     ) from None
-                raise
+                raise error
             if failed_stages:
                 message = (
                     "Cloudflare exact cleanup is uncertain: "
@@ -575,60 +735,7 @@ class CloudflareNamedIngressInterpreter:
                 cleanup_result=cleanup_result,
             ) from None
 
-        custody_write_attempted = True
-        try:
-            custody_receipt = self.secret_custodian.store(
-                secret_custody_grant,
-                tunnel_token,
-            )
-            if not custody_receipt.matches(secret_custody_grant):
-                raise CloudflareApiError(
-                    "secret custodian returned mismatched receipt"
-                )
-        except Exception:
-            cleanup_result, failed_stages = _cleanup_created_ingress(
-                client,
-                tunnel_id=tunnel_id,
-                dns_record_id=dns_record_id,
-                custody=(
-                    "custody",
-                    lambda: self.secret_custodian.revoke(secret_custody_grant),
-                )
-                if custody_write_attempted
-                else None,
-            )
-            message = "Cloudflare generated secret custody failed"
-            stage = CloudflareProviderFailureStage.SECRET_CUSTODY
-            category = CloudflareProviderFailureCategory.SECRET_CUSTODY
-            certainty = (
-                CloudflareProviderMutationCertainty.DNS_AND_TUNNEL_CREATED
-            )
-            if failed_stages:
-                message = (
-                    "Cloudflare exact cleanup is uncertain: "
-                    + ",".join(failed_stages)
-                )
-                stage = CloudflareProviderFailureStage.CLEANUP
-                category = CloudflareProviderFailureCategory.CLEANUP
-                certainty = CloudflareProviderMutationCertainty.UNCERTAIN
-            raise _provider_operation_error(
-                message,
-                stage=stage,
-                category=category,
-                mutation_certainty=certainty,
-                tunnel_id=tunnel_id,
-                dns_record_id=dns_record_id,
-                cleanup_result=cleanup_result,
-            ) from None
-
-        return CloudflareIngressAllocation(
-            tunnel_id=tunnel_id,
-            tunnel_name=tunnel_name,
-            secret_custody_receipt=custody_receipt,
-            dns_record_id=dns_record_id,
-            hostname=ingress.hostname,
-            endpoint_url=f"https://{ingress.hostname}",
-        )
+        return _CreatedIngress(tunnel_id, dns_record_id, tunnel_token)
 
     def rebind(
         self,
@@ -889,7 +996,9 @@ class CloudflareNamedIngressInterpreter:
         resources: CloudflareOwnedIngressResources,
         secret_resolution_grant: SecretResolutionGrant,
         secret_custody_grant: SecretCustodyGrant,
+        invocations=None,
     ) -> None:
+        controls = _ingress_controls(invocations, required=self.require_invocations)
         if not authority.allows_hostname(resources.hostname):
             raise CloudflareApiError("owned hostname is outside admitted authority policy")
         if self.secret_custodian is None:
@@ -898,7 +1007,22 @@ class CloudflareNamedIngressInterpreter:
                 "generated secret custodian is not configured",
             )
         _require_tunnel_token_custody_grant(secret_custody_grant)
-        client = self._client(authority, secret_resolution_grant)
+        client = self._client(authority, secret_resolution_grant, invocations=invocations)
+        if invocations is not None:
+            _invoke_ingress(invocations, "ingress-custody-revoke",
+                lambda: _revoke_ingress_token(self.secret_custodian, secret_custody_grant),
+                lambda _: {"version": 1, "tag": "custody-revoke-returned"})
+
+            def remove_provider():
+                failed = _attempt_exact_cleanup((
+                    ("dns", lambda: client.delete_dns_record(resources.dns_record_id)),
+                    ("connections", lambda: client.delete_tunnel_connections(resources.tunnel_id)),
+                    ("tunnel", lambda: client.delete_tunnel(resources.tunnel_id))), controls=controls)
+                if failed:
+                    raise _RemovalIncomplete(failed)
+
+            return _invoke_ingress(invocations, "ingress-provider-remove", remove_provider,
+                lambda _: {"version": 1, "tag": "provider-removal-returned"})
         failed_stages = _attempt_exact_cleanup(
             (
                 (
@@ -929,21 +1053,28 @@ class CloudflareNamedIngressInterpreter:
         self,
         authority: CloudflareZoneAuthority,
         secret_resolution_grant: SecretResolutionGrant,
+        *,
+        invocations=None,
     ) -> "CloudflareApiClient":
+        controls = _ingress_controls(invocations)
         if self.authorized_secret_resolver is None:
             raise SecretResolutionError(
                 SecretResolutionCode.MISSING,
                 "Cloudflare API token resolver is not configured",
             )
+        resolver = (self.authorized_secret_resolver if invocations is None else
+            _PreparedSecretResolver(self.authorized_secret_resolver, invocations))
         api_token = _resolve_api_token(
-            self.authorized_secret_resolver,
+            resolver,
             authority,
             secret_resolution_grant,
+            controls=controls,
         )
         return CloudflareApiClient(
             authority,
             api_token=api_token,
             transport=self.transport,
+            _control_errors=controls,
         )
 
 
@@ -967,6 +1098,8 @@ def _observe_exact_hostname(
         record_type = _mapping_text(record, "type")
         record_name = _mapping_text(record, "name")
         content = _mapping_text(record, "content")
+    except client._control_errors:
+        raise
     except CloudflareApiError:
         return _CloudflareHostnameObservation(_CloudflareHostnameState.MALFORMED)
     if record_name.lower() != hostname.lower():
@@ -1003,6 +1136,7 @@ def _observe_reconciled_exact_hostname(
         records,
         hostname=hostname,
         tunnel_id=tunnel_id,
+        controls=client._control_errors,
     )
     result_info = page.get("result_info")
     if not isinstance(result_info, Mapping):
@@ -1035,6 +1169,7 @@ def _classify_reconciled_dns_records(
     *,
     hostname: str,
     tunnel_id: str,
+    controls=(),
 ) -> _CloudflareHostnameObservation:
     if not records:
         return _CloudflareHostnameObservation(_CloudflareHostnameState.ABSENT)
@@ -1049,6 +1184,8 @@ def _classify_reconciled_dns_records(
         record_type = _mapping_text(record, "type")
         record_name = _mapping_text(record, "name")
         content = _mapping_text(record, "content")
+    except controls:
+        raise
     except CloudflareApiError:
         return _CloudflareHostnameObservation(_CloudflareHostnameState.MALFORMED)
     if record_name != hostname:
@@ -1145,7 +1282,7 @@ def _delete_known_tunnel(
     tunnel_id: str,
 ) -> CloudflareProviderCleanupResult:
     failed = _attempt_exact_cleanup(
-        (("tunnel", lambda: client.delete_tunnel(tunnel_id)),)
+        (("tunnel", lambda: client.delete_tunnel(tunnel_id)),), controls=client._control_errors,
     )
     if failed:
         return CloudflareProviderCleanupResult.UNCERTAIN
@@ -1168,7 +1305,7 @@ def _cleanup_created_ingress(
             ("tunnel", lambda: client.delete_tunnel(tunnel_id)),
         )
     )
-    failed = _attempt_exact_cleanup(cleanup)
+    failed = _attempt_exact_cleanup(cleanup, controls=client._control_errors)
     if failed:
         return CloudflareProviderCleanupResult.UNCERTAIN, failed
     return CloudflareProviderCleanupResult.COMPLETE, ()
@@ -1177,6 +1314,8 @@ def _cleanup_created_ingress(
 def _attempt_exact_cleanup(
     stages: tuple[tuple[str, Callable[[], None]], ...]
     | list[tuple[str, Callable[[], None]]],
+    *,
+    controls=(),
 ) -> tuple[str, ...]:
     """Attempt every exact cleanup stage and return bounded failed stage names."""
 
@@ -1184,6 +1323,8 @@ def _attempt_exact_cleanup(
     for stage, cleanup in stages:
         try:
             cleanup()
+        except controls:
+            raise
         except Exception:
             failed.append(stage)
     return tuple(failed)
@@ -1193,6 +1334,8 @@ def _resolve_api_token(
     resolver: AuthorizedSecretResolver,
     authority: CloudflareZoneAuthority,
     grant: SecretResolutionGrant,
+    *,
+    controls=(),
 ) -> SecretValue:
     if (
         not isinstance(grant, SecretResolutionGrant)
@@ -1207,6 +1350,8 @@ def _resolve_api_token(
         )
     try:
         return require_authorized_secret(resolver, grant)
+    except controls:
+        raise
     except SecretResolutionError as error:
         raise SecretResolutionError(
             error.code,
@@ -1223,6 +1368,7 @@ class CloudflareApiClient:
     authority: CloudflareZoneAuthority
     api_token: SecretValue
     transport: CloudflareHttpTransport | None = None
+    _control_errors: tuple = field(default=(), repr=False, kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.authority, CloudflareZoneAuthority):
@@ -1239,6 +1385,8 @@ class CloudflareApiClient:
         )
         try:
             return _result_text(result, "id")
+        except self._control_errors:
+            raise
         except CloudflareApiError:
             raise _CloudflareMalformedResponse(
                 "Cloudflare tunnel allocation response malformed"
@@ -1326,6 +1474,8 @@ class CloudflareApiClient:
         )
         try:
             return _result_text(created, "id")
+        except self._control_errors:
+            raise
         except CloudflareApiError:
             raise _CloudflareMalformedResponse(
                 "Cloudflare DNS create response malformed"
@@ -1421,6 +1571,8 @@ class CloudflareApiClient:
                 json=json,
                 params=params,
             )
+        except self._control_errors:
+            raise
         except Exception:
             raise CloudflareApiTransportError(
                 "Cloudflare API transport failed"

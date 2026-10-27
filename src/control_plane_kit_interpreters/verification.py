@@ -49,6 +49,8 @@ from control_plane_kit_interpreters.probes.security import (
     authorize_probe_endpoint,
 )
 from control_plane_kit_interpreters.timing import verification_attempts
+from control_plane_kit_interpreters.invocations import InvocationPortError, control_errors, invoke
+from control_plane_kit_interpreters.secrets import _PreparedSecretResolver
 
 
 @dataclass(frozen=True)
@@ -413,7 +415,8 @@ class PostgresVerificationInterpreter:
     def capabilities(self) -> frozenset[VerificationCapability]:
         return frozenset((VerificationCapability.POSTGRES,))
 
-    def execute(self, material: VerificationCheckMaterial) -> VerificationResult:
+    def execute(self, material: VerificationCheckMaterial, *, invocations=None) -> VerificationResult:
+        controls = (InvocationPortError, *control_errors(invocations))
         if not isinstance(material.check, PostgresQueryCheck):
             return VerificationUnsupported(
                 verification_identity(material),
@@ -422,7 +425,7 @@ class PostgresVerificationInterpreter:
         check = material.check
         if check.authentication is None or (
             self.authorized_credential_resolver is None
-            and self.credential_resolver is None
+            and (invocations is not None or self.credential_resolver is None)
         ):
             return _observation(
                 material,
@@ -437,6 +440,8 @@ class PostgresVerificationInterpreter:
                 secret_resolver=self.secret_resolver,
                 public_resolver=self.public_resolver,
             )
+        except controls:
+            raise
         except ProbeSecurityError:
             return _observation(
                 material,
@@ -457,8 +462,10 @@ class PostgresVerificationInterpreter:
                         SecretResolutionCode.DENIED,
                         "Postgres verification requires committed secret authorization",
                     )
+                resolver = (self.authorized_credential_resolver if invocations is None else
+                    _PreparedSecretResolver(self.authorized_credential_resolver, invocations))
                 password = require_authorized_secret(
-                    self.authorized_credential_resolver,
+                    resolver,
                     self.credential_grant,
                 )
             else:
@@ -467,6 +474,8 @@ class PostgresVerificationInterpreter:
                     self.credential_resolver,
                     check.authentication.password_reference,
                 )
+        except controls:
+            raise
         except SecretResolutionError:
             return _observation(
                 material,
@@ -475,6 +484,11 @@ class PostgresVerificationInterpreter:
                 1,
             )
 
+        return invoke(invocations, "ordinary-verification-check",
+            lambda: self._query_attempts(material, target, password, controls))
+
+    def _query_attempts(self, material, target, password, controls):
+        check = material.check
         last = _observation(
             material,
             VerificationCapability.POSTGRES,
@@ -495,6 +509,8 @@ class PostgresVerificationInterpreter:
                     )
                     else VerificationOutcome.FAILED
                 )
+            except controls:
+                raise
             except (TimeoutError, socket.timeout):
                 outcome = VerificationOutcome.TIMED_OUT
             except OSError:

@@ -6,6 +6,8 @@ from dataclasses import dataclass, replace
 import json
 from typing import Mapping, Protocol, TypeAlias
 
+from control_plane_kit_interpreters.invocations import InvocationPortError, invoke
+
 from control_plane_kit_core.runtime_effects import ImagePullAuthority
 from control_plane_kit_core.planning import StartNode, ReconcileNode
 from control_plane_kit_core.secret_selections import SecretVersionSelection
@@ -32,6 +34,32 @@ from control_plane_kit_core.secrets import (
 
 _MAX_OCI_CREDENTIAL_BYTES = 16_384
 _MAX_OCI_CREDENTIAL_FIELD_BYTES = 4_096
+
+
+class _PreparedSecretResolver:
+    """Private call-local resolution sums, reused only for the same exact grant."""
+
+    def __init__(self, resolver, invocations):
+        self._resolver = resolver
+        self.invocations = invocations
+        self._entries = []
+        self._sealed = False
+
+    def resolve(self, grant):
+        if type(grant) not in (SecretResolutionGrant, SecretVersionResolutionGrant):
+            raise InvocationPortError("prepared secret grant is invalid")
+        for prepared, result in self._entries:
+            if type(grant) is type(prepared) and grant == prepared:
+                return result
+        if self._sealed:
+            raise InvocationPortError("secret grant was not prepared for this dispatch")
+        result = invoke(self.invocations, "secret-resolution",
+            lambda: self._resolver.resolve(grant), authorization_id=grant.authorization_id)
+        self._entries.append((grant, result))
+        return result
+
+    def seal(self):
+        self._sealed = True
 
 
 @dataclass(frozen=True, repr=False)

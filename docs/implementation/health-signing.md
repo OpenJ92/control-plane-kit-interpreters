@@ -1,5 +1,16 @@
 # Immediate-use paired health signing (#155)
 
+The #226 invocation-aware call adds optional keyword-only `invocations` to
+`sign`. It consumes the caller's trusted port immediately around each exact
+signing-key resolution, with the grant's authorization ID. Each successful
+acknowledgement precedes the next read. Pure family validation, original-window
+checks and JWT encoding remain outside admission. The fixed supplied control
+base propagates without provider/crypto redaction; ordinary failures retain the
+existing fixed signing error. Missing mandatory-mode selection is enforced by
+the outer dynamic reader, while standalone legacy signing remains separate.
+This port carries no resolved material, result body, transaction or reusable
+authority. Actual composition and owner history remain separate acceptance.
+
 ## #175 receiver implementation candidate
 
 The migration changes `HealthSigningContext.request` and

@@ -1,5 +1,5 @@
 """Admitted Core-valued health composition; no admission, stores or discovery."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from control_plane_kit_core.planning import (
     ActivityPlan, ObserveManagementBootstrap, ObserveNodeHealth,
@@ -9,6 +9,7 @@ from control_plane_kit_core.runtime_effects import RuntimeEffectKind, RuntimeEff
 from control_plane_kit_core.types import RuntimeKind
 
 from control_plane_kit_interpreters.probes.health_signing import Ed25519HealthCredentialPairSigner
+from control_plane_kit_interpreters.invocations import control_errors, invoke_async
 from control_plane_kit_interpreters.probes.health_transport import (
     SignedGatewayHealthClient, GatewayHealthTransportCode, GatewayHealthTransportResult,
     _destination,
@@ -35,11 +36,13 @@ class DockerManagedHealthReader:
     signer: Ed25519HealthCredentialPairSigner
     client: SignedGatewayHealthClient
     local_client: LocalGatewayHealthClient
+    require_invocations: bool = field(default=False, kw_only=True)
 
     def __post_init__(self):
         if (type(self.signer) is not Ed25519HealthCredentialPairSigner
                 or type(self.client) is not SignedGatewayHealthClient
-                or type(self.local_client) is not LocalGatewayHealthClient):
+                or type(self.local_client) is not LocalGatewayHealthClient
+                or type(self.require_invocations) is not bool):
             raise TypeError("managed health composition is invalid")
 
     def select(self, *, plan, current, desired):
@@ -71,7 +74,8 @@ class DockerManagedHealthReader:
 
     async def observe(self, request, *, plan, current, desired, authority_context, context,
                       transit_grant, workload_grant, transit_key, workload_key,
-                      destination=None, local_destination=None):
+                      destination=None, local_destination=None, invocations=None):
+        controls = control_errors(invocations, required=self.require_invocations)
         # Unsupported stages cannot touch signing material or endpoint inputs.
         if type(request) is not RuntimeEffectRequest:
             return DockerHealthObservationRefused(DockerHealthObservationRefusalCode.INVALID_SELECTION)
@@ -107,11 +111,15 @@ class DockerManagedHealthReader:
                 return DockerHealthObservationRefused(DockerHealthObservationRefusalCode.INVALID_SELECTION)
         try:
             pair = self.signer.sign(context, transit_grant=transit_grant, workload_grant=workload_grant,
-                transit_key=transit_key, workload_key=workload_key)
+                transit_key=transit_key, workload_key=workload_key, invocations=invocations)
+        except controls:
+            raise
         except Exception:
             return GatewayHealthTransportResult(GatewayHealthTransportCode.INVALID_CONTEXT)
         if local:
-            return await self.local_client.dispatch(context, pair, local_destination,
-                transit_grant=transit_grant, workload_grant=workload_grant)
-        return await DockerManagedHealthObserver(self.client).observe(request.operation,
-            **values, pair=pair, transit_grant=transit_grant, workload_grant=workload_grant)
+            return await invoke_async(invocations, "signed-health-transport",
+                lambda: self.local_client.dispatch(context, pair, local_destination,
+                    transit_grant=transit_grant, workload_grant=workload_grant))
+        return await invoke_async(invocations, "signed-health-transport",
+            lambda: DockerManagedHealthObserver(self.client).observe(request.operation,
+                **values, pair=pair, transit_grant=transit_grant, workload_grant=workload_grant))

@@ -1,5 +1,30 @@
 # Admitted managed health composition (#189)
 
+## Permission-controlled invocation path (#226)
+
+Trusted composition selects `DockerManagedHealthReader(...,
+require_invocations=True)` for the dynamic path and supplies the original bound
+`invocations` port to `observe`. Missing or malformed required ports fail before
+capability IO; any supplied port is honored even when the constructor retains its
+legacy default. Servers #341 must select this mandatory mode explicitly: an
+Operations qualification declaration alone does not establish that composition.
+
+The reader passes the same port to the signer. Each exact signing-key resolution
+has its own `secret-resolution` admission and outcome acknowledgement before the
+next use. After both keys and signatures are prepared, a fresh
+`signed-health-transport` admission precedes the public DNS/HTTP or local HTTP
+unit. Its outcome acknowledgement follows awaited dispatch and owned cleanup.
+Endpoint acquisition remains the composing caller's responsibility; this reader
+receives an already selected destination and adds no endpoint admission.
+
+The port's closed control exceptions propagate unchanged. A normal returned
+transport failure is still a returned call, not health success. Unclassified
+raised capability failures are reported as unknown before existing bounded error
+handling; acknowledgement errors are outside provider catches and cannot start
+another effect. Cancellation preserves cleanup and cancellation propagation. If
+its one unknown acknowledgement fails, no durable acknowledgement is claimed.
+The adapter imports no Operations policy, store, UoW or permit implementation.
+
 `docker.managed_health.DockerManagedHealthReader` accepts the original Core
 `RuntimeEffectRequest`, plan and validated snapshots, independently reloaded
 current authority, original signing context/grants/keys, and selected destination.

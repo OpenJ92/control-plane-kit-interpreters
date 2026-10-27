@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from importlib import import_module
 
@@ -69,7 +69,8 @@ from control_plane_kit_interpreters.docker.sdk import (
     _network_identity,
     matches_image_reference,
 )
-from control_plane_kit_interpreters.secrets import secret_resolution_grant_for
+from control_plane_kit_interpreters.secrets import _PreparedSecretResolver, secret_resolution_grant_for
+from control_plane_kit_interpreters.invocations import InvocationPortError, control_errors, invoke
 
 
 class _Postcondition(Enum):
@@ -156,8 +157,11 @@ class DockerRuntimeEffectObserver:
         default=None, repr=False, kw_only=True,
     )
     docker_module: object | None = field(default=None, repr=False, kw_only=True)
+    require_invocations: bool = field(default=False, kw_only=True)
 
     def __post_init__(self) -> None:
+        if type(self.require_invocations) is not bool:
+            raise TypeError("require_invocations must be a bool")
         if (self.client is None) == (self.local_client_config is None):
             raise ValueError("Docker observer requires exactly one client or local policy")
         if self.local_client_config is not None:
@@ -182,7 +186,10 @@ class DockerRuntimeEffectObserver:
         self,
         request: RuntimeEffectObservationRequest,
         authority: object | None,
+        *,
+        invocations=None,
     ) -> RuntimeEffectObservationResult:
+        controls = (InvocationPortError, *control_errors(invocations, required=self.require_invocations))
         if type(request) is not RuntimeEffectObservationRequest:
             raise TypeError("Docker observer requires RuntimeEffectObservationRequest")
         runtime_request = request.runtime_request
@@ -190,8 +197,13 @@ class DockerRuntimeEffectObserver:
         if admission is not None:
             return _result(request, admission)
 
+        resolver = (_PreparedSecretResolver(self.authorized_secret_resolver, invocations)
+            if invocations is not None and self.authorized_secret_resolver is not None else None)
+        prepared = self if resolver is None else replace(self, authorized_secret_resolver=resolver)
         try:
-            binding = self._client_binding(request, authority)
+            acquire = prepared._client_factory(request, authority)
+        except controls:
+            raise
         except Exception as error:
             if (
                 not isinstance(error, SecretResolutionError)
@@ -199,15 +211,29 @@ class DockerRuntimeEffectObserver:
             ):
                 raise
             return _result(request, _Postcondition.UNESTABLISHED)
-        if isinstance(binding, _Postcondition):
-            return _result(request, binding)
+        if isinstance(acquire, _Postcondition):
+            return _result(request, acquire)
+        if resolver is not None:
+            resolver.seal()
+        return invoke(invocations, "reconciliation-observation",
+            lambda: self._observe_acquired(request, acquire, controls))
+
+    def _observe_acquired(self, request, acquire, controls):
+        try:
+            binding = acquire()
+        except controls:
+            raise
+        except Exception as error:
+            if not _provider_error(error):
+                raise
+            return _result(request, _Postcondition.UNESTABLISHED)
         client, close_after_observation = binding
 
         postcondition = _Postcondition.UNESTABLISHED
         read_error: BaseException | None = None
         close_error: BaseException | None = None
         try:
-            postcondition = _inspect(runtime_request, client)
+            postcondition = _inspect(request.runtime_request, client)
         except BaseException as error:
             read_error = error
         if close_after_observation:
@@ -218,7 +244,7 @@ class DockerRuntimeEffectObserver:
 
         # Close outside the read exception handler so it cannot rewrite context.
         for error in (read_error, close_error):
-            if error is not None and not _provider_error(error):
+            if error is not None and (isinstance(error, controls) or not _provider_error(error)):
                 raise error
         if read_error is not None or close_error is not None:
             postcondition = _Postcondition.UNESTABLISHED
@@ -229,11 +255,16 @@ class DockerRuntimeEffectObserver:
         observation: RuntimeEffectObservationRequest,
         authority: object | None,
     ) -> tuple[DockerSdkClient, bool] | _Postcondition:
+        acquire = self._client_factory(observation, authority)
+        return acquire if isinstance(acquire, _Postcondition) else acquire()
+
+    def _client_factory(self, observation, authority):
+        """Prepare exact connection material without touching the Docker daemon."""
         request = observation.runtime_request
         if authority is None:
             if request.authority_ref is not None or self.local_client_config is not None:
                 return _Postcondition.UNESTABLISHED
-            return self.client, False
+            return lambda: (self.client, False)
         runtime_kind = getattr(authority, "runtime_kind", None)
         if getattr(runtime_kind, "value", runtime_kind) != RuntimeKind.DOCKER.value:
             return _Postcondition.UNSUPPORTED
@@ -242,11 +273,11 @@ class DockerRuntimeEffectObserver:
         if self.local_client_config is not None:
             if authority_kind != "local-docker-socket":
                 return _Postcondition.UNSUPPORTED
-            return DockerSdkClient.from_authority(
+            return lambda: (DockerSdkClient.from_authority(
                 self.local_client_config, docker_module=self.docker_module,
-            ), True
+            ), True)
         if authority_kind == "local-docker-socket":
-            return self.client, False
+            return lambda: (self.client, False)
         if authority_kind != "remote-docker-tls":
             return _Postcondition.UNSUPPORTED
         if request.authority_deliveries:
@@ -278,11 +309,10 @@ class DockerRuntimeEffectObserver:
             require_authorized_secret(self.authorized_secret_resolver, grant)
             for grant in grants
         )
-        client = DockerSdkClient.from_authority(
-            DockerTlsClientConfig(endpoint, ca, certificate, key),
+        config = DockerTlsClientConfig(endpoint, ca, certificate, key)
+        return lambda: (DockerSdkClient.from_authority(config,
             docker_module=self.client.docker_module,
-        )
-        return client, True
+        ), True)
 
 
 def _admit(request: RuntimeEffectRequest) -> _Postcondition | None:

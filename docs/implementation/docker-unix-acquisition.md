@@ -91,3 +91,69 @@ boundary owns Docker effects; Operations still owns intent, admission and durabl
 history. Next work is separate client-free native qualification, then Servers2B
 startup/worker handling and complete installation. This change alone does not
 activate startup or satisfy live225/291/284.
+
+## Semantic runtime and original-observation admission (#226)
+
+The runtime entrances and original observer accept keyword-only `invocations`.
+Trusted dynamic composition selects `require_invocations=True`; a missing or
+malformed port then refuses before resolution or Docker IO. A malformed supplied
+port never falls back. The default construction without a port preserves the
+separately trusted legacy behavior. This implementation does not itself register
+or qualify a runtime, prove daemon identity, or select authority history.
+
+Runtime preparation retains existing request, selected-grant and capacity
+validation. Remote connection material, selected consumer material and declared
+pull credentials are resolved through their exact authorization IDs before
+`prepared-runtime-dispatch` admission. Each resolution is acknowledged before
+the next begins. A private per-call facade retains the original resolver sum by
+full grant type and equality; a selected version and an operational grant sharing
+one reference remain different entries. It is sealed before dispatch: subsequent
+helper consumption reuses only prepared entries, and a miss cannot call a resolver.
+Resolved material is never placed in invocation records or results. Dynamic
+preparation has no fallback to legacy reference or registry credential resolvers.
+
+Pure connection preparation returns a factory. Final admission precedes that
+factory, including eager local Unix and remote TLS construction, and all resource
+inspection. Result acknowledgement follows existing execution and owned cleanup.
+Closed admission/recording errors propagate unchanged through affected helper
+catches. Provider failure results remain bounded; a returned uncertain or failed
+runtime result is a returned adapter call, not a claim of deployment success.
+No additional retry, compensation or borrowed-client close is introduced.
+
+The original observer preserves supported-shape checks and verifies all three
+exact connection grants before reading any TLS material. Only those connection
+roles are prepared. A fresh `reconciliation-observation` admission precedes client
+acquisition and the existing bounded inspection; acknowledgement follows cleanup.
+Unsupported configuration, selected-secret and retained shapes stay unsupported.
+`observe_metadata` remains a separate path without invocation enrollment.
+
+Standalone `WaitForHealthy` uses `ordinary-verification-acquisition`, with TLS
+prepared under the parent port before client acquisition and endpoint inspection.
+The parent must provide `for_check`; missing composition refuses before IO.
+Acquisition acknowledgement precedes reached child checks, but client custody
+continues through all reached checks and closes before the interpreter returns.
+An outer owner retains the factory's returned handle even when endpoint inspection
+or acquisition acknowledgement fails. Empty contracts still acquire and acknowledge
+one bounded unit, without endpoint inspection or child checks.
+
+Each reached check obtains its own port and exact `credential_grant`. HTTP admits
+one check around its existing finite attempt loop. Postgres preserves endpoint
+policy validation before credential resolution, acknowledges the exact child
+resolution, then admits one check around the query/retry loop. Two checks sharing
+a password reference use their distinct child grants; the interpreter does not
+look them up from the request's operational grants. A returned missing/denied
+resolver sum yields bounded rejected health with a returned resolution, while a
+thrown resolver failure records uncertainty and makes the overall runtime result
+uncertain. Dynamic SQL never falls back to a legacy reference resolver.
+
+Existing declaration order and stop-on-failed-health behavior remain authoritative.
+No later check or credential is eagerly admitted. Closed controls and cancellation
+stop later work and remain primary after owned cleanup, even if close also fails.
+Close-only failure after checks returns bounded runtime uncertainty; it does not
+rewrite earlier invocation outcomes. A returned check is not a health-success
+claim. Child ports must carry the same fixed control base as their parent.
+
+Start/reconcile preparation does not preload probe credentials or run health
+checks. The adapter batch still requires its combined source review, owning gate,
+remote CI and downstream composition evidence. Registration declarations remain
+the composing application's responsibility, not an inference from these methods.

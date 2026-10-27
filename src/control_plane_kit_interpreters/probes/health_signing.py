@@ -32,6 +32,7 @@ from control_plane_kit_core.secrets import (
     AuthorizedSecretResolver, SecretProviderEndpointReference, SecretReference,
     SecretResolutionGrant, SecretUseIntent, require_authorized_secret,
 )
+from control_plane_kit_interpreters.invocations import control_errors, invoke
 
 
 class HealthCredentialSigningError(RuntimeError):
@@ -81,12 +82,14 @@ class Ed25519HealthCredentialPairSigner:
              transit_grant: DelegatedGatewayReceiverHealthReadTransitGrant,
              workload_grant: DelegatedWorkloadReceiverHealthReadGrant,
              transit_key: HealthSigningKey, workload_key: HealthSigningKey,
+             invocations=None,
              ) -> SignedHealthCredentialPair:
         """Validate both families, then resolve/sign once without renewing either.
 
         Provider/crypto failures can follow a successful first read. Nothing is
         retried or returned partially. Python memory erasure is not guaranteed.
         """
+        controls = control_errors(invocations)
         try:
             context = _context(context)
             transit_grant = _canonical(transit_grant, DelegatedGatewayReceiverHealthReadTransitGrant,
@@ -109,9 +112,13 @@ class Ed25519HealthCredentialPairSigner:
                     **expected).is_accepted:
                 raise ValueError
 
-            transit_private = _resolve(self.authorized_secret_resolver, transit_key)
+            transit_private = invoke(invocations, "secret-resolution",
+                lambda: _resolve(self.authorized_secret_resolver, transit_key),
+                authorization_id=transit_key.resolution_grant.authorization_id)
             _window(self.clock, transit_grant, workload_grant)
-            workload_private = _resolve(self.authorized_secret_resolver, workload_key)
+            workload_private = invoke(invocations, "secret-resolution",
+                lambda: _resolve(self.authorized_secret_resolver, workload_key),
+                authorization_id=workload_key.resolution_grant.authorization_id)
             _window(self.clock, transit_grant, workload_grant)
             transit = _encode(transit_grant, transit_private,
                 "CPK-GATEWAY-NODE-HEALTH-READ-TRANSIT+JWT", "gateway_node_health_read_transit")
@@ -120,6 +127,8 @@ class Ed25519HealthCredentialPairSigner:
                 "CPK-WORKLOAD-NODE-HEALTH-READ+JWT", "workload_node_health_read")
             _window(self.clock, transit_grant, workload_grant)
             return SignedHealthCredentialPair(context.request, transit, workload)
+        except controls:
+            raise
         except Exception:
             # This public effect boundary also redacts unexpected provider/crypto
             # payloads. Raise after the handler so __context__ is absent as well.
