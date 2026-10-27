@@ -43,6 +43,12 @@ Owned provenance begins at successful exact DNS creation or the existing complet
 qualifying transport reconciliation. It survives a later token-fetch failure and
 its cleanup result. Matching a target alone never grants ownership.
 
+Dynamic creation validates each returned tunnel/DNS identifier immediately after
+its provider response and before dependent calls or result recording. Invalid
+identifiers produce a bounded unclassified unknown result without becoming cleanup
+targets. Provider failures are captured as values before cleanup runs, so a later
+closed control cannot inherit the earlier provider exception as its context.
+
 The supplied control base crosses token resolution, HTTP transport, provider
 handlers and exact cleanup unchanged, before generic catches. Admission and result
 recording are outside provider compensation handlers; failed recording causes no

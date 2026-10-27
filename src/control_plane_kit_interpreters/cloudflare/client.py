@@ -72,6 +72,18 @@ def _ingress_controls(port, *, required=False):
     return (InvocationPortError, *controls)
 
 
+def _provider_attempt(call, controls):
+    """Leave the provider exception handler before any cleanup can run."""
+    error = None
+    try:
+        return call(), None
+    except controls:
+        raise
+    except Exception as caught:
+        error = caught
+    return None, error
+
+
 def _invoke_ingress(port, kind, call, returned):
     controls = _ingress_controls(port)
     if port is None:
@@ -532,16 +544,11 @@ class CloudflareNamedIngressInterpreter:
 
     def _create_provider(self, client, ingress, allocation_name, origin_service_url):
         tunnel_name = allocation_name
-        try:
-            pre_observation = _observe_exact_hostname(
-                client,
-                ingress.hostname,
-            )
-        except client._control_errors:
-            raise
-        except Exception as error:
+        pre_observation, error = _provider_attempt(
+            lambda: _observe_exact_hostname(client, ingress.hostname), client._control_errors)
+        if error is not None:
             if not _is_provider_operation_failure(error):
-                raise
+                raise error
             raise _provider_operation_error(
                 str(error),
                 stage=CloudflareProviderFailureStage.DNS_PRE_OBSERVATION,
@@ -558,13 +565,10 @@ class CloudflareNamedIngressInterpreter:
                 cleanup_result=CloudflareProviderCleanupResult.NOT_REQUIRED,
             ) from None
 
-        try:
-            tunnel_id = client.create_tunnel(tunnel_name)
-        except client._control_errors:
-            raise
-        except Exception as error:
+        tunnel_id, error = _provider_attempt(lambda: client.create_tunnel(tunnel_name), client._control_errors)
+        if error is not None:
             if not _is_provider_operation_failure(error):
-                raise
+                raise error
             raise _provider_operation_error(
                 str(error),
                 stage=CloudflareProviderFailureStage.TUNNEL_ALLOCATION,
@@ -573,22 +577,18 @@ class CloudflareNamedIngressInterpreter:
                 cleanup_result=CloudflareProviderCleanupResult.WITHHELD,
             ) from None
 
-        try:
-            client.configure_tunnel(
-                tunnel_id,
-                hostname=ingress.hostname,
-                origin_service_url=origin_service_url,
-            )
-        except client._control_errors:
-            raise
-        except Exception as error:
+        if client._control_errors:
+            _validate_identifier(tunnel_id, "tunnel_id")
+        _, error = _provider_attempt(lambda: client.configure_tunnel(tunnel_id,
+            hostname=ingress.hostname, origin_service_url=origin_service_url), client._control_errors)
+        if error is not None:
             cleanup_result = _delete_known_tunnel(client, tunnel_id)
             if not _is_provider_operation_failure(error):
                 if cleanup_result is CloudflareProviderCleanupResult.UNCERTAIN:
                     raise CloudflareApiError(
                         "Cloudflare exact cleanup is uncertain: tunnel"
                     ) from None
-                raise
+                raise error
             certainty = CloudflareProviderMutationCertainty.TUNNEL_CREATED
             if isinstance(error, CloudflareApiTransportError):
                 certainty = CloudflareProviderMutationCertainty.UNCERTAIN
@@ -601,22 +601,16 @@ class CloudflareNamedIngressInterpreter:
                 cleanup_result=cleanup_result,
             ) from None
 
-        try:
-            pre_mutation_observation = _observe_exact_hostname(
-                client,
-                ingress.hostname,
-                tunnel_id=tunnel_id,
-            )
-        except client._control_errors:
-            raise
-        except Exception as error:
+        pre_mutation_observation, error = _provider_attempt(lambda: _observe_exact_hostname(
+            client, ingress.hostname, tunnel_id=tunnel_id), client._control_errors)
+        if error is not None:
             cleanup_result = _delete_known_tunnel(client, tunnel_id)
             if not _is_provider_operation_failure(error):
                 if cleanup_result is CloudflareProviderCleanupResult.UNCERTAIN:
                     raise CloudflareApiError(
                         "Cloudflare exact cleanup is uncertain: tunnel"
                     ) from None
-                raise
+                raise error
             raise _provider_operation_error(
                 str(error),
                 stage=(
@@ -646,25 +640,14 @@ class CloudflareNamedIngressInterpreter:
                 cleanup_result=cleanup_result,
             ) from None
 
-        try:
-            dns_record_id = client._create_dns_cname_unchecked(
-                hostname=ingress.hostname,
-                tunnel_id=tunnel_id,
-            )
-        except client._control_errors:
-            raise
-        except Exception as dns_create_error:
-            try:
-                reconciliation = _observe_reconciled_exact_hostname(
-                    client,
-                    ingress.hostname,
-                    tunnel_id=tunnel_id,
-                )
-            except client._control_errors:
-                raise
-            except Exception as reconciliation_error:
+        dns_record_id, dns_create_error = _provider_attempt(lambda: client._create_dns_cname_unchecked(
+            hostname=ingress.hostname, tunnel_id=tunnel_id), client._control_errors)
+        if dns_create_error is not None:
+            reconciliation, reconciliation_error = _provider_attempt(lambda: _observe_reconciled_exact_hostname(
+                client, ingress.hostname, tunnel_id=tunnel_id), client._control_errors)
+            if reconciliation_error is not None:
                 if not _is_provider_operation_failure(reconciliation_error):
-                    raise
+                    raise reconciliation_error
                 raise _provider_operation_error(
                     "Cloudflare DNS reconciliation failed",
                     stage=CloudflareProviderFailureStage.DNS_RECONCILIATION,
@@ -711,11 +694,10 @@ class CloudflareNamedIngressInterpreter:
                     cleanup_result=cleanup_result,
                 ) from None
 
-        try:
-            tunnel_token = client.get_tunnel_token(tunnel_id)
-        except client._control_errors:
-            raise
-        except Exception as error:
+        if client._control_errors:
+            _validate_identifier(dns_record_id, "dns_record_id")
+        tunnel_token, error = _provider_attempt(lambda: client.get_tunnel_token(tunnel_id), client._control_errors)
+        if error is not None:
             cleanup_result, failed_stages = _cleanup_created_ingress(
                 client,
                 tunnel_id=tunnel_id,
@@ -727,7 +709,7 @@ class CloudflareNamedIngressInterpreter:
                         "Cloudflare exact cleanup is uncertain: "
                         + ",".join(failed_stages)
                     ) from None
-                raise
+                raise error
             if failed_stages:
                 message = (
                     "Cloudflare exact cleanup is uncertain: "

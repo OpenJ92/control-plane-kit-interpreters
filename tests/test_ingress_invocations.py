@@ -333,6 +333,7 @@ class IngressInvocationTests(unittest.TestCase):
                 self.assertNotIn(invalid_id, repr((self.events, self.port.results, caught.exception)))
                 self.assertEqual(self.custodian.stored_references, [])
                 self.assert_no_deletes()
+                self.assertNotIn("tunnel-token", [value.stage for value in self.transport.requests])
 
     def test_create_cleanup_control_has_no_prior_private_provider_exception_chain(self):
         denied = Denied("closed-control")
