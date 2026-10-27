@@ -1,7 +1,7 @@
 # Exact metadata and resolution (#190)
 
-Current Interpreters #222 selects accepted Core
-`879efb9576ac0580a6236d0a7372c036537b4dfe`. New control-plane command/read facts
+Current Interpreters #228 selects accepted Core
+`4cc1716bef4d7548ddb4cd343e53fa06bb447104`. New administration HTTP/parity/projection contracts
 do not change this adapter's metadata/grant inputs, exact-version resolution,
 bounded redaction or no-retry semantics. Accepted Secrets/SDK pin-only changes
 select the same Core; the normal Interpreter gate still must prove installation.
