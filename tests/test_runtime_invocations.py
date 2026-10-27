@@ -16,7 +16,8 @@ from control_plane_kit_interpreters.docker.sdk import DockerSdkClient
 from test_health_invocations import RecordingPort, Denied, RecordingUncertain
 from test_docker_runtime_interpreter import (
     FakeAuthorizedSecretResolver, _grant, _local_runtime_authority, _material,
-    _product_with_secret_delivery, _request, _selected_request, _selected_fixture_client,
+    _product_with_secret_delivery, _product_with_postgres_health_check,
+    _request, _selected_request, _selected_fixture_client, _workload_container_record,
 )
 from test_docker_runtime_effect_observer import (
     _remote_request, _connection_admission, _ReadClient, _Resolver,
@@ -51,15 +52,23 @@ class RuntimeInvocationTests(unittest.TestCase):
         args = (request,) if authority is None else (request, authority)
         return method(*args, invocations=port)
 
-    def workload(self):
+    def workload(self, *, probe=False):
         raw = _selected_fixture_client()
-        reference = SecretReference("secret://registry/ghcr/runtime-fixture")
-        material = _material(_product_with_secret_delivery(), pull_authority=ImagePullAuthority(
+        product = _product_with_secret_delivery()
+        reference = product.runtime_contract.secret_deliveries[0].reference
+        if probe:
+            checked = _product_with_postgres_health_check()
+            product = replace(checked, runtime_contract=replace(checked.runtime_contract,
+                secret_deliveries=product.runtime_contract.secret_deliveries))
+        material = _material(product, pull_authority=ImagePullAuthority(
             "ghcr.io", "openj92/runtime-fixture", reference))
         request = _selected_request(StartNode(NodeTarget("api")), products=(material,))
-        request = distinct_grants(replace(request, secret_resolution_grants=(
-            *request.secret_resolution_grants, _grant(reference, SecretUseIntent.OCI_PULL_CREDENTIAL))))
-        consumer, pull = request.secret_resolution_grants
+        grants = (*request.secret_resolution_grants, _grant(reference, SecretUseIntent.OCI_PULL_CREDENTIAL))
+        if probe:
+            grants += (_grant(product.runtime_contract.verification.checks[0].authentication.password_reference,
+                SecretUseIntent.POSTGRES_PASSWORD),)
+        request = distinct_grants(replace(request, secret_resolution_grants=grants))
+        consumer, pull = request.secret_resolution_grants[:2]
         values = {(consumer.selection.reference, consumer.selection.intent): "private-consumer",
             (reference, pull.intent): '{"username":"cpk","password":"private-pull"}'}
         resolver = OrderedResolver(raw, values, self.events)
@@ -86,6 +95,15 @@ class RuntimeInvocationTests(unittest.TestCase):
         self.assertEqual(self.events[-1], ("record", "prepared-runtime-dispatch", None, "returned"))
         self.assertNotIn("private-consumer", repr(result.descriptor()))
         self.assertNotIn("private-pull", repr(self.events))
+        self.assertEqual(_workload_container_record(resolver.fake_client)["environment"]["API_TOKEN"],
+            "private-consumer")
+
+    def test_declared_but_unreached_probe_credential_is_not_prepared(self):
+        request, resolver, _, interpreter = self.workload(probe=True)
+        result = self.execute(interpreter, request, RecordingPort(self.events))
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(resolver.requests, list(request.secret_resolution_grants[:2]))
+        self.assertNotIn(request.secret_resolution_grants[-1].authorization_id, repr(self.events))
 
     def test_final_denial_prevents_workload_inspection_after_preparation(self):
         request, resolver, sdk, interpreter = self.workload()

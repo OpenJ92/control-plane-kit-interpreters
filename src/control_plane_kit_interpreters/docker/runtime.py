@@ -93,7 +93,9 @@ from control_plane_kit_interpreters.docker.sdk import (
     verify_published_ports,
 )
 from control_plane_kit_interpreters.probes.security import ProbeAddressPolicy
+from control_plane_kit_interpreters.invocations import InvocationPortError, control_errors, invoke
 from control_plane_kit_interpreters.secrets import (
+    _PreparedSecretResolver,
     ImagePullCredentialDenied,
     ImagePullCredentialMissing,
     ImagePullCredentialResolved,
@@ -206,8 +208,12 @@ class DockerRuntimeInterpreter:
         default=None, repr=False, kw_only=True,
     )
     docker_module: object | None = field(default=None, repr=False, kw_only=True)
+    require_invocations: bool = field(default=False, kw_only=True)
+    _invocations: object | None = field(default=None, repr=False, kw_only=True)
 
     def __post_init__(self) -> None:
+        if type(self.require_invocations) is not bool:
+            raise TypeError("require_invocations must be a bool")
         if (self.client is None) == (self.local_client_config is None):
             raise ValueError("Docker runtime requires exactly one client or local policy")
         if self.local_client_config is not None:
@@ -216,7 +222,12 @@ class DockerRuntimeInterpreter:
         elif self.docker_module is not None:
             raise ValueError("Docker runtime module injection requires a local policy")
 
-    def execute(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
+    def execute(self, request: RuntimeEffectRequest, *, invocations=None) -> RuntimeEffectResult:
+        controls = (InvocationPortError, *control_errors(
+            invocations if invocations is not None else self._invocations,
+            required=self.require_invocations))
+        if invocations is not None:
+            return self._execute_invoked(request, invocations)
         if not isinstance(request, RuntimeEffectRequest):
             raise TypeError("DockerRuntimeInterpreter requires RuntimeEffectRequest")
         if request.kind not in (RuntimeEffectKind.REALIZE_ACTIVITY, RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1):
@@ -257,6 +268,8 @@ class DockerRuntimeInterpreter:
                         request,
                         "docker.unsupported-activity-operation",
                     )
+        except controls:
+            raise
         except RuntimeEffectContractError:
             return _failed(request, "docker.runtime-request-invalid", "Docker runtime request is invalid")
         except _DockerInterpreterUnsupportedAuthorityError as error:
@@ -288,7 +301,14 @@ class DockerRuntimeInterpreter:
         self,
         request: RuntimeEffectRequest,
         authority: object,
+        *,
+        invocations=None,
     ) -> RuntimeEffectResult:
+        controls = (InvocationPortError, *control_errors(
+            invocations if invocations is not None else self._invocations,
+            required=self.require_invocations))
+        if invocations is not None:
+            return self._execute_invoked(request, invocations, authority=authority, with_authority=True)
         if not isinstance(request, RuntimeEffectRequest):
             raise TypeError("DockerRuntimeInterpreter requires RuntimeEffectRequest")
         if request.kind not in (RuntimeEffectKind.REALIZE_ACTIVITY, RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1):
@@ -313,6 +333,8 @@ class DockerRuntimeInterpreter:
                 local_client_config=self.local_client_config,
                 docker_module=self.docker_module,
             )
+        except controls:
+            raise
         except RuntimeEffectContractError:
             return _failed(request, "docker.runtime-request-invalid", "Docker runtime request is invalid")
         except _DockerInterpreterUnsupportedAuthorityError as error:
@@ -327,6 +349,9 @@ class DockerRuntimeInterpreter:
                     _bounded_error_message(error),
                 ),
             )
+        return self._execute_bound(request, client_binding)
+
+    def _execute_bound(self, request, client_binding):
         if not client_binding.close_after_execution:
             return replace(self, client=client_binding.client,
                            local_client_config=None, docker_module=None).execute(request)
@@ -369,12 +394,75 @@ class DockerRuntimeInterpreter:
         assert result is not None
         return result
 
+    def _execute_invoked(self, request, invocations, *, authority=None, with_authority=False):
+        controls = (InvocationPortError, *control_errors(invocations))
+        if not isinstance(request, RuntimeEffectRequest):
+            raise TypeError("DockerRuntimeInterpreter requires RuntimeEffectRequest")
+        if request.kind not in (RuntimeEffectKind.REALIZE_ACTIVITY, RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1):
+            return _unsupported(request, "docker.unsupported-effect-kind")
+        if request.runtime_kind is not RuntimeKind.DOCKER:
+            return _unsupported(request, "docker.unsupported-runtime-kind")
+        resolver = (_PreparedSecretResolver(self.authorized_secret_resolver, invocations)
+            if self.authorized_secret_resolver is not None else None)
+        prepared = replace(self, authorized_secret_resolver=resolver,
+            secret_resolver=None, image_pull_credentials=None, _invocations=invocations)
+        try:
+            runtime_effect_intent_for_request(request)
+            _admit_selected_secrets(request, self.authorized_secret_resolver)
+            if (request.kind is RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1
+                    and type(request.operation) not in (StartNode, ReconcileNode, CleanupConfigurationInstances)):
+                return _unsupported(request, "docker.unsupported-activity-operation")
+            if with_authority:
+                if type(request.operation) is CleanupConfigurationInstances and (
+                        _authority_value(getattr(authority, "runtime_kind", None)) != RuntimeKind.DOCKER.value
+                        or _authority_value(getattr(authority, "authority_kind", None)) != "local-docker-socket"):
+                    return refused_cleanup_authority(request)
+                acquire = _prepare_runtime_authority_client(self.client, authority, request,
+                    resolver, None, local_client_config=self.local_client_config,
+                    docker_module=self.docker_module)
+            else:
+                if self.local_client_config is not None:
+                    return _unsupported(request, "docker.runtime-authority-required")
+                acquire = lambda: _RuntimeAuthorityClientBinding(self.client, False)
+            if type(request.operation) in (StartNode, ReconcileNode):
+                material = _single_product(request)
+                _resolve_product_secret_deliveries(material, request, resolver, None)
+                _image_pull_auth_config(material, request, resolver, None)
+            if resolver is not None:
+                resolver.seal()
+        except controls:
+            raise
+        except RuntimeEffectContractError:
+            return _failed(request, "docker.runtime-request-invalid", "Docker runtime request is invalid")
+        except _DockerInterpreterUnsupportedAuthorityError as error:
+            return _unsupported(request, error.code)
+        except _DockerInterpreterPreconditionError as error:
+            return _failed(request, error.code, str(error))
+        except Exception:
+            return RuntimeEffectResult.uncertain(request.effect_id, RuntimeEffectFailure(
+                "docker.runtime-authority-uncertain", "Docker runtime preparation is uncertain"))
+
+        def dispatch():
+            try:
+                binding = acquire()
+            except controls:
+                raise
+            except Exception as error:
+                return RuntimeEffectResult.uncertain(request.effect_id, RuntimeEffectFailure(
+                    "docker.runtime-authority-uncertain", _bounded_error_message(error)))
+            return prepared._execute_bound(request, binding)
+
+        return invoke(invocations, "prepared-runtime-dispatch", dispatch)
+
     def _execute_configuration_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         if type(request.operation) not in (StartNode, ReconcileNode):
             return _unsupported(request, "docker.unsupported-activity-operation")
         attempt = ConfigurationAttempt(request)
+        controls = (InvocationPortError, *control_errors(self._invocations))
         try:
             return self._configuration_node(request, attempt)
+        except controls:
+            raise
         except _DockerInterpreterUnsupportedAuthorityError as error:
             return attempt.result(EffectResultKind.UNSUPPORTED, failure=RuntimeEffectFailure(
                 error.code, "Docker runtime authority does not support this replacement"))
@@ -1501,6 +1589,16 @@ def _client_for_runtime_authority(
     local_client_config: DockerUnixSocketClientConfig | None = None,
     docker_module: object | None = None,
 ) -> _RuntimeAuthorityClientBinding:
+    return _prepare_runtime_authority_client(ambient_client, authority, request,
+        authorized_resolver, legacy_resolver, local_client_config=local_client_config,
+        docker_module=docker_module)()
+
+
+def _prepare_runtime_authority_client(
+    ambient_client, authority, request, authorized_resolver, legacy_resolver,
+    *, local_client_config=None, docker_module=None,
+):
+    """Validate and prepare connection material without acquiring a Docker client."""
     if _authority_value(getattr(authority, "runtime_kind", None)) != RuntimeKind.DOCKER.value:
         raise _DockerInterpreterUnsupportedAuthorityError(
             "docker.runtime-authority-runtime-unsupported"
@@ -1511,12 +1609,12 @@ def _client_for_runtime_authority(
             raise _DockerInterpreterUnsupportedAuthorityError(
                 "docker.runtime-authority-kind-unsupported"
             )
-        return _RuntimeAuthorityClientBinding(
+        return lambda: _RuntimeAuthorityClientBinding(
             DockerSdkClient.from_authority(local_client_config, docker_module=docker_module),
             close_after_execution=True,
         )
     if authority_kind == "local-docker-socket":
-        return _RuntimeAuthorityClientBinding(
+        return lambda: _RuntimeAuthorityClientBinding(
             ambient_client,
             close_after_execution=False,
         )
@@ -1561,14 +1659,10 @@ def _client_for_runtime_authority(
         getattr(material, "client_key", None),
         SecretUseIntent.DOCKER_REMOTE_TLS_CLIENT_KEY,
     )
-    return _RuntimeAuthorityClientBinding(
-        DockerSdkClient.from_authority(
-            DockerTlsClientConfig(
-                endpoint=endpoint,
-                ca_certificate=ca_certificate,
-                client_certificate=client_certificate,
-                client_key=client_key,
-            ),
+    config = DockerTlsClientConfig(endpoint=endpoint, ca_certificate=ca_certificate,
+        client_certificate=client_certificate, client_key=client_key)
+    return lambda: _RuntimeAuthorityClientBinding(
+        DockerSdkClient.from_authority(config,
             docker_module=ambient_client.docker_module,
         ),
         close_after_execution=True,
@@ -1626,6 +1720,8 @@ def _resolve_runtime_authority_secret(
     reference: object,
     intent: SecretUseIntent,
 ):
+    controls = (InvocationPortError, *control_errors(
+        authorized_resolver.invocations if isinstance(authorized_resolver, _PreparedSecretResolver) else None))
     if not isinstance(reference, SecretReference):
         raise _DockerInterpreterPreconditionError(
             "docker.runtime-authority-secret-reference-malformed",
@@ -1641,6 +1737,8 @@ def _resolve_runtime_authority_secret(
             return require_authorized_secret(authorized_resolver, grant)
         assert legacy_resolver is not None
         return require_resolved_secret(legacy_resolver, reference)
+    except controls:
+        raise
     except SecretResolutionError as error:
         code = getattr(error, "code", None)
         suffix = _authority_value(code) if code is not None else "malformed"
@@ -1660,6 +1758,8 @@ def _image_pull_auth_config(
     authorized_resolver: AuthorizedSecretResolver | None,
     legacy_resolver: ImagePullCredentialResolver | None,
 ) -> DockerRegistryAuthConfig | None:
+    controls = (InvocationPortError, *control_errors(
+        authorized_resolver.invocations if isinstance(authorized_resolver, _PreparedSecretResolver) else None))
     authority = material.pull_authority
     if authority is None:
         return None
@@ -1678,6 +1778,8 @@ def _image_pull_auth_config(
             credential = parse_image_pull_credential(
                 require_authorized_secret(authorized_resolver, grant)
             )
+        except controls:
+            raise
         except SecretResolutionError as error:
             if error.code is SecretResolutionCode.MISSING:
                 error_code = "docker.image-pull-credential-missing"
@@ -1741,6 +1843,8 @@ def _resolve_product_secret_deliveries(
     legacy_resolver: SecretResolver | None,
 ) -> ResolvedSecretDeliveries:
     deliveries = material.product.runtime_contract.secret_deliveries
+    controls = (InvocationPortError, *control_errors(
+        authorized_resolver.invocations if isinstance(authorized_resolver, _PreparedSecretResolver) else None))
     try:
         if material.secret_selections:
             return resolve_selected_secret_deliveries(deliveries,
@@ -1753,6 +1857,8 @@ def _resolve_product_secret_deliveries(
                 resolver=authorized_resolver,
             )
         return resolve_secret_deliveries(deliveries, resolver=legacy_resolver)
+    except controls:
+        raise
     except SecretResolutionError as error:
         if authorized_resolver is None and legacy_resolver is None and deliveries:
             error_code = "docker.secret-resolution-required"

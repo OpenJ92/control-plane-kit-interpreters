@@ -91,3 +91,44 @@ boundary owns Docker effects; Operations still owns intent, admission and durabl
 history. Next work is separate client-free native qualification, then Servers2B
 startup/worker handling and complete installation. This change alone does not
 activate startup or satisfy live225/291/284.
+
+## Semantic runtime and original-observation admission (#226)
+
+The runtime entrances and original observer accept keyword-only `invocations`.
+Trusted dynamic composition selects `require_invocations=True`; a missing or
+malformed port then refuses before resolution or Docker IO. A malformed supplied
+port never falls back. The default construction without a port preserves the
+separately trusted legacy behavior. This implementation does not itself register
+or qualify a runtime, prove daemon identity, or select authority history.
+
+Runtime preparation retains existing request, selected-grant and capacity
+validation. Remote connection material, selected consumer material and declared
+pull credentials are resolved through their exact authorization IDs before
+`prepared-runtime-dispatch` admission. Each resolution is acknowledged before
+the next begins. A private per-call facade retains the original resolver sum by
+full grant type and equality; a selected version and an operational grant sharing
+one reference remain different entries. It is sealed before dispatch: subsequent
+helper consumption reuses only prepared entries, and a miss cannot call a resolver.
+Resolved material is never placed in invocation records or results. Dynamic
+preparation has no fallback to legacy reference or registry credential resolvers.
+
+Pure connection preparation returns a factory. Final admission precedes that
+factory, including eager local Unix and remote TLS construction, and all resource
+inspection. Result acknowledgement follows existing execution and owned cleanup.
+Closed admission/recording errors propagate unchanged through affected helper
+catches. Provider failure results remain bounded; a returned uncertain or failed
+runtime result is a returned adapter call, not a claim of deployment success.
+No additional retry, compensation or borrowed-client close is introduced.
+
+The original observer preserves supported-shape checks and verifies all three
+exact connection grants before reading any TLS material. Only those connection
+roles are prepared. A fresh `reconciliation-observation` admission precedes client
+acquisition and the existing bounded inspection; acknowledgement follows cleanup.
+Unsupported configuration, selected-secret and retained shapes stay unsupported.
+`observe_metadata` remains a separate path without invocation enrollment.
+
+This slice does not qualify ordinary verification: standalone `WaitForHealthy`
+requires the following per-check slice before dynamic adapter-batch acceptance.
+Start/reconcile preparation does not preload probe credentials or run health
+checks. The adapter batch still requires its combined source review, owning gate,
+remote CI and downstream composition evidence.
