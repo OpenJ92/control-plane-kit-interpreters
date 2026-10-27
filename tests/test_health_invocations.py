@@ -125,6 +125,19 @@ class HealthSigningInvocationTests(unittest.TestCase):
             self.value.resolutions[0].authorization_id, "unknown"))
         self.assertNotIn("private-provider-sentinel", repr(self.events))
 
+    def test_provider_fault_and_record_control_do_not_chain_private_provider_error(self):
+        self.resolver.results[self.value.resolutions[0].reference] = RuntimeError("private-provider-sentinel")
+        uncertain = RecordingUncertain("closed-control")
+        def after(*_):
+            raise uncertain
+        with self.assertRaises(RecordingUncertain) as caught:
+            self.sign(RecordingPort(self.events, after=after))
+        self.assertIs(caught.exception, uncertain)
+        self.assertIsNone(caught.exception.__context__)
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertEqual(self.resolver.calls, [self.value.resolutions[0]])
+        self.assertEqual([event[0] for event in self.events], ["admit", "resolve", "record"])
+
 
 class ManagedHealthInvocationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -252,3 +265,67 @@ class ManagedHealthInvocationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(keys.calls, list(value.value.resolutions))
         self.assertEqual(value.resolver.calls, [])
         self.assertEqual(value.gateway_transport.requests, [])
+
+    async def test_public_return_acknowledges_only_after_dns_http_and_cleanup(self):
+        value = ManagedWorld()
+        reader, _ = make_reader(managed_health, value)
+        events = []
+        keys = OrderedResolver(value.value, events)
+        class Resolver:
+            async def resolve(self, hostname):
+                events.append(("dns",))
+                return ("8.8.8.8",)
+        def handle(request):
+            events.append(("transport", request.method))
+            return httpx.Response(503, json={"error": "unavailable"})
+        transport = Transport(httpx.MockTransport(handle))
+        reader = replace(reader, require_invocations=True,
+            signer=Ed25519HealthCredentialPairSigner(keys, lambda: value.now),
+            client=replace(reader.client, public_resolver=Resolver(), transport=transport))
+        def after(kind, authorization_id, outcome):
+            if kind == "signed-health-transport":
+                self.assertTrue(transport.closed)
+        result = await read(reader, value, destination=value.destination(health_transport),
+            invocations=RecordingPort(events, after=after))
+        self.assertNotEqual(result.code.value, "received")
+        self.assertEqual(keys.calls, list(value.value.resolutions))
+        expected = []
+        for grant in value.value.resolutions:
+            expected.extend((("admit", "secret-resolution", grant.authorization_id),
+                ("resolve", grant.authorization_id),
+                ("record", "secret-resolution", grant.authorization_id, "returned")))
+        expected.extend((("admit", "signed-health-transport", None), ("dns",),
+            ("transport", "POST"), ("record", "signed-health-transport", None, "returned")))
+        self.assertEqual(events, expected)
+
+    async def test_cancellation_remains_primary_when_unknown_acknowledgement_fails(self):
+        reader = self.required_reader()
+        entered = asyncio.Event()
+        class WaitingTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request):
+                entered.set()
+                await asyncio.Event().wait()
+        transport = Transport(WaitingTransport())
+        reader = replace(reader, local_client=replace(reader.local_client, transport=transport))
+        acknowledgements = []
+        def after(kind, authorization_id, outcome):
+            if kind == "signed-health-transport":
+                self.assertTrue(transport.closed)
+                acknowledgements.append(outcome)
+                raise RecordingUncertain("closed-control")
+        task = asyncio.create_task(read(reader, self.value,
+            local=local_destination(managed_health, self.value),
+            invocations=RecordingPort(self.events, after=after)))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError) as caught:
+                await task
+            self.assertIsNone(caught.exception.__context__)
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual(acknowledgements, ["unknown"])
+        self.assertTrue(transport.closed)
+        self.assertEqual(len(transport.requests), 1)
