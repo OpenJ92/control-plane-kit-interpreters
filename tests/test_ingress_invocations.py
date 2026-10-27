@@ -9,7 +9,7 @@ from control_plane_kit_interpreters.cloudflare import CloudflareApiError, Cloudf
 from test_health_invocations import RecordingPort, Denied, RecordingUncertain
 from test_cloudflare_named_ingress import (
     API_TOKEN, TUNNEL_TOKEN, FakeCloudflareTransport, RecordingSecretCustodian,
-    _authorized_resolver, _authority, _custody_grant, _dns_cname, _ingress,
+    _authorized_resolver, _authority, _custody_grant, _dns_cname, _dns_page, _ingress,
     _owned_resources, _resolution_grant,
 )
 
@@ -175,7 +175,8 @@ class IngressInvocationTests(unittest.TestCase):
 
     def test_token_fetch_failure_preserves_owned_dns_provenance_and_existing_cleanup(self):
         self.transport.raise_stages.add("dns-create")
-        self.transport.dns_lookup_results = [[], [], [_dns_cname("dns-001", "tunnel-001")]]
+        self.transport.dns_lookup_pages = [_dns_page([]), _dns_page([]),
+            _dns_page([_dns_cname("dns-001", "tunnel-001")])]
         self.transport.fault_stages.add("tunnel-token")
         with self.assertRaises(CloudflareApiError):
             self.create()
