@@ -127,8 +127,33 @@ acquisition and the existing bounded inspection; acknowledgement follows cleanup
 Unsupported configuration, selected-secret and retained shapes stay unsupported.
 `observe_metadata` remains a separate path without invocation enrollment.
 
-This slice does not qualify ordinary verification: standalone `WaitForHealthy`
-requires the following per-check slice before dynamic adapter-batch acceptance.
+Standalone `WaitForHealthy` uses `ordinary-verification-acquisition`, with TLS
+prepared under the parent port before client acquisition and endpoint inspection.
+The parent must provide `for_check`; missing composition refuses before IO.
+Acquisition acknowledgement precedes reached child checks, but client custody
+continues through all reached checks and closes before the interpreter returns.
+An outer owner retains the factory's returned handle even when endpoint inspection
+or acquisition acknowledgement fails. Empty contracts still acquire and acknowledge
+one bounded unit, without endpoint inspection or child checks.
+
+Each reached check obtains its own port and exact `credential_grant`. HTTP admits
+one check around its existing finite attempt loop. Postgres preserves endpoint
+policy validation before credential resolution, acknowledges the exact child
+resolution, then admits one check around the query/retry loop. Two checks sharing
+a password reference use their distinct child grants; the interpreter does not
+look them up from the request's operational grants. A returned missing/denied
+resolver sum yields bounded rejected health with a returned resolution, while a
+thrown resolver failure records uncertainty and makes the overall runtime result
+uncertain. Dynamic SQL never falls back to a legacy reference resolver.
+
+Existing declaration order and stop-on-failed-health behavior remain authoritative.
+No later check or credential is eagerly admitted. Closed controls and cancellation
+stop later work and remain primary after owned cleanup, even if close also fails.
+Close-only failure after checks returns bounded runtime uncertainty; it does not
+rewrite earlier invocation outcomes. A returned check is not a health-success
+claim. Child ports must carry the same fixed control base as their parent.
+
 Start/reconcile preparation does not preload probe credentials or run health
 checks. The adapter batch still requires its combined source review, owning gate,
-remote CI and downstream composition evidence.
+remote CI and downstream composition evidence. Registration declarations remain
+the composing application's responsibility, not an inference from these methods.

@@ -234,6 +234,7 @@ class OrdinaryInvocationTests(unittest.TestCase):
             with self.assertRaises(asyncio.CancelledError) as caught:
                 self.execute_owned()
         self.assertIs(caught.exception, cancelled)
+        self.assertIsNone(caught.exception.__context__)
         close.assert_called_once_with()
         self.assertEqual(self.resolver.calls, [self.grants[0]])
         self.assertEqual(self.events[-1], ("record", "ordinary-verification-check", None, "unknown"))
@@ -327,6 +328,16 @@ class OrdinaryInvocationTests(unittest.TestCase):
             ("record", "ordinary-verification-acquisition", None, "returned")])
         factory.assert_called_once()
         close.assert_called_once_with()
+
+    def test_missing_per_check_port_refuses_before_acquisition(self):
+        self.owned()
+        self.port = RecordingPort(self.events)
+        with patch.object(DockerSdkClient, "from_authority") as factory:
+            with self.assertRaisesRegex(RuntimeError, "per-check invocation port"):
+                self.execute_owned()
+        factory.assert_not_called()
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.resolver.calls, [])
 
 
 if __name__ == "__main__":

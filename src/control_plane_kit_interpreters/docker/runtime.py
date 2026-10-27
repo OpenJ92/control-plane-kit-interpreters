@@ -402,6 +402,8 @@ class DockerRuntimeInterpreter:
             return _unsupported(request, "docker.unsupported-effect-kind")
         if request.runtime_kind is not RuntimeKind.DOCKER:
             return _unsupported(request, "docker.unsupported-runtime-kind")
+        if type(request.operation) is WaitForHealthy and not callable(getattr(invocations, "for_check", None)):
+            raise InvocationPortError("ordinary verification requires a per-check invocation port")
         resolver = (_PreparedSecretResolver(self.authorized_secret_resolver, invocations)
             if self.authorized_secret_resolver is not None else None)
         prepared = replace(self, authorized_secret_resolver=resolver,
@@ -442,6 +444,9 @@ class DockerRuntimeInterpreter:
             return RuntimeEffectResult.uncertain(request.effect_id, RuntimeEffectFailure(
                 "docker.runtime-authority-uncertain", "Docker runtime preparation is uncertain"))
 
+        if type(request.operation) is WaitForHealthy:
+            return self._execute_ordinary_invoked(request, invocations, acquire)
+
         def dispatch():
             try:
                 binding = acquire()
@@ -453,6 +458,50 @@ class DockerRuntimeInterpreter:
             return prepared._execute_bound(request, binding)
 
         return invoke(invocations, "prepared-runtime-dispatch", dispatch)
+
+    def _execute_ordinary_invoked(self, request, invocations, acquire):
+        controls = (InvocationPortError, *control_errors(invocations))
+        binding, bound, endpoints = None, None, None
+        result, execution_error, close_error = None, None, None
+
+        def acquisition():
+            nonlocal binding, bound, endpoints
+            # Establish custody before inspection or recording can fail. The
+            # returned binding cannot otherwise be recovered from a failed ack.
+            binding = acquire()
+            bound = replace(self, client=binding.client, local_client_config=None,
+                docker_module=None, secret_resolver=None, image_pull_credentials=None,
+                _invocations=invocations)
+            material = _single_product(request)
+            endpoints = ({observation.socket_name: observation
+                for observation in bound._runtime_private_endpoint_observations(request, material)}
+                if material.product.runtime_contract.verification.checks else {})
+
+        try:
+            invoke(invocations, "ordinary-verification-acquisition", acquisition)
+            result = bound._wait_for_healthy(request, endpoints=endpoints, invocations=invocations)
+        except BaseException as error:
+            execution_error = error
+        if binding is not None and binding.close_after_execution:
+            try:
+                binding.client.close()
+            except BaseException as error:
+                close_error = error
+        # Propagate outside both handlers so close failure cannot add private
+        # context or replace a closed control/cancellation from reached work.
+        if execution_error is not None:
+            if isinstance(execution_error, controls) or not isinstance(execution_error, Exception):
+                raise execution_error
+            return RuntimeEffectResult.uncertain(request.effect_id, RuntimeEffectFailure(
+                "docker.effect-uncertain", _bounded_error_message(execution_error)))
+        if close_error is not None:
+            if isinstance(close_error, controls) or not isinstance(close_error, Exception):
+                raise close_error
+            return RuntimeEffectResult.uncertain(request.effect_id, RuntimeEffectFailure(
+                "docker.runtime-authority-client-close-uncertain",
+                "Docker runtime authority client cleanup failed"))
+        assert result is not None
+        return result
 
     def _execute_configuration_node(self, request: RuntimeEffectRequest) -> RuntimeEffectResult:
         if type(request.operation) not in (StartNode, ReconcileNode):
@@ -998,6 +1047,9 @@ class DockerRuntimeInterpreter:
     def _wait_for_healthy(
         self,
         request: RuntimeEffectRequest,
+        *,
+        endpoints=None,
+        invocations=None,
     ) -> RuntimeEffectResult:
         material = _single_product(request)
         checks = material.product.runtime_contract.verification.checks
@@ -1009,13 +1061,11 @@ class DockerRuntimeInterpreter:
                     "node_id": material.node_id,
                 },
             )
-        endpoints = {
-            observation.socket_name: observation
-            for observation in self._runtime_private_endpoint_observations(
-                request,
-                material,
-            )
-        }
+        if endpoints is None:
+            endpoints = {
+                observation.socket_name: observation
+                for observation in self._runtime_private_endpoint_observations(request, material)
+            }
         completed: list[dict[str, object]] = []
         observations: list[VerificationCompleted] = []
         for check in checks:
@@ -1032,22 +1082,26 @@ class DockerRuntimeInterpreter:
                     "docker.health-endpoint-unresolved",
                     "health endpoint is not literal runtime material",
                 )
+            if not isinstance(check, (HttpCheck, PostgresQueryCheck)):
+                return _unsupported(request, "docker.health-check-unsupported")
+            child = None
+            if invocations is not None:
+                child = invocations.for_check(check.check_id)
+                control_errors(child, required=True)
+                if (child.control_error is not invocations.control_error
+                        or not hasattr(child, "credential_grant")):
+                    raise InvocationPortError("ordinary verification child port is invalid")
             if isinstance(check, HttpCheck):
-                result = self._execute_http_health_check(
-                    material,
-                    request,
-                    check,
-                    endpoint,
-                )
+                result = invoke(child, "ordinary-verification-check",
+                    lambda: self._execute_http_health_check(material, request, check, endpoint))
             elif isinstance(check, PostgresQueryCheck):
                 result = self._execute_postgres_health_check(
                     material,
                     request,
                     check,
                     endpoint,
+                    invocations=child,
                 )
-            else:
-                return _unsupported(request, "docker.health-check-unsupported")
             if isinstance(result, VerificationUnsupported):
                 return _unsupported(request, "docker.health-check-unsupported")
             if not isinstance(result, VerificationCompleted):
@@ -1197,6 +1251,8 @@ class DockerRuntimeInterpreter:
         request: RuntimeEffectRequest,
         check: PostgresQueryCheck,
         endpoint,
+        *,
+        invocations=None,
     ):
         policy = ProbeAddressPolicy(
             runtime_private_authorities=frozenset((endpoint.address.value,)),
@@ -1210,13 +1266,13 @@ class DockerRuntimeInterpreter:
                 else self.secret_resolver
             ),
             authorized_credential_resolver=self.authorized_secret_resolver,
-            credential_grant=_optional_secret_resolution_grant(
+            credential_grant=(invocations.credential_grant if invocations is not None else _optional_secret_resolution_grant(
                 request,
                 None
                 if check.authentication is None
                 else check.authentication.password_reference,
                 SecretUseIntent.POSTGRES_PASSWORD,
-            ),
+            )),
         )
         return interpreter.execute(
             VerificationCheckMaterial(
@@ -1224,7 +1280,8 @@ class DockerRuntimeInterpreter:
                 request.source.desired_graph_id,
                 check,
                 endpoint,
-            )
+            ),
+            invocations=invocations,
         )
 
     def _runtime_private_endpoint_observations(
