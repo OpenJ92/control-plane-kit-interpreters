@@ -1,9 +1,9 @@
 Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py).
 
-Interpreters #222 selects actual Secrets #69 merge
-`78a2ed7c8abee6da31f8661993ed4c5426edd7ee` and SDK #69 merge
-`43838fd0f4391428cfffa87f8c4dbd5cc6d5eab1`, sharing accepted Core
-`879efb9576ac0580a6236d0a7372c036537b4dfe`. Only the two owner coordinate
+Interpreters #228 selects actual Secrets #73 merge
+`067678fbaa297d3206ff13d018c69bc14387e46c` and SDK #71 merge
+`464df26c568971362eb3a08abaf9dfc227a4ddbb`, sharing accepted Core
+`4cc1716bef4d7548ddb4cd343e53fa06bb447104`. Only the two owner coordinate
 constants change; exact installed archive equality, candidate source origin,
 real signing/composition and denial assertions remain intact. The historical
 Servers fixture is unchanged. Normal owner CI must establish actual installed

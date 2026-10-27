@@ -2,15 +2,15 @@ Source: [pyproject.toml](../../pyproject.toml).
 
 Maintain this document alongside its source and selected dependencies.
 
-Interpreters #222 selects accepted Core
-`879efb9576ac0580a6236d0a7372c036537b4dfe` and actual Secrets #69 merge
-`78a2ed7c8abee6da31f8661993ed4c5426edd7ee` in the test extra. Secrets selects
-actual SDK #69 merge `43838fd0f4391428cfffa87f8c4dbd5cc6d5eab1` and the same
-Core archive. New Core control-plane command/read facts and provision scope do
+Interpreters #228 selects accepted Core
+`4cc1716bef4d7548ddb4cd343e53fa06bb447104` and actual Secrets #73 merge
+`067678fbaa297d3206ff13d018c69bc14387e46c` in the test extra. Secrets selects
+actual SDK #71 merge `464df26c568971362eb3a08abaf9dfc227a4ddbb` and the same
+Core archive. New Core administration HTTP/parity/projection contracts do
 not change consumed secret/delegation/receiver/effect contracts. Runtime code,
 extras, normal pinned runner, historical Servers fixture and provider opt-in
 remain unchanged. Exact gate and installed-owner expectations move with metadata;
-the ordinary gate must prove compatibility before Servers #313 consumes the
+the ordinary gate must prove compatibility before Servers #341 consumes the
 actual accepted Interpreter merge. No image or live acceptance is implied.
 
 Historical Interpreters #220 retains accepted Core

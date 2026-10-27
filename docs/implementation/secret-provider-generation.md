@@ -14,7 +14,7 @@ same selection for response metadata, preserving exact reference, issuer,
 purpose and public key bindings. Unsupported or mismatched response metadata
 is `MALFORMED_RESPONSE/UNCERTAIN`; existing wire identity and fingerprint checks
 remain in the client. No public signature changes. The test dependency selects
-accepted Secrets merge `78a2ed7c8abee6da31f8661993ed4c5426edd7ee`, which
+accepted Secrets merge `067678fbaa297d3206ff13d018c69bc14387e46c`, which
 admits the same exact pair.
 
 The six added methods in `tests/test_secret_provider_client.py` strengthen the
