@@ -265,13 +265,16 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
             self.assertEqual(set(result.failure.descriptor()["details"]), set())
         return kind
 
-    def test_observe_signature_matches_accepted_two_argument_protocol(self):
+    def test_observe_preserves_two_arguments_and_optional_invocation_keyword(self):
         observer = self.observer(_ReadClient(_hello_request()))
         signature = inspect.signature(observer.observe)
-        self.assertEqual(tuple(signature.parameters), ("request", "authority"))
-        for parameter in signature.parameters.values():
+        self.assertEqual(tuple(signature.parameters), ("request", "authority", "invocations"))
+        for name in ("request", "authority"):
+            parameter = signature.parameters[name]
             self.assertIs(parameter.kind, inspect.Parameter.POSITIONAL_OR_KEYWORD)
             self.assertIs(parameter.default, inspect.Parameter.empty)
+        self.assertIs(signature.parameters["invocations"].kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertIsNone(signature.parameters["invocations"].default)
 
     def test_owned_running_start_is_confirmed_by_exact_reads_only(self):
         request = _hello_request()
