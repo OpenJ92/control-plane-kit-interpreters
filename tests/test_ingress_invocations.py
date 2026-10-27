@@ -313,3 +313,43 @@ class IngressInvocationTests(unittest.TestCase):
                     self.create()
         self.assertEqual(self.events, [])
         self.assertEqual(self.resolver.grants, [])
+
+    def test_invalid_successful_dns_id_never_enters_result_record_or_custody(self):
+        for shape, invalid_id in (("malformed", "raw token=private-value"),
+                ("oversized", "x" * 129), ("sensitive", "provider-secret-value")):
+            with self.subTest(shape=shape):
+                self.setUp()
+                original = self.transport.request
+                def request(method, url, **kwargs):
+                    response = original(method, url, **kwargs)
+                    if method == "POST" and url.endswith("/dns_records"):
+                        return replace(response, body={"success": True, "result": {"id": invalid_id}})
+                    return response
+                self.transport.request = request
+                with self.assertRaises(CloudflareApiError) as caught:
+                    self.create()
+                self.assertEqual(self.port.results, [("ingress-provider-create", "unknown",
+                    {"version": 1, "tag": "provider-create-unclassified"})])
+                self.assertNotIn(invalid_id, repr((self.events, self.port.results, caught.exception)))
+                self.assertEqual(self.custodian.stored_references, [])
+                self.assert_no_deletes()
+
+    def test_create_cleanup_control_has_no_prior_private_provider_exception_chain(self):
+        denied = Denied("closed-control")
+        self.transport.raise_stages.add("tunnel-configuration")
+        original = self.transport.request
+        deletes = []
+        def request(method, url, **kwargs):
+            if method == "DELETE":
+                deletes.append(url)
+                raise denied
+            return original(method, url, **kwargs)
+        self.transport.request = request
+        with self.assertRaises(Denied) as caught:
+            self.create()
+        self.assertIs(caught.exception, denied)
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertIsNone(caught.exception.__context__)
+        self.assertEqual(deletes, ["https://api.cloudflare.com/client/v4/accounts/account-001/cfd_tunnel/tunnel-001"])
+        self.assertEqual(self.port.results, [])
+        self.assertEqual(self.custodian.stored_references, [])
