@@ -1,7 +1,7 @@
 Source: [test_support/tests/test_gate_contract.py](../../../../test_support/tests/test_gate_contract.py).
 
-Interpreters #228 advances CORE_REQUIREMENT to accepted Core
-`4cc1716bef4d7548ddb4cd343e53fa06bb447104`. Exact equality, normal pinned
+Interpreters #230 advances CORE_REQUIREMENT to accepted Core
+`fec0816281aeb83ede98616adcc4f96dfe5777a8`. Exact equality, normal pinned
 resolution, runner and provider-opt-in assertions are unchanged. Existing
 Docker validation establishes dependency adoption; no pin-mirror test or
 artificial target-red is added.

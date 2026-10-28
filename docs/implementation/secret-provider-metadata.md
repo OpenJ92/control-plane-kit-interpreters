@@ -1,7 +1,7 @@
 # Exact metadata and resolution (#190)
 
-Current Interpreters #228 selects accepted Core
-`4cc1716bef4d7548ddb4cd343e53fa06bb447104`. New administration HTTP/parity/projection contracts
+Current Interpreters #230 selects accepted Core
+`fec0816281aeb83ede98616adcc4f96dfe5777a8`. New product-directory HTTP/parity/projection read contracts
 do not change this adapter's metadata/grant inputs, exact-version resolution,
 bounded redaction or no-retry semantics. Accepted Secrets/SDK pin-only changes
 select the same Core; the normal Interpreter gate still must prove installation.
