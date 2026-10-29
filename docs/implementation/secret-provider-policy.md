@@ -42,3 +42,11 @@ new mapping laws; this test-first deviation is explicit in the issue decision lo
 Meridian additionally identified unknown mutation error-envelope certainty. A
 public-adapter regression is added before correcting that defect, and the cursor
 negative case now uses a full valid page so it cannot be masked by page length.
+
+Checkpoint `68d726f` then passed 26 support and 704 of 705 package test methods;
+three subtests in the new malformed-error-envelope method failed before its fix.
+GET audit headers, bounded 422 mapping and the isolated cursor case passed.
+The correction retains mutation ambiguity for every unsupported/malformed
+policy error mapping even when the shared secret-data error was definite.
+Recognized policy refusals and GET semantics are unchanged. Full owning-gate
+acceptance remains pending the corrected checkpoint.

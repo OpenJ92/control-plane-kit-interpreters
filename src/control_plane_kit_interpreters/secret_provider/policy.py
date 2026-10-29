@@ -130,7 +130,8 @@ class ControlPlaneKitSecretsPolicyClient:
         except SecretProviderClientError as exc:
             code = _ERRORS.get(exc.code, ProviderPolicyErrorCode.MALFORMED_RESULT)
             failure = _failure(code, mutation=mutation and
-                exc.certainty is SecretProviderOutcomeCertainty.UNCERTAIN)
+                (exc.certainty is SecretProviderOutcomeCertainty.UNCERTAIN
+                 or code is ProviderPolicyErrorCode.MALFORMED_RESULT))
         # Raise outside the except block: retained exception context cannot carry
         # provider text, endpoint or credential material into caller diagnostics.
         if failure is not None:
