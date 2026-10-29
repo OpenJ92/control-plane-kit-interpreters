@@ -40,3 +40,7 @@ __all__ = [
     "SecretProviderVersionMetadata",
     "canonical_provider_secret_id",
 ]
+
+from .policy import ControlPlaneKitSecretsPolicyClient
+
+__all__.append("ControlPlaneKitSecretsPolicyClient")
