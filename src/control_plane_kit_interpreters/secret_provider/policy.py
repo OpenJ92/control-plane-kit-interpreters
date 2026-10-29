@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 import time
 from urllib.parse import quote, urlencode
+from uuid import uuid4
 
 import httpx
 
@@ -124,7 +125,8 @@ class ControlPlaneKitSecretsPolicyClient:
         try:
             raw = ControlPlaneKitSecretsClient(self.configuration, policy=self.policy,
                 transport=self.transport, clock=self.clock)._request_json(
-                    method, path, payload, mutation=mutation)
+                    method, path, payload, mutation=mutation,
+                    audit_correlation_id=None if mutation else "cpk-policy-read." + uuid4().hex)
         except SecretProviderClientError as exc:
             code = _ERRORS.get(exc.code, ProviderPolicyErrorCode.MALFORMED_RESULT)
             failure = _failure(code, mutation=mutation and

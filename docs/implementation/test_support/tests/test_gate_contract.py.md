@@ -2,7 +2,7 @@ Interpreters #232 selects accepted Core
 `c7b16007467085be997f8dc3025e90e78649b00a` and normal fixture Secrets
 `cf2827a73c6b7b082aa5942904fd7b8f92da690d` / SDK
 `3192360c36934feadc37bb9ae3733ce7da755c31`. Existing runner and fixture behavior
-are preserved. See [the policy client contract](../../../secret-provider-policy.md) for the separate
+are preserved. See [the policy client contract](../../secret-provider-policy.md) for the separate
 E wire mapping and bounded validation status. Older entries below are history.
 
 Source: [test_support/tests/test_gate_contract.py](../../../../test_support/tests/test_gate_contract.py).

@@ -214,6 +214,18 @@ class SecretProviderPolicyTests(unittest.TestCase):
                 self.assert_failure(lambda: client.command_result(ProviderPolicyCommandResultRequest(
                     "provider-a", "command-correlation")), code)
 
+    def test_unrecognized_error_envelopes_do_not_claim_mutation_refusal(self):
+        for outcome in ("unexpected", "revoked", "already-exists"):
+            with self.subTest(outcome=outcome):
+                self.requests.clear()
+                payload = {"detail": {"outcome": outcome, "code": "private-response-sentinel"}}
+                client = self.client(payload, 409)
+                self.assert_failure(lambda: client.grant(COMMAND),
+                    ProviderPolicyErrorCode.MALFORMED_RESULT, ambiguous=True)
+                self.requests.clear()
+                self.assert_failure(lambda: client.command_result(ProviderPolicyCommandResultRequest(
+                    "provider-a", "command-correlation")), ProviderPolicyErrorCode.MALFORMED_RESULT)
+
     def test_command_result_and_grant_reads_refuse_substitution_without_fallback(self):
         for payload in (result(correlation_id="other"), result(provider_id="other")):
             self.requests.clear()
@@ -253,6 +265,7 @@ class SecretProviderPolicyTests(unittest.TestCase):
             {"grants": [grant(grant_id="grant-c"), grant(grant_id="grant-b")]},
             {"grants": [grant(), grant()]},
             {"grants": [grant()], "next_after": "wrong"},
+            {"grants": [grant(), grant(grant_id="grant-b")], "next_after": "wrong"},
             {"grants": [], "next_after": "grant-a"},
             {"grants": [grant(grant_id="grant-0")]},
         )

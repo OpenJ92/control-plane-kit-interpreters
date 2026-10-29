@@ -34,3 +34,11 @@ adapter tests expose those missing transport behaviors; this checkpoint is
 unvalidated and not feature acceptance. Validation must use unchanged Docker
 `./test.sh`. No new provider process proof, fixture migration, live provider
 operation, credential inspection or image publication is included.
+
+The first owning gate at `6666067` passed 26 support and 702 of 704 package tests;
+the audit-header and bounded-422 cases failed as predicted. These two paths are
+now corrected, pending validation. No preimplementation red exists for the other
+new mapping laws; this test-first deviation is explicit in the issue decision log.
+Meridian additionally identified unknown mutation error-envelope certainty. A
+public-adapter regression is added before correcting that defect, and the cursor
+negative case now uses a full valid page so it cannot be masked by page length.
