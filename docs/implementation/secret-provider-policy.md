@@ -32,13 +32,15 @@ retain the distinct 512-character limit. No truncation or rehashing changes
 command identity. Invalid request/binding/correlation checks precede credential
 loading and transport.
 
-The selected Core port is accepted
-`c7b16007467085be997f8dc3025e90e78649b00a`. Normal test fixtures use Secrets
-`cf2827a73c6b7b082aa5942904fd7b8f92da690d` and SDK
-`3192360c36934feadc37bb9ae3733ce7da755c31`, preserving existing fixture behavior.
+The policy port was accepted in #232 on Core
+`c7b16007467085be997f8dc3025e90e78649b00a`. Dependency-only #234 now selects
+Core `7afef43f3d3b981094e37dcb3062b6e3a4f3d674`, normal test Secrets
+`a3ca9634574484a0018bf73b375d94fab70f169a` and SDK
+`220f63169e4bac79653937e97727406255279f7b`. The port, client, tests and fixture
+behavior are unchanged; #234 owns the new cohort compatibility evidence.
 Accepted E `adf58aae75d5616e6ea262ad223672afdb10bb26` is the wire-contract source,
-not an adopted policy process fixture. No Core7af adoption or E fixture migration
-is included; Servers/G retain their separate composition and process evidence.
+not an adopted policy process fixture. Core7af supplies the accepted public integration contracts. This pin change
+does not adopt E fixtures or prove Servers/G composition and process behavior.
 
 The unchanged Docker `./test.sh` is the owning gate. Public adapter tests use
 synthetic HTTP transport for exact encoding, returned identity, bounds, redaction,

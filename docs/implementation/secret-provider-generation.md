@@ -1,3 +1,14 @@
+Current dependency selection (#234): accepted Core
+`7afef43f3d3b981094e37dcb3062b6e3a4f3d674`, test Secrets
+`a3ca9634574484a0018bf73b375d94fab70f169a`, and its accepted SDK
+`220f63169e4bac79653937e97727406255279f7b`. This changes only dependency and
+existing provenance coordinates. Runtime source, the #232 policy client, test
+assertions, three-value provider fixture, extras and owning runner are unchanged.
+The normal pinned Docker gate must establish this cohort's compatibility;
+[issue #234](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/234)
+owns its evidence. No E fixture adoption, live acceptance or image publication is
+implied. Earlier selections and evidence below retain their historical coordinates.
+
 # Delegation generation purpose validation (#158)
 
 `secret_provider/client.py` keeps the existing generation request and result
@@ -13,7 +24,7 @@ owns credential loading and the single HTTP request. Unsupported purpose is
 same selection for response metadata, preserving exact reference, issuer,
 purpose and public key bindings. Unsupported or mismatched response metadata
 is `MALFORMED_RESPONSE/UNCERTAIN`; existing wire identity and fingerprint checks
-remain in the client. No public signature changes. The test dependency selects
+remain in the client. No public signature changes. The earlier test dependency selected
 accepted Secrets merge `46e0718664c425d002f2420a6ad1f996be62b2c5`, which
 admits the same exact pair.
 
