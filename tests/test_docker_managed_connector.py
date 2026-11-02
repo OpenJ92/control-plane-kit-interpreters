@@ -11,12 +11,71 @@ from control_plane_kit_core.capabilities import CapabilityName
 from control_plane_kit_core.runtime_effects import RuntimeEffectKind
 from control_plane_kit_core.topology import validate_graph
 from control_plane_kit_interpreters.docker import connector_connection as module
+from control_plane_kit_interpreters.docker.sdk import DockerSdkConnectorEvidenceError
 from docker_connector_fixtures import CONTAINER_ID, sample
 from managed_connector_fixtures import managed_world, observer, observe, TARGET
 from test_docker_configuration_readback import archive_bytes
 
 
 class ManagedConnectorTests(unittest.TestCase):
+    def test_empty_command_representations_have_equal_sdk_evidence(self):
+        evidence = []
+        world = managed_world()
+        for command in ([], None):
+            for config in [world.image["Config"], *(item["Config"] for item in world.containers)]:
+                config["Cmd"] = command
+            image = world.client.inspect_connector_image(world.material.product.image.execution_reference,
+                token_path=world.file.target_path, profile=module.ConnectorConnectionProfile.MANAGED_WRAPPER_V1)
+            container = world.client.inspect_connector_container(CONTAINER_ID,
+                profile=module.ConnectorConnectionProfile.MANAGED_WRAPPER_V1)
+            self.assertEqual(image.launch_digest, container.launch_digest)
+            evidence.append((image, container))
+        self.assertEqual(evidence[0], evidence[1])
+
+    def test_null_command_observation_preserves_all_other_managed_checks(self):
+        for image_null, container_null in ((True, False), (False, True), (True, True)):
+            with self.subTest(image_null=image_null, container_null=container_null):
+                world = managed_world()
+                if image_null:
+                    world.image["Config"]["Cmd"] = None
+                if container_null:
+                    for container in world.containers:
+                        container["Config"]["Cmd"] = None
+                self.assert_result(world, "connected")
+                self.assertEqual(world.archive_calls, [("get", CONTAINER_ID), ("archive", TARGET)])
+
+    def test_malformed_or_missing_command_is_not_an_empty_command(self):
+        for owner in ("image", "container"):
+            for case, command in (("text", ""), ("mapping", {}), ("boolean", False),
+                                  ("mixed-list", ["arg", 1]), ("missing", None)):
+                with self.subTest(owner=owner, case=case):
+                    world = managed_world()
+                    config = world.image["Config"] if owner == "image" else world.containers[0]["Config"]
+                    if case == "missing":
+                        del config["Cmd"]
+                    else:
+                        config["Cmd"] = command
+                    with self.assertRaises(DockerSdkConnectorEvidenceError):
+                        if owner == "image":
+                            world.client.inspect_connector_image(world.material.product.image.execution_reference,
+                                token_path=world.file.target_path,
+                                profile=module.ConnectorConnectionProfile.MANAGED_WRAPPER_V1)
+                        else:
+                            world.client.inspect_connector_container(CONTAINER_ID,
+                                profile=module.ConnectorConnectionProfile.MANAGED_WRAPPER_V1)
+
+    def test_nonempty_command_remains_material_to_container_launch(self):
+        digests = []
+        for command in ([], ["first", "second"], ["second", "first"]):
+            world = managed_world()
+            container = world.containers[0]
+            container["Config"]["Cmd"] = command
+            container["Args"] = container["Config"]["Entrypoint"][1:] + command
+            projection = world.client.inspect_connector_container(CONTAINER_ID,
+                profile=module.ConnectorConnectionProfile.MANAGED_WRAPPER_V1)
+            digests.append(projection.launch_digest)
+        self.assertEqual(len(set(digests)), 3)
+
     def assert_result(self, world, expected, **changes):
         result = observe(world, **changes)
         self.assertEqual(result.outcome.value, expected)
