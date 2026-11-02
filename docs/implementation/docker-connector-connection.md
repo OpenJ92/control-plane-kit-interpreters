@@ -1,5 +1,33 @@
 # Native connection observation (#167)
 
+## Configuration-aware creation labels (#239)
+
+The managed wrapper profile requires the configuration-aware creator's
+`org.openj92.cpk.configuration.selection` label as a lowercase 64-hex
+fingerprint. Missing or malformed values return UNKNOWN before image or archive
+reads. All other CPK ownership/material labels must still match exactly;
+unexpected CPK keys remain rejected. The default native-reader profile and
+global ownership comparison are unchanged.
+
+For FRESH, the label is candidate/stability metadata alongside the observed
+configuration volume, not proof of an accepted allocation. No installation pair
+is admitted. Retained content and image modes instead derive the exact expected
+fingerprint from the original request's configuration selection using Core's
+owning helper. Their original receipt, volume and incarnation checks remain.
+
+Both modes preserve the complete original first/final typed snapshots, including
+the selection label, so selection-only drift returns UNKNOWN. Exact token
+volume, configuration content/mode/regular-file, launch, freshness and decoding
+checks still follow. No allocation lookup, secret read, adoption authority,
+provider mutation, repair or retry is added.
+
+The regression in `tests/test_docker_managed_connector_labels.py` executes the
+actual configuration-aware StartNode against the existing recording SDK and
+feeds its emitted labels unchanged to the native observer. Companion cases
+cover missing/malformed selection, retained mismatch, arbitrary extra CPK keys,
+base ownership/material mismatch and selection-only final drift; existing
+managed and retained-image tests continue to cover the other evidence checks.
+
 ## Empty Docker command representation (#236)
 
 A present `Config.Cmd` of `null` or `[]` represents zero command arguments.
