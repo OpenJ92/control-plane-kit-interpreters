@@ -1,5 +1,15 @@
 # Native connection observation (#167)
 
+## Empty Docker command representation (#236)
+
+A present `Config.Cmd` of `null` or `[]` represents zero command arguments.
+Image and container projections decode both identically when computing launch
+fingerprints and checking effective process argv. A missing Cmd key, malformed
+non-list value, or invalid list element still fails closed. Nonempty command
+content and order remain material; the managed image requires zero command
+arguments and the native-reader image still requires `tunnel run`. No other
+list decoding, launch checks, observation authority or provider behavior changes.
+
 ## Client-free qualification (#218)
 
 `DockerConnectorConnectionQualifier` is the pure capability owner in
