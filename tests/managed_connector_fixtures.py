@@ -8,6 +8,7 @@ from control_plane_kit_core.algebra import BlockSockets, ProviderSocket
 from control_plane_kit_core.capabilities import CapabilityName
 from control_plane_kit_core.configuration import ConfigurationArtifactRequirement, ConfigurationFileMode, ConfigurationMediaType
 from control_plane_kit_core.configuration_instances import ConfigurationInstanceRef, ConfigurationInstanceSelection
+from control_plane_kit_core.configuration_invocation import configuration_invocation_selection_fingerprint
 from control_plane_kit_core.environment import PublicStaticEnvironmentBinding
 from control_plane_kit_core.products import ProductDescriptorCodec, ProductReference, ProviderRuntimePort
 from control_plane_kit_core.runtime_effects import RuntimeEffectKind
@@ -24,6 +25,7 @@ from test_docker_configuration_readback import archive_bytes
 
 TARGET = "/etc/cpk/cloudflared/control.json"
 ENVIRONMENT = (PublicStaticEnvironmentBinding("CPK_WRAPPER_CONFIGURATION_FILE", TARGET),)
+SELECTION_LABEL = "org.openj92.cpk.configuration.selection"
 
 
 def managed_world(*, retained=False, lazy=False):
@@ -82,6 +84,10 @@ def managed_world(*, retained=False, lazy=False):
     else:
         world.configuration_volume = "observed-candidate-without-allocation-claim"
         world.recompile()
+    world.configuration_selection = (world.installation_request.configuration_instances if retained else
+        ConfigurationInstanceSelection((ConfigurationInstanceRef("fresh-allocation", "workspace", "docker", "connector",
+            world.artifact.artifact_id, TARGET, world.artifact.media_type,
+            world.artifact.file_mode, world.artifact.content_digest),)))
     for config in [world.image["Config"], *(value["Config"] for value in world.containers)]:
         config.update(Entrypoint=["python", "-m", "control_plane_kit_servers_cloudflared_connector.entrypoint"],
                       Cmd=[], WorkingDir="/app")
@@ -89,6 +95,8 @@ def managed_world(*, retained=False, lazy=False):
     origin = world.installation_request if retained else world.request
     for container in world.containers:
         container["Config"]["Labels"] = _node_labels(origin, world.material)
+        container["Config"]["Labels"][SELECTION_LABEL] = configuration_invocation_selection_fingerprint(
+            world.configuration_selection)
         container.update(Path="python", Args=container["Config"]["Entrypoint"][1:])
         container["HostConfig"]["Mounts"].append({"Type": "volume", "Source": world.configuration_volume,
             "Target": TARGET, "ReadOnly": True, "VolumeOptions": {"Subpath": "content"}})
