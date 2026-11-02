@@ -1770,6 +1770,11 @@ def _connector_strings(value: Any, count: int = 64) -> tuple[str, ...]:
     return tuple(_connector_text(item) for item in value)
 
 
+def _connector_command(value: Any) -> tuple[str, ...]:
+    """Docker encodes an empty command as either null or an empty list."""
+    return () if value is None else _connector_strings(value)
+
+
 def _connector_launch(raw: Any, *, token_path: str | None = None,
                       profile=ConnectorConnectionProfile.NATIVE_READER_V1) -> str:
     """Hash only after exact bounded validation; never truncate candidate data.
@@ -1780,7 +1785,7 @@ def _connector_launch(raw: Any, *, token_path: str | None = None,
     """
     config = _connector_mapping(raw)
     entrypoint = _connector_strings(config["Entrypoint"])
-    command = _connector_strings(config["Cmd"])
+    command = _connector_command(config["Cmd"])
     user = _connector_text(config["User"], 128)
     cwd = _connector_text(config["WorkingDir"])
     stop = _connector_text(config["StopSignal"], 32)
@@ -1836,7 +1841,7 @@ def _connector_container(raw: Any, *, profile=ConnectorConnectionProfile.NATIVE_
     labels = _connector_mapping(config["Labels"])
     labels = tuple(sorted((_connector_text(key, 256), _connector_text(value)) for key, value in labels.items()))
     launch = _connector_launch(config)
-    argv = _connector_strings(config["Entrypoint"]) + _connector_strings(config["Cmd"])
+    argv = _connector_strings(config["Entrypoint"]) + _connector_command(config["Cmd"])
     if not argv or _connector_text(attrs["Path"]) != argv[0] or _connector_strings(attrs["Args"]) != argv[1:]:
         raise ValueError
     host = _connector_mapping(attrs["HostConfig"])
