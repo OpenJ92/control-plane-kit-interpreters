@@ -13,6 +13,7 @@ from uuid import UUID
 import control_plane_kit_core as core
 from control_plane_kit_core.algebra import BlockSockets, ProviderSocket
 from control_plane_kit_core.configuration import ConfigurationMediaType, ConfigurationFileMode, ConfigurationArtifactRequirement
+from control_plane_kit_core.configuration_invocation import configuration_invocation_selection_fingerprint
 from control_plane_kit_core.environment import PublicStaticEnvironmentBinding
 from control_plane_kit_core.planning import (
     ActivityId, ActivityPlan, ManagementBootstrapStage, ObserveManagementBootstrap,
@@ -285,7 +286,7 @@ class DockerConnectorConnectionObserver:
             else:
                 origin = _installation_origin(request, installation_request, installation_receipt)
                 incarnation = installation_receipt.current_realization_fingerprint
-            artifact, configuration_volume = None, None
+            artifact, configuration_volume, configuration_selection = None, None, None
             if self.profile is ConnectorConnectionProfile.MANAGED_WRAPPER_V1:
                 artifact = _managed_configuration(material, node, workspace_id=request.source.workspace_id)
                 if mode in (ConnectorConnectionQualification.RETAINED_CONTENT_UPDATE,
@@ -302,6 +303,7 @@ class DockerConnectorConnectionObserver:
                             artifact.file_mode, artifact.content_digest):
                         raise ValueError
                     configuration_volume = configuration_volume_name(reference)
+                    configuration_selection = configuration_invocation_selection_fingerprint(origin.configuration_instances)
             expected_name = _container_name(origin, node.node_id)
             expected_labels = _node_correlation_labels(_node_labels(origin, material))
             network = _network_name(origin, material.runtime_id)
@@ -312,8 +314,17 @@ class DockerConnectorConnectionObserver:
         unknown = ConnectorConnectionObservation(ConnectorConnectionOutcome.UNKNOWN, **correlation)
         try:
             first = self.client.inspect_connector_container(expected_name, profile=self.profile)
+            observed_labels = _node_correlation_labels(dict(first.labels))
+            if artifact is not None:
+                selection = observed_labels.get(_MANAGED_CONFIGURATION_SELECTION_LABEL)
+                if type(selection) is not str or re.fullmatch(r"[0-9a-f]{64}", selection) is None:
+                    return unknown
+                # Fresh selection is candidate metadata, not allocation proof.
+                # Retained selection must match the supplied original request.
+                expected_labels[_MANAGED_CONFIGURATION_SELECTION_LABEL] = (
+                    selection if configuration_selection is None else configuration_selection)
             if (first.name != "/" + expected_name or first.network != network
-                    or _node_correlation_labels(dict(first.labels)) != expected_labels):
+                    or observed_labels != expected_labels):
                 return unknown
             if incarnation is not None and _container_incarnation_fingerprint(first.container_id) != incarnation:
                 return unknown
@@ -357,6 +368,7 @@ class DockerConnectorConnectionObserver:
             return unknown
 
 
+_MANAGED_CONFIGURATION_SELECTION_LABEL = "org.openj92.cpk.configuration.selection"
 _MANAGED_REQUIREMENT = ConfigurationArtifactRequirement("cloudflared-control",
     _MANAGED_CONNECTOR_CONFIGURATION_PATH, ConfigurationMediaType.JSON, ConfigurationFileMode.READ_ONLY)
 _MANAGED_ENVIRONMENT = (PublicStaticEnvironmentBinding(
