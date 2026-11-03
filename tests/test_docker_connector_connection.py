@@ -17,6 +17,57 @@ from docker_connector_fixtures import World, RetainedWorld, sample, CONTAINER_ID
 
 
 class DockerConnectorConnectionTests(unittest.TestCase):
+    def test_rejected_evidence_retains_closed_reason_without_sample_or_extra_io(self):
+        cases = (("provider", "initial-evidence-unavailable", 1),
+            ("state", "container-state-ineligible", 1),
+            ("missing", "sample-missing", 1),
+            ("malformed", "sample-invalid", 1),
+            ("binding", "binding-mismatch", 1),
+            ("freshness", "freshness-rejected", 1),
+            ("image", "image-evidence-unavailable", 2),
+            ("image-mismatch", "image-or-mount-mismatch", 2),
+            ("final-invalid", "final-evidence-unavailable", 3),
+            ("changed", "snapshot-changed", 3),
+            ("decode", "sample-invalid", 3))
+        for case, reason, reads in cases:
+            with self.subTest(case=case):
+                world = World()
+                if case == "provider": world.error = RuntimeError("PRIVATE-CANDIDATE")
+                elif case == "state": world.mutate("State", "Running", False)
+                elif case == "missing": world.mutate("State", "Health", {"Log": []})
+                elif case == "malformed": world.mutate("State", "Health", {"Log": [None]})
+                elif case == "binding": world.containers[0]["Name"] = "/foreign"
+                elif case == "freshness": world.now += timedelta(seconds=11)
+                elif case == "image": world.image["Id"] = "PRIVATE-CANDIDATE"
+                elif case == "image-mismatch": world.image["Id"] = "sha256:" + "e" * 64
+                elif case == "final-invalid": world.containers[1]["State"]["Running"] = False
+                elif case == "changed": world.containers[1]["State"]["Health"]["Log"].append(
+                    sample(start="2026-09-24T12:00:01.1Z", end="2026-09-24T12:00:01.2Z"))
+                elif case == "decode": world.mutate("State", "Health", {"Log": [{**sample(), "Output": "PRIVATE-CANDIDATE"}]})
+                result = self.assert_outcome(world, "unknown")
+                diagnostic = getattr(result, "diagnostic", None)
+                self.assertIsNotNone(diagnostic)
+                self.assertEqual(diagnostic.value, reason)
+                self.assertEqual(len(world.api.calls), reads)
+                for field in ("container_id", "sample_start", "sample_end", "ready_connections", "connector_id"):
+                    self.assertIsNone(getattr(result, field))
+
+    def test_diagnostic_is_closed_and_only_valid_on_unsampled_unknown(self):
+        diagnostic = getattr(module, "ConnectorConnectionDiagnostic", None)
+        self.assertIsNotNone(diagnostic)
+        for reason in diagnostic:
+            result = module.ConnectorConnectionObservation(module.ConnectorConnectionOutcome.UNKNOWN, diagnostic=reason)
+            self.assertIs(result.diagnostic, reason)
+            for outcome in (module.ConnectorConnectionOutcome.CONNECTED,
+                    module.ConnectorConnectionOutcome.DISCONNECTED, module.ConnectorConnectionOutcome.REFUSED):
+                with self.assertRaises(ValueError):
+                    replace(result, outcome=outcome)
+            for field in ("container_id", "sample_start", "sample_end", "ready_connections", "connector_id"):
+                with self.assertRaises(ValueError):
+                    replace(result, **{field: 0 if field == "ready_connections" else "value"})
+        with self.assertRaises(ValueError):
+            module.ConnectorConnectionObservation(module.ConnectorConnectionOutcome.UNKNOWN, diagnostic="sample-missing")
+
     def assert_outcome(self, world, expected, **changes):
         result = world.observe(module, **changes)
         self.assertEqual(result.outcome.value, expected)
@@ -34,6 +85,9 @@ class DockerConnectorConnectionTests(unittest.TestCase):
                 self.assertEqual(result.activity_id, world.request.activity_id.value)
                 self.assertEqual(world.api.calls, [("container", world.name),
                     ("image", world.material.product.image.execution_reference), ("container", CONTAINER_ID)])
+                self.assertIsNone(getattr(result, "diagnostic", None))
+                self.assertEqual(result.container_id, CONTAINER_ID)
+                self.assertEqual(result.sample_end, "2026-09-24T12:00:01.000000001Z")
                 if outcome != "unknown":
                     self.assertEqual(result.connector_id, NATIVE_ID)
                     self.assertEqual(result.ready_connections, 4 if outcome == "connected" else 0)
@@ -220,7 +274,19 @@ class DockerConnectorConnectionTests(unittest.TestCase):
                            ("Health", {"Status":"healthy", "Log":[]}), ("Health", {"Status":"healthy"})):
             world = World()
             world.mutate("State", key, value)
-            self.assert_outcome(world, "unknown")
+            result = self.assert_outcome(world, "unknown")
+            reason = "sample-missing" if key == "Health" else (
+                "initial-evidence-unavailable" if type(value) is not bool else "container-state-ineligible")
+            self.assertEqual(result.diagnostic.value, reason)
+
+    def test_malformed_nonempty_sample_is_not_described_as_missing(self):
+        for health in (None, {"Log": None}, {"Log": "PRIVATE-CANDIDATE"},
+                {"Log": [None]}, {"Log": [sample()] * 33}):
+            world = World()
+            world.mutate("State", "Health", health)
+            result = self.assert_outcome(world, "unknown")
+            self.assertEqual(result.diagnostic.value, "sample-invalid")
+            self.assertEqual(len(world.api.calls), 1)
 
     def test_strict_wire_schema_exit_count_uuid_and_limits(self):
         valid = json.loads(sample()["Output"])
@@ -266,7 +332,9 @@ class DockerConnectorConnectionTests(unittest.TestCase):
             with self.subTest(start=start, end=end):
                 world = World()
                 world.mutate("State", "Health", {"Log":[sample(start=start, end=end)]})
-                self.assert_outcome(world, outcome)
+                result = self.assert_outcome(world, outcome)
+                if outcome == "unknown":
+                    self.assertEqual(result.diagnostic.value, "freshness-rejected")
 
     def test_time_rechecked_after_every_semantic_lookup(self):
         for slow_read in (1, 2, 3):
@@ -299,7 +367,9 @@ class DockerConnectorConnectionTests(unittest.TestCase):
                 elif case == "env": final["Config"]["Env"].append("LD_PRELOAD=PRIVATE-CANDIDATE")
                 else: final["State"]["Health"]["Log"].append(sample("disconnected" if case == "new-failure" else "connected",
                     start="2026-09-24T12:00:01.1Z", end="2026-09-24T12:00:01.2Z"))
-                self.assert_outcome(world, "unknown")
+                result = self.assert_outcome(world, "unknown")
+                self.assertEqual(result.diagnostic.value,
+                    "final-evidence-unavailable" if case == "dead" else "snapshot-changed")
                 self.assertEqual(len(world.api.calls), 3)
                 self.assertEqual(world.api.calls[-1], ("container", CONTAINER_ID))
 
