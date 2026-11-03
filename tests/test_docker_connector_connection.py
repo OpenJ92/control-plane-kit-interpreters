@@ -274,7 +274,19 @@ class DockerConnectorConnectionTests(unittest.TestCase):
                            ("Health", {"Status":"healthy", "Log":[]}), ("Health", {"Status":"healthy"})):
             world = World()
             world.mutate("State", key, value)
-            self.assert_outcome(world, "unknown")
+            result = self.assert_outcome(world, "unknown")
+            reason = "sample-missing" if key == "Health" else (
+                "initial-evidence-unavailable" if type(value) is not bool else "container-state-ineligible")
+            self.assertEqual(result.diagnostic.value, reason)
+
+    def test_malformed_nonempty_sample_is_not_described_as_missing(self):
+        for health in (None, {"Log": None}, {"Log": "PRIVATE-CANDIDATE"},
+                {"Log": [None]}, {"Log": [sample()] * 33}):
+            world = World()
+            world.mutate("State", "Health", health)
+            result = self.assert_outcome(world, "unknown")
+            self.assertEqual(result.diagnostic.value, "sample-invalid")
+            self.assertEqual(len(world.api.calls), 1)
 
     def test_strict_wire_schema_exit_count_uuid_and_limits(self):
         valid = json.loads(sample()["Output"])
@@ -320,7 +332,9 @@ class DockerConnectorConnectionTests(unittest.TestCase):
             with self.subTest(start=start, end=end):
                 world = World()
                 world.mutate("State", "Health", {"Log":[sample(start=start, end=end)]})
-                self.assert_outcome(world, outcome)
+                result = self.assert_outcome(world, outcome)
+                if outcome == "unknown":
+                    self.assertEqual(result.diagnostic.value, "freshness-rejected")
 
     def test_time_rechecked_after_every_semantic_lookup(self):
         for slow_read in (1, 2, 3):
@@ -353,7 +367,9 @@ class DockerConnectorConnectionTests(unittest.TestCase):
                 elif case == "env": final["Config"]["Env"].append("LD_PRELOAD=PRIVATE-CANDIDATE")
                 else: final["State"]["Health"]["Log"].append(sample("disconnected" if case == "new-failure" else "connected",
                     start="2026-09-24T12:00:01.1Z", end="2026-09-24T12:00:01.2Z"))
-                self.assert_outcome(world, "unknown")
+                result = self.assert_outcome(world, "unknown")
+                self.assertEqual(result.diagnostic.value,
+                    "final-evidence-unavailable" if case in ("dead", "env") else "snapshot-changed")
                 self.assertEqual(len(world.api.calls), 3)
                 self.assertEqual(world.api.calls[-1], ("container", CONTAINER_ID))
 

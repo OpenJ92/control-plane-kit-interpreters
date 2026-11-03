@@ -205,7 +205,8 @@ class ManagedConnectorTests(unittest.TestCase):
                 elif case == "oversize": options["body"] = b"x" * 262145
                 else: world.archive_error = TimeoutError("PRIVATE-CANDIDATE")
                 world.archive = archive_bytes(**options)
-                self.assert_result(world, "unknown")
+                result = self.assert_result(world, "unknown")
+                self.assertEqual(result.diagnostic.value, "configuration-evidence-rejected")
                 self.assertEqual(world.archive_calls, [("get", CONTAINER_ID), ("archive", TARGET)])
 
     def test_managed_launch_is_exact_for_image_and_effective_container(self):

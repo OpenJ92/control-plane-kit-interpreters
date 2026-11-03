@@ -397,6 +397,20 @@ class DockerSdkConnectorEvidenceError(ValueError):
     """Closed postdecode projection failure; contains no provider material."""
 
 
+class _ConnectorEvidenceReason(Enum):
+    CONTAINER_STATE_INELIGIBLE = "container-state-ineligible"
+    SAMPLE_MISSING = "sample-missing"
+    SAMPLE_INVALID = "sample-invalid"
+
+
+class _ConnectorEvidenceRejection(DockerSdkConnectorEvidenceError):
+    def __init__(self, reason: _ConnectorEvidenceReason):
+        if type(reason) is not _ConnectorEvidenceReason:
+            raise TypeError("invalid connector evidence reason")
+        self.reason = reason
+        super().__init__("connector evidence rejected")
+
+
 @dataclass(frozen=True, repr=False)
 class DockerSdkSecretFileInspection:
     content_digest: str
@@ -661,6 +675,8 @@ class DockerSdkClient:
             if type(profile) is not ConnectorConnectionProfile:
                 raise ValueError
             return _connector_container(self._connector_api().inspect_container(identity), profile=profile)
+        except _ConnectorEvidenceRejection:
+            raise
         except Exception:
             raise DockerSdkConnectorEvidenceError("connector evidence is unavailable") from None
 
@@ -1834,8 +1850,10 @@ def _connector_container(raw: Any, *, profile=ConnectorConnectionProfile.NATIVE_
         raise ValueError
     name = _connector_text(attrs["Name"], 256)
     state = _connector_mapping(attrs["State"])
-    if state["Running"] is not True or state["Paused"] is not False or state["Restarting"] is not False:
+    if any(type(state[key]) is not bool for key in ("Running", "Paused", "Restarting")):
         raise ValueError
+    if state["Running"] is not True or state["Paused"] is not False or state["Restarting"] is not False:
+        raise _ConnectorEvidenceRejection(_ConnectorEvidenceReason.CONTAINER_STATE_INELIGIBLE)
     started_at = _connector_text(state["StartedAt"], 40)
     config = _connector_mapping(attrs["Config"])
     labels = _connector_mapping(config["Labels"])
@@ -1877,16 +1895,26 @@ def _connector_container(raw: Any, *, profile=ConnectorConnectionProfile.NATIVE_
         mount, = mounts
     _connector_text(mount.target_path)
     _connector_text(mount.volume_name, 256)
-    log = _connector_mapping(state["Health"])["Log"]
-    if type(log) is not list or not 1 <= len(log) <= 32:
-        raise ValueError
-    latest = _connector_mapping(log[-1], 4)
-    if set(latest) != {"Start", "End", "ExitCode", "Output"} or type(latest["ExitCode"]) is not int:
-        raise ValueError
-    if latest["ExitCode"] not in (0, 1):
-        raise ValueError
-    sample = DockerSdkConnectorSample(_connector_text(latest["Start"], 40), _connector_text(latest["End"], 40),
-        latest["ExitCode"], _connector_text(latest["Output"], 256))
+    try:
+        if "Health" not in state:
+            raise _ConnectorEvidenceRejection(_ConnectorEvidenceReason.SAMPLE_MISSING)
+        health = _connector_mapping(state["Health"])
+        if "Log" not in health or health["Log"] == []:
+            raise _ConnectorEvidenceRejection(_ConnectorEvidenceReason.SAMPLE_MISSING)
+        log = health["Log"]
+        if type(log) is not list or not 1 <= len(log) <= 32:
+            raise ValueError
+        latest = _connector_mapping(log[-1], 4)
+        if set(latest) != {"Start", "End", "ExitCode", "Output"} or type(latest["ExitCode"]) is not int:
+            raise ValueError
+        if latest["ExitCode"] not in (0, 1):
+            raise ValueError
+        sample = DockerSdkConnectorSample(_connector_text(latest["Start"], 40), _connector_text(latest["End"], 40),
+            latest["ExitCode"], _connector_text(latest["Output"], 256))
+    except _ConnectorEvidenceRejection:
+        raise
+    except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+        raise _ConnectorEvidenceRejection(_ConnectorEvidenceReason.SAMPLE_INVALID) from None
     return DockerSdkConnectorInspection(identity, name, attrs["Image"], labels, launch, network,
         mount, started_at, sample, configuration_mount)
 
