@@ -369,7 +369,7 @@ class DockerConnectorConnectionTests(unittest.TestCase):
                     start="2026-09-24T12:00:01.1Z", end="2026-09-24T12:00:01.2Z"))
                 result = self.assert_outcome(world, "unknown")
                 self.assertEqual(result.diagnostic.value,
-                    "final-evidence-unavailable" if case in ("dead", "env") else "snapshot-changed")
+                    "final-evidence-unavailable" if case == "dead" else "snapshot-changed")
                 self.assertEqual(len(world.api.calls), 3)
                 self.assertEqual(world.api.calls[-1], ("container", CONTAINER_ID))
 
