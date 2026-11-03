@@ -46,6 +46,7 @@ from control_plane_kit_interpreters.docker.runtime import (
 from control_plane_kit_interpreters.docker.sdk import (
     ConnectorConnectionProfile, DockerSdkClient, DockerSdkSecretMount, DockerSdkConfigurationMount,
     _MANAGED_CONNECTOR_CONFIGURATION_PATH,
+    _ConnectorEvidenceRejection, _ConnectorEvidenceReason,
 )
 
 
@@ -62,6 +63,20 @@ class ConnectorConnectionQualification(StrEnum):
     RETAINED_IMAGE_INGRESS_UPDATE = "retained_image_ingress_update"
 
 
+class ConnectorConnectionDiagnostic(StrEnum):
+    INITIAL_EVIDENCE_UNAVAILABLE = "initial-evidence-unavailable"
+    CONTAINER_STATE_INELIGIBLE = "container-state-ineligible"
+    SAMPLE_MISSING = "sample-missing"
+    BINDING_MISMATCH = "binding-mismatch"
+    FRESHNESS_REJECTED = "freshness-rejected"
+    IMAGE_EVIDENCE_UNAVAILABLE = "image-evidence-unavailable"
+    IMAGE_OR_MOUNT_MISMATCH = "image-or-mount-mismatch"
+    CONFIGURATION_EVIDENCE_REJECTED = "configuration-evidence-rejected"
+    FINAL_EVIDENCE_UNAVAILABLE = "final-evidence-unavailable"
+    SNAPSHOT_CHANGED = "snapshot-changed"
+    SAMPLE_INVALID = "sample-invalid"
+
+
 @dataclass(frozen=True, slots=True)
 class ConnectorConnectionObservation:
     outcome: ConnectorConnectionOutcome
@@ -72,6 +87,15 @@ class ConnectorConnectionObservation:
     sample_end: str | None = None
     ready_connections: int | None = None
     connector_id: str | None = None
+    diagnostic: ConnectorConnectionDiagnostic | None = None
+
+    def __post_init__(self):
+        if self.diagnostic is not None and (
+                type(self.diagnostic) is not ConnectorConnectionDiagnostic
+                or self.outcome is not ConnectorConnectionOutcome.UNKNOWN
+                or any(value is not None for value in (self.container_id, self.sample_start,
+                    self.sample_end, self.ready_connections, self.connector_id))):
+            raise ValueError("invalid connector diagnostic")
 
 
 @dataclass(frozen=True, repr=False)
@@ -311,61 +335,84 @@ class DockerConnectorConnectionObserver:
             return ConnectorConnectionObservation(ConnectorConnectionOutcome.REFUSED)
 
         correlation = dict(effect_id=request.effect_id, activity_id=request.activity_id.value)
-        unknown = ConnectorConnectionObservation(ConnectorConnectionOutcome.UNKNOWN, **correlation)
+        def unknown(reason):
+            return ConnectorConnectionObservation(ConnectorConnectionOutcome.UNKNOWN, **correlation, diagnostic=reason)
+        stage = ConnectorConnectionDiagnostic.INITIAL_EVIDENCE_UNAVAILABLE
         try:
             first = self.client.inspect_connector_container(expected_name, profile=self.profile)
+            stage = ConnectorConnectionDiagnostic.BINDING_MISMATCH
             observed_labels = _node_correlation_labels(dict(first.labels))
             if artifact is not None:
                 selection = observed_labels.get(_MANAGED_CONFIGURATION_SELECTION_LABEL)
                 if type(selection) is not str or re.fullmatch(r"[0-9a-f]{64}", selection) is None:
-                    return unknown
+                    return unknown(stage)
                 # Fresh selection is candidate metadata, not allocation proof.
                 # Retained selection must match the supplied original request.
                 expected_labels[_MANAGED_CONFIGURATION_SELECTION_LABEL] = (
                     selection if configuration_selection is None else configuration_selection)
             if (first.name != "/" + expected_name or first.network != network
                     or observed_labels != expected_labels):
-                return unknown
+                return unknown(stage)
             if incarnation is not None and _container_incarnation_fingerprint(first.container_id) != incarnation:
-                return unknown
+                return unknown(stage)
+            stage = ConnectorConnectionDiagnostic.FRESHNESS_REJECTED
             _fresh(first, self.clock())
+            stage = ConnectorConnectionDiagnostic.IMAGE_EVIDENCE_UNAVAILABLE
             image = self.client.inspect_connector_image(self.image_reference, token_path=delivery.target_path,
                 profile=self.profile)
+            stage = ConnectorConnectionDiagnostic.IMAGE_OR_MOUNT_MISMATCH
             mount = DockerSdkSecretMount(delivery.target_path,
                 _secret_volume_name(origin, node.node_id, delivery, owner_uid=image.owner_uid))
+            stage = ConnectorConnectionDiagnostic.FRESHNESS_REJECTED
             _fresh(first, self.clock())
+            stage = ConnectorConnectionDiagnostic.IMAGE_OR_MOUNT_MISMATCH
             if (first.image_id != image.image_id or first.launch_digest != image.launch_digest
                     or first.secret_mount != mount):
-                return unknown
+                return unknown(stage)
             if artifact is not None:
+                stage = ConnectorConnectionDiagnostic.CONFIGURATION_EVIDENCE_REJECTED
                 selected = first.configuration_mount
                 if (selected is None or selected.target_path != artifact.target_path
                         or (configuration_volume is not None and selected.volume_name != configuration_volume)):
-                    return unknown
+                    return unknown(stage)
                 # Fresh volume is an observed candidate, not an allocated reference.
                 mounted = DockerSdkConfigurationMount(artifact, selected.volume_name)
                 content = self.client.inspect_configuration_mount(first.container_id, mounted)
+                stage = ConnectorConnectionDiagnostic.FRESHNESS_REJECTED
                 _fresh(first, self.clock())
+                stage = ConnectorConnectionDiagnostic.CONFIGURATION_EVIDENCE_REJECTED
                 if (content is None or content.container_id != first.container_id
                         or content.volume_name != selected.volume_name or content.target_path != artifact.target_path
                         or content.subpath != "content" or content.read_only is not True):
-                    return unknown
+                    return unknown(stage)
                 require_configuration_file(content.file, artifact)
+            stage = ConnectorConnectionDiagnostic.FINAL_EVIDENCE_UNAVAILABLE
             final = self.client.inspect_connector_container(first.container_id, profile=self.profile)
+            stage = ConnectorConnectionDiagnostic.FRESHNESS_REJECTED
             _fresh(final, self.clock())
             # Equality includes latest sample, incarnation, effective program,
             # ownership and immutable ID; a new failed sample loses old success.
             if final != first:
-                return unknown
+                return unknown(ConnectorConnectionDiagnostic.SNAPSHOT_CHANGED)
+            stage = ConnectorConnectionDiagnostic.SAMPLE_INVALID
             outcome, count, identity = _decode(final.sample)
+            stage = ConnectorConnectionDiagnostic.FRESHNESS_REJECTED
             _fresh(final, self.clock())
             return ConnectorConnectionObservation(outcome, **correlation,
                 container_id=final.container_id, sample_start=final.sample.start, sample_end=final.sample.end,
                 ready_connections=count, connector_id=identity)
+        except _ConnectorEvidenceRejection as error:
+            if stage is ConnectorConnectionDiagnostic.INITIAL_EVIDENCE_UNAVAILABLE:
+                stage = {
+                    _ConnectorEvidenceReason.CONTAINER_STATE_INELIGIBLE: ConnectorConnectionDiagnostic.CONTAINER_STATE_INELIGIBLE,
+                    _ConnectorEvidenceReason.SAMPLE_MISSING: ConnectorConnectionDiagnostic.SAMPLE_MISSING,
+                    _ConnectorEvidenceReason.SAMPLE_INVALID: ConnectorConnectionDiagnostic.SAMPLE_INVALID,
+                }[error.reason]
+            return unknown(stage)
         except Exception:
             # Provider exceptions, candidate values and their hashes never cross
             # the observation boundary. No retries or fallback effects.
-            return unknown
+            return unknown(stage)
 
 
 _MANAGED_CONFIGURATION_SELECTION_LABEL = "org.openj92.cpk.configuration.selection"
