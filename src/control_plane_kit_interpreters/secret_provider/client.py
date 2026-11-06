@@ -636,7 +636,15 @@ class ControlPlaneKitSecretsClient:
         payload: Mapping[str, object] | None,
         *,
         mutation: bool,
+        audit_correlation_id: str | None = None,
     ) -> dict[str, Any]:
+        if audit_correlation_id is not None and (
+            type(audit_correlation_id) is not str
+            or not audit_correlation_id.strip()
+            or len(audit_correlation_id) > 128
+            or any(not 0x20 <= ord(char) < 0x7F for char in audit_correlation_id)
+        ):
+            raise SecretProviderClientError(SecretProviderClientCode.MALFORMED_REQUEST)
         try:
             body = b"" if payload is None else json.dumps(
                 payload,
@@ -674,6 +682,8 @@ class ControlPlaneKitSecretsClient:
                         "Accept": "application/json",
                         "Authorization": f"Bearer {token}",
                         "Content-Type": "application/json",
+                        **({"X-Correlation-ID": audit_correlation_id}
+                           if audit_correlation_id is not None else {}),
                     },
                     content=body,
                 )
@@ -889,7 +899,7 @@ def _raise_provider_error(
         mapped = SecretProviderClientCode.ALREADY_EXISTS
     elif status_code == 409 and outcome == "conflict":
         mapped = SecretProviderClientCode.CONFLICT
-    elif status_code == 400 and outcome == "malformed":
+    elif status_code in {400, 422} and outcome == "malformed":
         mapped = SecretProviderClientCode.MALFORMED_REQUEST
     elif status_code == 503 and code == "integrity-failure":
         mapped = SecretProviderClientCode.INTEGRITY_FAILURE

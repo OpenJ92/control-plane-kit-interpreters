@@ -10,7 +10,7 @@ import unittest
 CORE_REQUIREMENT = (
     "control-plane-kit-core @ "
     "https://github.com/OpenJ92/control-plane-kit/archive/"
-    "fec0816281aeb83ede98616adcc4f96dfe5777a8.zip"
+    "7afef43f3d3b981094e37dcb3062b6e3a4f3d674.zip"
     "#subdirectory=control-plane-kit-core"
 )
 
