@@ -1,3 +1,15 @@
+Current dependency selection (#244): accepted Core
+`976901c609d950a557ec1e9966f018e8ff6e16aa`, accepted Secrets #87 / PR #88 merge
+`158b17ed10689360c4e1529a395b3ee2b47aecbc`, and its actual SDK
+`d61b374cb2a23d773c31748f47f88169499298b7`. Secrets and SDK select this same Core.
+This changes only metadata and existing exact provenance coordinates from the
+reconciled #242 baseline. Runtime source, the #232 policy client and all 13 policy
+tests, assertions, provider fixtures, extras and owning runner are unchanged.
+The normal pinned Docker gate owns resolver and package compatibility evidence;
+[issue #244](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/244)
+records its result. No new signing/sample implementation, image/installation pin,
+publication or live acceptance is implied. Earlier notes retain historical coordinates.
+
 # Fixed Secrets policy client (#232)
 
 `secret_provider/policy.py` implements Core's five synchronous typed methods:
@@ -33,7 +45,7 @@ command identity. Invalid request/binding/correlation checks precede credential
 loading and transport.
 
 The policy port was accepted in #232 on Core
-`c7b16007467085be997f8dc3025e90e78649b00a`. Dependency-only #234 now selects
+`c7b16007467085be997f8dc3025e90e78649b00a`. Historical dependency-only #234 selected
 Core `7afef43f3d3b981094e37dcb3062b6e3a4f3d674`, normal test Secrets
 `a3ca9634574484a0018bf73b375d94fab70f169a` and SDK
 `220f63169e4bac79653937e97727406255279f7b`. The port, client, tests and fixture
