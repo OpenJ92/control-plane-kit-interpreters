@@ -1,3 +1,14 @@
+Current dependency selection (#234): accepted Core
+`7afef43f3d3b981094e37dcb3062b6e3a4f3d674`, test Secrets
+`a3ca9634574484a0018bf73b375d94fab70f169a`, and its accepted SDK
+`220f63169e4bac79653937e97727406255279f7b`. This changes only dependency and
+existing provenance coordinates. Runtime source, the #232 policy client, test
+assertions, three-value provider fixture, extras and owning runner are unchanged.
+The normal pinned Docker gate must establish this cohort's compatibility;
+[issue #234](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/234)
+owns its evidence. No E fixture adoption, live acceptance or image publication is
+implied. Earlier selections and evidence below retain their historical coordinates.
+
 Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py).
 
 Interpreters #230 selects actual Secrets #79 merge

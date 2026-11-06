@@ -1,6 +1,17 @@
+Current dependency selection (#234): accepted Core
+`7afef43f3d3b981094e37dcb3062b6e3a4f3d674`, test Secrets
+`a3ca9634574484a0018bf73b375d94fab70f169a`, and its accepted SDK
+`220f63169e4bac79653937e97727406255279f7b`. This changes only dependency and
+existing provenance coordinates. Runtime source, the #232 policy client, test
+assertions, three-value provider fixture, extras and owning runner are unchanged.
+The normal pinned Docker gate must establish this cohort's compatibility;
+[issue #234](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/234)
+owns its evidence. No E fixture adoption, live acceptance or image publication is
+implied. Earlier selections and evidence below retain their historical coordinates.
+
 # Selected secret installation checkpoint (#191)
 
-Current Interpreters #230 selects Core
+Historical Interpreters #230 selects Core
 `fec0816281aeb83ede98616adcc4f96dfe5777a8`, actual Secrets #79 merge
 `46e0718664c425d002f2420a6ad1f996be62b2c5` and SDK #73 merge
 `cd4722fbfb942e7c2467a39b3cd0e32ded4a90ac`. Consumed selection, grant,
