@@ -4,7 +4,9 @@ Current dependency selection (#244): accepted Core
 `d61b374cb2a23d773c31748f47f88169499298b7`. Secrets and SDK select this same Core.
 This changes only metadata and existing exact provenance coordinates from the
 reconciled #242 baseline. Runtime source, the #232 policy client and all 13 policy
-tests, assertions, provider fixtures, extras and owning runner are unchanged.
+tests, assertions, extras and owning runner are unchanged. The existing provider
+fixtures adopt the accepted explicit seed, policy-store and exact-intent contracts;
+see [the fixture handoff](https://github.com/OpenJ92/control-plane-kit-interpreters/pull/245#issuecomment-6691713844).
 The normal pinned Docker gate owns resolver and package compatibility evidence;
 [issue #244](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/244)
 records its result. No new signing/sample implementation, image/installation pin,
