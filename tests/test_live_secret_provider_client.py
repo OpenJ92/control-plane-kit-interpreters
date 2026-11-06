@@ -65,10 +65,11 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                             "subject": "interpreter-client",
                             "token": token,
                             "grants": [
-                                {"action": "secret.metadata", "workspace_id": "workspace-1"},
+                                {"action": "secret.metadata", "workspace_id": "workspace-1", "intents": []},
                                 {
                                     "action": "secret.write",
                                     "workspace_id": "workspace-1",
+                                    "intents": ["cloudflare.tunnel-token"],
                                 },
                                 {
                                     "action": "secret.generate-delegation-key",
@@ -86,6 +87,7 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                                 {
                                     "action": "secret.revoke",
                                     "workspace_id": "workspace-1",
+                                    "intents": [],
                                 },
                             ],
                         }
@@ -109,8 +111,13 @@ class LiveSecretProviderClientTests(unittest.TestCase):
             process = _start_provider(port=port, environment=environment)
             stdout = ""
             stderr = ""
+            startup_failed = False
             try:
-                _wait_ready(port)
+                try:
+                    _wait_ready(port)
+                except AssertionError:
+                    startup_failed = True
+                    raise
                 endpoint = SecretProviderEndpointReference("provider-live")
                 credential = SecretReference("secret://bootstrap/provider-token")
                 registry = SecretProviderBootstrapRegistry(
@@ -268,7 +275,10 @@ class LiveSecretProviderClientTests(unittest.TestCase):
                     canonical_provider_secret_id(reference).startswith("cpk1_")
                 )
             finally:
+                startup_returncode = process.poll() if startup_failed else None
                 stdout, stderr = _stop_provider(process)
+                if startup_failed:
+                    raise AssertionError(_startup_failure_evidence(startup_returncode, stderr)) from None
 
             rows = SqliteAuditStore(database).rows_for_tests()
             correlations = {
@@ -290,6 +300,36 @@ class LiveSecretProviderClientTests(unittest.TestCase):
             self.assertNotIn(token, leak_surface)
             self.assertNotIn(token, repr(client))
             self.assertNotIn(str(token_file), repr(client))
+
+    def test_startup_failure_evidence_never_emits_raw_child_output(self):
+        private = "private-stderr-token-and-path"
+        for text, expected in (
+                ("control_plane_kit_secrets.custody.ProviderCustodyRejected: " + private,
+                 "ProviderCustodyRejected"),
+                ("ValueError: " + private, "ValueError"),
+                ("UnrecognizedPrivateError: " + private, "unclassified")):
+            with self.subTest(expected=expected):
+                summary = _startup_failure_evidence(-15, text)
+                self.assertEqual(summary, "provider startup failed: exit=-15, exception=" + expected)
+                self.assertNotIn(private, summary)
+                self.assertLessEqual(len(summary), 160)
+        self.assertEqual(_startup_failure_evidence(private, private),
+            "provider startup failed: exit=unavailable, exception=unclassified")
+
+
+def _startup_failure_evidence(returncode: int | None, stderr: str) -> str:
+    """Report only a fixed exception-class allowlist and a bounded exit code."""
+    classes = (
+        ("control_plane_kit_secrets.custody.ProviderCustodyRejected:", "ProviderCustodyRejected"),
+        ("control_plane_kit_secrets.custody.ProviderCustodyUnavailable:", "ProviderCustodyUnavailable"),
+        ("control_plane_kit_secrets.bootstrap.ProviderConfigurationError:", "ProviderConfigurationError"),
+        ("control_plane_kit_secrets.control.SecretsControlConfigurationError:", "SecretsControlConfigurationError"),
+        ("ValueError:", "ValueError"), ("TypeError:", "TypeError"), ("RuntimeError:", "RuntimeError"),
+    )
+    observed = next((name for line in reversed(stderr[-8192:].splitlines())
+        for prefix, name in classes if line.startswith(prefix)), "unclassified")
+    code = returncode if type(returncode) is int and -255 <= returncode <= 255 else "unavailable"
+    return f"provider startup failed: exit={code}, exception={observed}"
 
 
 def _start_provider(*, port: int, environment: dict[str, str]) -> subprocess.Popen[str]:

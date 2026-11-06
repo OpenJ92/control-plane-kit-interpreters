@@ -27,6 +27,7 @@ from control_plane_kit_secrets.control import (
 )
 from control_plane_kit_secrets.crypto import encode_master_key_for_file, load_master_key_file
 from control_plane_kit_secrets.custody import admit_provider_custody
+from control_plane_kit_secrets.provider_policy import ProviderPolicyStore
 
 
 def key(key_id):
@@ -137,14 +138,17 @@ class Provider:
         master = base / "master.key"
         master.write_text(encode_master_key_for_file(os.urandom(32)), encoding="ascii")
         master.chmod(0o600)
-        store, audit = admit_provider_custody(base / "secrets.sqlite3",
-            master_key=load_master_key_file(master, version="test"), provider_id="provider-a")
         intents = tuple(grant.intent.value for grant in value.resolutions)
         credentials = (ProviderCredential("fixture", "fixture-token", (
             ProviderGrant("secret.generate-delegation-key", "workspace-a", intents),
             ProviderGrant("secret.resolve", "workspace-a", intents))),)
+        database = base / "secrets.sqlite3"
+        store, audit = admit_provider_custody(database,
+            master_key=load_master_key_file(master, version="test"), provider_id="provider-a",
+            credentials=credentials)
+        policy_store = ProviderPolicyStore(database, provider_id="provider-a")
         self.client = TestClient(create_app(control=provider_control(),
-            initialize_provider=lambda: (store, audit, credentials), provider_id="provider-a"))
+            initialize_provider=lambda: (store, audit, credentials, policy_store), provider_id="provider-a"))
         testcase.addCleanup(self.client.close)
         self.calls = []
 

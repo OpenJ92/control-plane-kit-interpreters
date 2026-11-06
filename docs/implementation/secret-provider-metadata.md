@@ -1,13 +1,16 @@
-Current dependency selection (#234): accepted Core
-`7afef43f3d3b981094e37dcb3062b6e3a4f3d674`, test Secrets
-`a3ca9634574484a0018bf73b375d94fab70f169a`, and its accepted SDK
-`220f63169e4bac79653937e97727406255279f7b`. This changes only dependency and
-existing provenance coordinates. Runtime source, the #232 policy client, test
-assertions, three-value provider fixture, extras and owning runner are unchanged.
-The normal pinned Docker gate must establish this cohort's compatibility;
-[issue #234](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/234)
-owns its evidence. No E fixture adoption, live acceptance or image publication is
-implied. Earlier selections and evidence below retain their historical coordinates.
+Current dependency selection (#244): accepted Core
+`976901c609d950a557ec1e9966f018e8ff6e16aa`, accepted Secrets #87 / PR #88 merge
+`158b17ed10689360c4e1529a395b3ee2b47aecbc`, and its actual SDK
+`d61b374cb2a23d773c31748f47f88169499298b7`. Secrets and SDK select this same Core.
+This changes only metadata and existing exact provenance coordinates from the
+reconciled #242 baseline. Runtime source, the #232 policy client and all 13 policy
+tests, assertions, extras and owning runner are unchanged. The existing provider
+fixtures adopt the accepted explicit seed, policy-store and exact-intent contracts;
+see [the fixture handoff](https://github.com/OpenJ92/control-plane-kit-interpreters/pull/245#issuecomment-6691713844).
+The normal pinned Docker gate owns resolver and package compatibility evidence;
+[issue #244](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/244)
+records its result. No new signing/sample implementation, image/installation pin,
+publication or live acceptance is implied. Earlier notes retain historical coordinates.
 
 # Exact metadata and resolution (#190)
 
