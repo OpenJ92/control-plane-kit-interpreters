@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import re
-from typing import Callable, Mapping, TypeVar
+from typing import Callable, Mapping, TypeVar, TYPE_CHECKING
 
 from control_plane_kit_core.planning import (
     ActivityOperation,
@@ -94,7 +94,8 @@ from control_plane_kit_interpreters.docker.sdk import (
 )
 from control_plane_kit_interpreters.probes.security import ProbeAddressPolicy
 from control_plane_kit_interpreters.invocations import InvocationPortError, control_errors, invoke
-from control_plane_kit_interpreters.probes.http_sample_check import HttpSampleCheckExecutor, HttpSampleUnavailable
+if TYPE_CHECKING:
+    from control_plane_kit_interpreters.probes.http_sample_check import HttpSampleCheckExecutor
 from control_plane_kit_interpreters.secrets import (
     _PreparedSecretResolver,
     ImagePullCredentialDenied,
@@ -216,8 +217,10 @@ class DockerRuntimeInterpreter:
     def __post_init__(self) -> None:
         if type(self.require_invocations) is not bool:
             raise TypeError("require_invocations must be a bool")
-        if self.http_sample_executor is not None and type(self.http_sample_executor) is not HttpSampleCheckExecutor:
-            raise TypeError("HTTP sample executor must be the configured native executor")
+        if self.http_sample_executor is not None:
+            from control_plane_kit_interpreters.probes.http_sample_check import HttpSampleCheckExecutor
+            if type(self.http_sample_executor) is not HttpSampleCheckExecutor:
+                raise TypeError("HTTP sample executor must be the configured native executor")
         if (self.client is None) == (self.local_client_config is None):
             raise ValueError("Docker runtime requires exactly one client or local policy")
         if self.local_client_config is not None:
@@ -416,6 +419,7 @@ class DockerRuntimeInterpreter:
         if type(request.operation) is WaitForHealthy and sample_support is not None:
             if self.http_sample_executor is None or sample_support is not self.http_sample_support:
                 raise InvocationPortError("HTTP sample capability does not match the configured executor")
+            from control_plane_kit_interpreters.probes.http_sample_check import HttpSampleUnavailable
             # Select this arm before Docker acquisition, endpoint inspection or
             # private helper selection. A missing sample capability never falls
             # through to the ordinary private verification branch.
