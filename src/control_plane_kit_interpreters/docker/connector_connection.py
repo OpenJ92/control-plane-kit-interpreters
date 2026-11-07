@@ -105,12 +105,17 @@ class DockerConnectorConnectionQualifier:
     product_reference: ProductReference
     image_reference: str
     profile: ConnectorConnectionProfile = ConnectorConnectionProfile.NATIVE_READER_V1
+    http_sample_executor: object | None = field(default=None, repr=False, kw_only=True)
 
     def __post_init__(self):
         if (type(self.product_reference) is not ProductReference
                 or type(self.image_reference) is not str
                 or type(self.profile) is not ConnectorConnectionProfile):
             raise TypeError("native connection qualifier configuration is invalid")
+        if self.http_sample_executor is not None:
+            from control_plane_kit_interpreters.probes.http_sample_check import HttpSampleCheckExecutor
+            if type(self.http_sample_executor) is not HttpSampleCheckExecutor:
+                raise TypeError("native sample composition is invalid")
 
     def qualify(self, *, activity_id, plan, current, desired, material,
                 authority_ref) -> ConnectorConnectionQualification | None:
@@ -189,6 +194,11 @@ class DockerConnectorConnectionQualifier:
         if runtime_id not in current.graph.runtimes:
             # Freshness requires actual creation obligations in the complete pair.
             compiled = compile_graph_activity_plan(current, desired)
+            if self.http_sample_executor is not None:
+                from control_plane_kit_core.planning import compile_http_sample_bootstrap_activity_plan
+                sample = compile_http_sample_bootstrap_activity_plan(current, desired)
+                if plan == sample and sample.ready_for_execution:
+                    compiled = sample
             operations = tuple(item.operation for item in compiled.activities)
             if (plan != compiled or not compiled.ready_for_execution
                     or gateway_id in current.graph.nodes or node.node_id in current.graph.nodes
@@ -263,6 +273,7 @@ class DockerConnectorConnectionObserver:
     image_reference: str
     clock: Callable[[], datetime]
     profile: ConnectorConnectionProfile = ConnectorConnectionProfile.NATIVE_READER_V1
+    http_sample_executor: object | None = field(default=None, repr=False, kw_only=True)
     _qualification: DockerConnectorConnectionQualifier = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
@@ -271,6 +282,7 @@ class DockerConnectorConnectionObserver:
         try:
             qualification = DockerConnectorConnectionQualifier(
                 self.product_reference, self.image_reference, self.profile,
+                http_sample_executor=self.http_sample_executor,
             )
         except TypeError:
             raise TypeError("native connection observer configuration is invalid") from None
