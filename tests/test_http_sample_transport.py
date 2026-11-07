@@ -105,7 +105,7 @@ class HttpSampleTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 1)
         outbound, = self.calls
         self.assertEqual((outbound.method, str(outbound.url)), ("POST", "https://8.8.8.8/cpk/verification/http"))
-        self.assertEqual(outbound.headers["Host"], "gateway.example.invalid")
+        self.assertEqual(outbound.headers["Host"], "gateway.example.invalid:443")
         self.assertEqual(outbound.headers["Authorization"], "Bearer " + self.credentials.transit.decode())
         self.assertEqual(json.loads(outbound.content), dict(profile="cpk-gateway-http-verification-sample-request.v1",
             target_id=self.request.route_id, request=self.request.descriptor(),
