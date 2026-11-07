@@ -72,8 +72,8 @@ def inputs(api):
 
 
 def success(request, check):
-    return HttpVerificationSampleResultCodec(request, check).encode_canonical_bytes(
-        HttpVerificationSampleResult(request, VerificationOutcome.PASSED, HttpVerificationEvidence(200, 0)))
+    return HttpVerificationSampleResult(request, VerificationOutcome.PASSED,
+        HttpVerificationEvidence(200, 0)).canonical_bytes(installed_check=check)
 
 
 class HttpSampleTransportTests(unittest.IsolatedAsyncioTestCase):
