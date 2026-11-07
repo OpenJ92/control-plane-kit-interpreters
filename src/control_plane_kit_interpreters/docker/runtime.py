@@ -94,6 +94,7 @@ from control_plane_kit_interpreters.docker.sdk import (
 )
 from control_plane_kit_interpreters.probes.security import ProbeAddressPolicy
 from control_plane_kit_interpreters.invocations import InvocationPortError, control_errors, invoke
+from control_plane_kit_interpreters.probes.http_sample_check import HttpSampleCheckExecutor, HttpSampleUnavailable
 from control_plane_kit_interpreters.secrets import (
     _PreparedSecretResolver,
     ImagePullCredentialDenied,
@@ -209,11 +210,14 @@ class DockerRuntimeInterpreter:
     )
     docker_module: object | None = field(default=None, repr=False, kw_only=True)
     require_invocations: bool = field(default=False, kw_only=True)
+    http_sample_executor: HttpSampleCheckExecutor | None = field(default=None, repr=False, kw_only=True)
     _invocations: object | None = field(default=None, repr=False, kw_only=True)
 
     def __post_init__(self) -> None:
         if type(self.require_invocations) is not bool:
             raise TypeError("require_invocations must be a bool")
+        if self.http_sample_executor is not None and type(self.http_sample_executor) is not HttpSampleCheckExecutor:
+            raise TypeError("HTTP sample executor must be the configured native executor")
         if (self.client is None) == (self.local_client_config is None):
             raise ValueError("Docker runtime requires exactly one client or local policy")
         if self.local_client_config is not None:
@@ -221,6 +225,10 @@ class DockerRuntimeInterpreter:
                 raise TypeError("Docker runtime local policy is invalid")
         elif self.docker_module is not None:
             raise ValueError("Docker runtime module injection requires a local policy")
+
+    @property
+    def http_sample_support(self):
+        return None if self.http_sample_executor is None else self.http_sample_executor.http_sample_support
 
     def execute(self, request: RuntimeEffectRequest, *, invocations=None) -> RuntimeEffectResult:
         controls = (InvocationPortError, *control_errors(
@@ -404,6 +412,21 @@ class DockerRuntimeInterpreter:
             return _unsupported(request, "docker.unsupported-runtime-kind")
         if type(request.operation) is WaitForHealthy and not callable(getattr(invocations, "for_check", None)):
             raise InvocationPortError("ordinary verification requires a per-check invocation port")
+        sample_support = getattr(invocations, "http_sample_support", None)
+        if type(request.operation) is WaitForHealthy and sample_support is not None:
+            if self.http_sample_executor is None or sample_support is not self.http_sample_support:
+                raise InvocationPortError("HTTP sample capability does not match the configured executor")
+            # Select this arm before Docker acquisition, endpoint inspection or
+            # private helper selection. A missing sample capability never falls
+            # through to the ordinary private verification branch.
+            try:
+                runtime_effect_intent_for_request(request)
+                return self._wait_for_healthy(request, invocations=invocations, http_samples=True)
+            except controls:
+                raise
+            except HttpSampleUnavailable:
+                return RuntimeEffectResult.uncertain(request.effect_id, RuntimeEffectFailure(
+                    "docker.http-sample-unavailable", "Authenticated HTTP sample is unavailable"))
         resolver = (_PreparedSecretResolver(self.authorized_secret_resolver, invocations)
             if self.authorized_secret_resolver is not None else None)
         prepared = replace(self, authorized_secret_resolver=resolver,
@@ -1050,6 +1073,7 @@ class DockerRuntimeInterpreter:
         *,
         endpoints=None,
         invocations=None,
+        http_samples=False,
     ) -> RuntimeEffectResult:
         material = _single_product(request)
         checks = material.product.runtime_contract.verification.checks
@@ -1061,7 +1085,7 @@ class DockerRuntimeInterpreter:
                     "node_id": material.node_id,
                 },
             )
-        if endpoints is None:
+        if endpoints is None and not http_samples:
             endpoints = {
                 observation.socket_name: observation
                 for observation in self._runtime_private_endpoint_observations(request, material)
@@ -1069,14 +1093,14 @@ class DockerRuntimeInterpreter:
         completed: list[dict[str, object]] = []
         observations: list[VerificationCompleted] = []
         for check in checks:
-            endpoint = endpoints.get(check.provider_socket)
-            if endpoint is None:
+            endpoint = None if http_samples else endpoints.get(check.provider_socket)
+            if endpoint is None and not http_samples:
                 return _failed(
                     request,
                     "docker.health-endpoint-missing",
                     "health check provider socket has no runtime endpoint",
                 )
-            if not isinstance(endpoint.address, LiteralEndpointMaterial):
+            if not http_samples and not isinstance(endpoint.address, LiteralEndpointMaterial):
                 return _failed(
                     request,
                     "docker.health-endpoint-unresolved",
@@ -1084,14 +1108,19 @@ class DockerRuntimeInterpreter:
                 )
             if not isinstance(check, (HttpCheck, PostgresQueryCheck)):
                 return _unsupported(request, "docker.health-check-unsupported")
+            if http_samples and type(check) is not HttpCheck:
+                return _unsupported(request, "docker.http-sample-check-unsupported")
             child = None
             if invocations is not None:
                 child = invocations.for_check(check.check_id)
                 control_errors(child, required=True)
                 if (child.control_error is not invocations.control_error
-                        or not hasattr(child, "credential_grant")):
+                        or (not http_samples and not hasattr(child, "credential_grant"))
+                        or (http_samples and not callable(getattr(child, "prepare_http_sample", None)))):
                     raise InvocationPortError("ordinary verification child port is invalid")
-            if isinstance(check, HttpCheck):
+            if http_samples:
+                result = self.http_sample_executor.execute(request, check, child)
+            elif isinstance(check, HttpCheck):
                 result = invoke(child, "ordinary-verification-check",
                     lambda: self._execute_http_health_check(material, request, check, endpoint))
             elif isinstance(check, PostgresQueryCheck):
