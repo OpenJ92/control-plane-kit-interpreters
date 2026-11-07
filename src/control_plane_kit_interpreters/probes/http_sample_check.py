@@ -142,7 +142,7 @@ class HttpSampleCheckExecutor:
             and left.resolution_grant.correlation_id != right.resolution_grant.correlation_id)
         # Validate the selected public route before touching either secret. This
         # uses only unsigned Core grants; no compact token is emitted here.
-        grants = self._grants(value, request, 1)
+        grants = self._grants(value, request, min(1, check.policy.timeout_seconds))
         _destination(value.destination, request, SignedHttpSampleCredentials(b"", b"", *grants))
 
     def _resolve(self, selected):
@@ -158,7 +158,10 @@ class HttpSampleCheckExecutor:
     def _grants(self, value, request, remaining):
         now = self.clock()
         _require(type(now) in (int, float) and math.isfinite(now) and 0 <= now <= 2**53 - 2)
-        issued, expires = math.floor(now), math.ceil(now + min(5, remaining))
+        issued, expires = math.floor(now), math.floor(now + min(5, remaining))
+        # JWT epochs are integral. Never round the authority window beyond the
+        # available original probe budget; refuse if no future epoch fits.
+        _require(expires > now)
         return tuple(HttpVerificationSampleGrant(request=request, purpose=purpose,
             issuer=key.issuer, key_id=key.public_key.key_id, audience=audience,
             issued_at=issued, not_before=issued, expires_at=expires, jti=uuid4().hex)

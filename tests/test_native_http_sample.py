@@ -3,6 +3,7 @@ import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 import json
+import time
 import unittest
 from unittest.mock import patch
 
@@ -165,7 +166,7 @@ class NativeHttpSampleTests(unittest.TestCase):
 
     def test_original_attempt_timeout_and_interval_both_contribute_to_overall_budget(self):
         check = replace(self.prepared.check, policy=VerificationPolicy(
-            timeout_seconds=0.1, interval_seconds=0.2, maximum_attempts=2))
+            timeout_seconds=1, interval_seconds=1.2, maximum_attempts=2))
         product = self.runtime.products[0].product
         material = replace(self.runtime.products[0], product=replace(product,
             runtime_contract=replace(product.runtime_contract, verification=VerificationContract((check,)))))
@@ -184,7 +185,30 @@ class NativeHttpSampleTests(unittest.TestCase):
                 HttpVerificationEvidence(200 if outcome is VerificationOutcome.PASSED else 503, 0))
             return httpx.Response(200, content=result.canonical_bytes(installed_check=check),
                                   headers={"content-type": "application/json"})
-        self.executor = replace(self.executor, client=replace(self.client, transport=httpx.MockTransport(gateway)))
+        started = time.monotonic()
+        clock = lambda: 100 + time.monotonic() - started
+        self.executor = replace(self.executor, clock=clock,
+            client=replace(self.client, clock=clock, transport=httpx.MockTransport(gateway)))
         self.interpreter = replace(self.interpreter, http_sample_executor=self.executor)
         self.assertIs(self.execute().kind, EffectResultKind.SUCCEEDED)
         self.assertEqual(len(self.posts), 2)
+
+    def test_fractional_window_without_future_integer_expiry_never_emits_or_sends(self):
+        check = replace(self.prepared.check, policy=VerificationPolicy(
+            timeout_seconds=0.1, interval_seconds=0.001, maximum_attempts=1))
+        material = self.runtime.products[0]
+        material = replace(material, product=replace(material.product,
+            runtime_contract=replace(material.product.runtime_contract, verification=VerificationContract((check,)))))
+        self.runtime = replace(self.runtime, products=(material,))
+        self.prepared = replace(self.prepared, check=check, request_template=replace(
+            self.prepared.request_template, check_digest=http_verification_check_digest(check),
+            request_fingerprint=runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(self.runtime))))
+        self.executor = replace(self.executor, clock=lambda: 100.2)
+        self.interpreter = replace(self.interpreter, http_sample_executor=self.executor)
+        with patch("control_plane_kit_interpreters.probes.http_sample_check.jwt.encode") as encode:
+            result = self.execute()
+        self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+        self.assertEqual(result.observations, ())
+        self.assertEqual(self.resolved, [])
+        self.assertEqual(self.posts, [])
+        encode.assert_not_called()
