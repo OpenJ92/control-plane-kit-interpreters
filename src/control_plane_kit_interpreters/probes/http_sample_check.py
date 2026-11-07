@@ -25,7 +25,9 @@ from control_plane_kit_core.runtime_effects import RuntimeEffectRequest
 from control_plane_kit_core.runtime_effect_observation import (
     runtime_effect_intent_for_request, runtime_effect_intent_fingerprint,
 )
-from control_plane_kit_core.receiver_identity import receiver_node_control_audience
+from control_plane_kit_core.receiver_identity import receiver_node_control_audience, NodeControlAuthorityContext
+from control_plane_kit_core.public_ingress import NamedPublicIngressCodec, PublicIngressExposure
+from control_plane_kit_core.products import ProductReference
 from control_plane_kit_core.secrets import (
     SecretResolutionGrant, require_authorized_secret, http_verification_sample_signing_intent_for,
 )
@@ -59,6 +61,15 @@ class HttpSampleCheckInput:
     workload_key: HttpSampleSigningKey
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class HttpSampleRouteInput:
+    """Actual owner's acquired public selection, before any signing-use rows."""
+    destination: SelectedHttpSampleGateway
+    checks: tuple[HttpCheck, ...]
+    authority_context: NodeControlAuthorityContext
+    workload_product: ProductReference
+
+
 def _require(condition):
     if condition is not True:
         raise ValueError
@@ -78,7 +89,39 @@ class HttpSampleCheckExecutor:
                  and self.http_sample_support is not None
                  and callable(getattr(self.authorized_secret_resolver, "resolve", None)))
 
-    def execute(self, runtime_request, check, child):
+    def acquire(self, runtime_request, parent):
+        """Read once inside the existing acquisition invocation, then validate."""
+        controls = control_errors(parent, required=True)
+        try:
+            value = parent.acquire_http_sample_route()
+            _require(type(runtime_request) is RuntimeEffectRequest and type(value) is HttpSampleRouteInput
+                and len(runtime_request.products) == 1
+                and type(value.destination) is SelectedHttpSampleGateway
+                and type(value.checks) is tuple and len(value.checks) > 0
+                and all(type(check) is HttpCheck for check in value.checks)
+                and type(value.authority_context) is NodeControlAuthorityContext
+                and type(value.workload_product) is ProductReference)
+            runtime_effect_intent_for_request(runtime_request)
+            material = runtime_request.products[0]
+            target, gateway = value.destination.route.target, value.destination.gateway_target
+            ingress = NamedPublicIngressCodec().decode(value.destination.ingress.descriptor())
+            _require(value.workload_product == material.reference
+                and value.checks == tuple(material.product.runtime_contract.verification.checks)
+                and value.authority_context.authored_graph_id == runtime_request.source.desired_graph_id
+                and (target.workspace_id.value, target.runtime_id.value, target.node_id.value)
+                    == (runtime_request.source.workspace_id, material.runtime_id, runtime_request.operation.target.node_id)
+                and gateway.workspace_id == target.workspace_id and gateway.runtime_id == target.runtime_id
+                and ingress == value.destination.ingress and ingress.exposure is PublicIngressExposure.HTTPS
+                and ingress.target.node_id == gateway.node_id.value
+                and ingress.target.provider_socket == value.destination.transit_provider_socket_name)
+            return value
+        except controls:
+            raise
+        except Exception:
+            failure = HttpSampleUnavailable()
+        raise failure
+
+    def execute(self, runtime_request, check, child, *, acquired):
         controls = control_errors(child, required=True)
         try:
             _require(type(runtime_request) is RuntimeEffectRequest and type(check) is HttpCheck)
@@ -87,6 +130,9 @@ class HttpSampleCheckExecutor:
                 + (policy.maximum_attempts - 1) * policy.interval_seconds)
             prepared = child.prepare_http_sample()
             self._context(prepared, runtime_request, check)
+            _require(type(acquired) is HttpSampleRouteInput
+                and prepared.destination == acquired.destination and check in acquired.checks
+                and prepared.request_template.authority_context == acquired.authority_context)
             keys = (prepared.transit_key, prepared.workload_key)
             privates = []
             for selected in keys:

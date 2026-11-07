@@ -424,8 +424,10 @@ class DockerRuntimeInterpreter:
             # private helper selection. A missing sample capability never falls
             # through to the ordinary private verification branch.
             try:
-                runtime_effect_intent_for_request(request)
-                return self._wait_for_healthy(request, invocations=invocations, http_samples=True)
+                acquired = invoke(invocations, "ordinary-verification-acquisition",
+                    lambda: self.http_sample_executor.acquire(request, invocations))
+                return self._wait_for_healthy(request, invocations=invocations,
+                                             http_samples=True, http_sample_route=acquired)
             except controls:
                 raise
             except HttpSampleUnavailable:
@@ -1078,6 +1080,7 @@ class DockerRuntimeInterpreter:
         endpoints=None,
         invocations=None,
         http_samples=False,
+        http_sample_route=None,
     ) -> RuntimeEffectResult:
         material = _single_product(request)
         checks = material.product.runtime_contract.verification.checks
@@ -1123,7 +1126,7 @@ class DockerRuntimeInterpreter:
                         or (http_samples and not callable(getattr(child, "prepare_http_sample", None)))):
                     raise InvocationPortError("ordinary verification child port is invalid")
             if http_samples:
-                result = self.http_sample_executor.execute(request, check, child)
+                result = self.http_sample_executor.execute(request, check, child, acquired=http_sample_route)
             elif isinstance(check, HttpCheck):
                 result = invoke(child, "ordinary-verification-check",
                     lambda: self._execute_http_health_check(material, request, check, endpoint))

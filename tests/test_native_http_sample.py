@@ -27,10 +27,10 @@ from control_plane_kit_interpreters.docker import DockerRuntimeInterpreter
 from control_plane_kit_interpreters.invocations import InvocationPortError
 from control_plane_kit_interpreters.probes import http_sample_transport as transport_api
 from control_plane_kit_interpreters.probes.http_sample_check import (
-    HttpSampleCheckExecutor, HttpSampleCheckInput, HttpSampleSigningKey,
+    HttpSampleCheckExecutor, HttpSampleCheckInput, HttpSampleSigningKey, HttpSampleRouteInput,
 )
-from health_signing_fixtures import fixture, private_pem
-from test_health_invocations import RecordingPort
+from health_signing_fixtures import world, private_pem
+from test_health_invocations import RecordingPort, Denied, RecordingUncertain
 from test_http_sample_transport import inputs
 from test_docker_runtime_interpreter import _product_with_health_check, _material, _request
 
@@ -52,7 +52,7 @@ class NativeHttpSampleTests(unittest.TestCase):
             activity_id="activity-a", effect_id="event-started", check_digest=http_verification_check_digest(check),
             request_fingerprint=runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(self.runtime)))
         destination = replace(destination, gateway_target=gateway, route=replace(destination.route, target=target))
-        values = fixture()
+        values = world()
         purposes = (core.DelegationKeyPurpose.GATEWAY_HTTP_VERIFICATION_SAMPLE_TRANSIT,
                     core.DelegationKeyPurpose.WORKLOAD_HTTP_VERIFICATION_SAMPLE)
         grants = tuple(replace(grant, intent=http_verification_sample_signing_intent_for(purpose),
@@ -93,10 +93,21 @@ class NativeHttpSampleTests(unittest.TestCase):
             public_resolver=PublicResolver(), transport=httpx.MockTransport(gateway))
         self.executor = HttpSampleCheckExecutor(Resolver(), self.client, lambda: 100, self.support)
         self.child = RecordingPort(self.events)
-        self.child.prepare_http_sample = lambda: self.prepared
+        self.prepares = []
+        def prepare():
+            self.assertIn(("record", "ordinary-verification-acquisition", None, "returned"), self.events)
+            self.prepares.append(True)
+            return self.prepared
+        self.child.prepare_http_sample = prepare
         self.parent = RecordingPort(self.events)
         self.parent.http_sample_support = self.support
         self.parent.for_check = lambda _check: self.child
+        self.acquired = HttpSampleRouteInput(destination, (check,), template.authority_context,
+                                            self.runtime.products[0].reference)
+        def acquire():
+            self.events.append(("route-read",))
+            return self.acquired
+        self.parent.acquire_http_sample_route = acquire
         self.interpreter = DockerRuntimeInterpreter(client=SimpleNamespace(),
             http_sample_executor=self.executor, require_invocations=True)
 
@@ -120,6 +131,8 @@ class NativeHttpSampleTests(unittest.TestCase):
         self.assertEqual(observation.identity.node_id, "api")
         self.assertEqual(self.events[-1], ("record", "ordinary-verification-check", None, "returned"))
         self.assertEqual(sum(item[:2] == ("admit", "ordinary-verification-check") for item in self.events), 1)
+        self.assertEqual(self.events[:3], [("admit", "ordinary-verification-acquisition", None),
+            ("route-read",), ("record", "ordinary-verification-acquisition", None, "returned")])
 
     def test_both_private_fingerprints_checked_before_either_token_emission(self):
         self.secrets[self.keys[1].resolution_grant.authorization_id] = self.secrets[self.keys[0].resolution_grant.authorization_id]
@@ -174,6 +187,7 @@ class NativeHttpSampleTests(unittest.TestCase):
         self.prepared = replace(self.prepared, check=check, request_template=replace(
             self.prepared.request_template, check_digest=http_verification_check_digest(check),
             request_fingerprint=runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(self.runtime))))
+        self.acquired = replace(self.acquired, checks=(check,))
         # The controlled peer encodes using the original check object captured
         # above; its wire policy must agree with the currently selected check.
         async def gateway(request):
@@ -203,6 +217,7 @@ class NativeHttpSampleTests(unittest.TestCase):
         self.prepared = replace(self.prepared, check=check, request_template=replace(
             self.prepared.request_template, check_digest=http_verification_check_digest(check),
             request_fingerprint=runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(self.runtime))))
+        self.acquired = replace(self.acquired, checks=(check,))
         self.executor = replace(self.executor, clock=lambda: 100.2)
         self.interpreter = replace(self.interpreter, http_sample_executor=self.executor)
         with patch("control_plane_kit_interpreters.probes.http_sample_check.jwt.encode") as encode:
@@ -212,3 +227,41 @@ class NativeHttpSampleTests(unittest.TestCase):
         self.assertEqual(self.resolved, [])
         self.assertEqual(self.posts, [])
         encode.assert_not_called()
+
+    def test_changed_prepared_ingress_refuses_before_any_signing_resolution(self):
+        destination = self.prepared.destination
+        self.prepared = replace(self.prepared, destination=replace(destination,
+            ingress=replace(destination.ingress, hostname="other.example.invalid")))
+        result = self.execute()
+        self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+        self.assertEqual(result.observations, ())
+        self.assertEqual(self.resolved, [])
+        self.assertEqual(self.posts, [])
+
+    def test_denied_or_ambiguous_acquisition_stops_before_prepare_resolution_or_send(self):
+        def denied(kind, _authorization):
+            if kind == "ordinary-verification-acquisition":
+                raise Denied()
+        def ambiguous(kind, _authorization, _outcome):
+            if kind == "ordinary-verification-acquisition":
+                raise RecordingUncertain()
+        for before, after, error in ((denied, None, Denied), (None, ambiguous, RecordingUncertain)):
+            with self.subTest(error=error.__name__):
+                self.parent.before, self.parent.after = before, after
+                with self.assertRaises(error):
+                    self.execute()
+        self.assertEqual(self.prepares, [])
+        self.assertEqual(self.resolved, [])
+        self.assertEqual(self.posts, [])
+
+    def test_unknown_route_read_stops_before_prepare_resolution_or_send(self):
+        def failed_read():
+            raise RuntimeError("private-owner-diagnostic")
+        self.parent.acquire_http_sample_route = failed_read
+        result = self.execute()
+        self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+        self.assertEqual(result.observations, ())
+        self.assertEqual(self.prepares, [])
+        self.assertEqual(self.resolved, [])
+        self.assertEqual(self.posts, [])
+        self.assertIn(("record", "ordinary-verification-acquisition", None, "unknown"), self.events)
