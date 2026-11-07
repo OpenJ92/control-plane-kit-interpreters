@@ -14,6 +14,9 @@ from control_plane_kit_core.http_verification_samples import (
     HttpVerificationSampleRequestCodec,
 )
 from control_plane_kit_core.operations.execution import EffectResultKind
+from control_plane_kit_core.runtime_effect_observation import (
+    runtime_effect_intent_for_request, runtime_effect_intent_fingerprint,
+)
 from control_plane_kit_core.planning import NodeTarget, WaitForHealthy
 from control_plane_kit_core.secrets import SecretResolved, SecretValue, http_verification_sample_signing_intent_for
 from control_plane_kit_core.verification import (
@@ -36,7 +39,7 @@ class NativeHttpSampleTests(unittest.TestCase):
         self.events, self.posts, self.resolved = [], [], []
         self.support = object()  # Identity supplied by composition, never authority.
         product = _product_with_health_check(policy=VerificationPolicy(
-            timeout_seconds=1, interval_seconds=0, maximum_attempts=2))
+            timeout_seconds=1, interval_seconds=0.001, maximum_attempts=2))
         check, = product.runtime_contract.verification.checks
         self.runtime = _request(WaitForHealthy(NodeTarget("api")), products=(_material(product),))
         original, _, destination, _ = inputs(transport_api)
@@ -45,7 +48,8 @@ class NativeHttpSampleTests(unittest.TestCase):
         gateway = replace(original.gateway_target, runtime_id=target.runtime_id)
         template = replace(original, target=target, gateway_target=gateway,
             authority_context=core.NodeControlAuthorityContext("graph-desired", "projection-a"),
-            activity_id="activity-a", effect_id="event-started", check_digest=http_verification_check_digest(check))
+            activity_id="activity-a", effect_id="event-started", check_digest=http_verification_check_digest(check),
+            request_fingerprint=runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(self.runtime)))
         destination = replace(destination, gateway_target=gateway, route=replace(destination.route, target=target))
         values = fixture()
         purposes = (core.DelegationKeyPurpose.GATEWAY_HTTP_VERIFICATION_SAMPLE_TRANSIT,
@@ -144,6 +148,15 @@ class NativeHttpSampleTests(unittest.TestCase):
         self.assertEqual(self.events[-1], ("record", "ordinary-verification-check", None, "unknown"))
         self.assertNotIn("peer-secret", str(result.descriptor()))
 
+    def test_wrong_original_effect_fingerprint_refuses_before_resolution_or_send(self):
+        self.prepared = replace(self.prepared, request_template=replace(
+            self.prepared.request_template, request_fingerprint="0" * 64))
+        result = self.execute()
+        self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+        self.assertEqual(result.observations, ())
+        self.assertEqual(self.resolved, [])
+        self.assertEqual(self.posts, [])
+
     def test_synchronous_runtime_arm_works_under_an_active_operator_event_loop(self):
         self.outcomes = [VerificationOutcome.PASSED]
         async def operator():
@@ -158,7 +171,8 @@ class NativeHttpSampleTests(unittest.TestCase):
             runtime_contract=replace(product.runtime_contract, verification=VerificationContract((check,)))))
         self.runtime = replace(self.runtime, products=(material,))
         self.prepared = replace(self.prepared, check=check, request_template=replace(
-            self.prepared.request_template, check_digest=http_verification_check_digest(check)))
+            self.prepared.request_template, check_digest=http_verification_check_digest(check),
+            request_fingerprint=runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(self.runtime))))
         # The controlled peer encodes using the original check object captured
         # above; its wire policy must agree with the currently selected check.
         async def gateway(request):

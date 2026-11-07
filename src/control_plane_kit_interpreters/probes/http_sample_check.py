@@ -22,6 +22,9 @@ from control_plane_kit_core.http_verification_samples import (
     HttpVerificationSampleRequest, HttpVerificationSampleGrant, HttpVerificationSampleResultCodec,
 )
 from control_plane_kit_core.runtime_effects import RuntimeEffectRequest
+from control_plane_kit_core.runtime_effect_observation import (
+    runtime_effect_intent_for_request, runtime_effect_intent_fingerprint,
+)
 from control_plane_kit_core.receiver_identity import receiver_node_control_audience
 from control_plane_kit_core.secrets import (
     SecretResolutionGrant, require_authorized_secret, http_verification_sample_signing_intent_for,
@@ -118,7 +121,9 @@ class HttpSampleCheckExecutor:
                      runtime.effect_id, runtime.source.desired_graph_id)
                  and request.target.node_id.value == runtime.operation.target.node_id)
         _require(len(runtime.products) == 1
-                 and request.target.runtime_id.value == runtime.products[0].runtime_id)
+                 and request.target.runtime_id.value == runtime.products[0].runtime_id
+                 and request.request_fingerprint == runtime_effect_intent_fingerprint(
+                     runtime_effect_intent_for_request(runtime)))
         purposes = (DelegationKeyPurpose.GATEWAY_HTTP_VERIFICATION_SAMPLE_TRANSIT,
                     DelegationKeyPurpose.WORKLOAD_HTTP_VERIFICATION_SAMPLE)
         for key, purpose in zip((value.transit_key, value.workload_key), purposes):
