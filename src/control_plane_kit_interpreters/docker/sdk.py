@@ -316,6 +316,7 @@ class DockerSdkResourceInspection:
     network_id: str | None = None
     network_attachments: tuple[DockerSdkNetworkAttachment, ...] | None = None
     started_at: str | None = field(default=None, repr=False, compare=False)
+    network_container_ids: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -1452,6 +1453,7 @@ class DockerSdkClient:
             network_id=network_id,
             network_attachments=attachments,
             started_at=_container_started_at(attrs) if include_runtime_identity else None,
+            network_container_ids=_network_container_ids(attrs) if include_network_identity else None,
         )
 
     def _labels(self, resource: Any) -> Mapping[str, str]:
@@ -2106,6 +2108,16 @@ def _network_attachments(attrs: Any) -> tuple[DockerSdkNetworkAttachment, ...] |
     if unavailable:
         return None
     return tuple(sorted(values, key=lambda value: value.network_id))
+
+
+def _network_container_ids(attrs: Any) -> tuple[str, ...] | None:
+    participants = attrs.get("Containers") if isinstance(attrs, Mapping) else None
+    if not isinstance(participants, Mapping) or len(participants) > 64:
+        return None
+    if any(not _is_docker_identity(identity) or not isinstance(details, Mapping)
+            for identity, details in participants.items()):
+        return None
+    return tuple(sorted(participants))
 
 
 def _is_network_alias(value: Any) -> bool:

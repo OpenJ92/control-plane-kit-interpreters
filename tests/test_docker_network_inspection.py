@@ -58,6 +58,55 @@ class DockerNetworkInspectionTests(unittest.TestCase):
         self.assertEqual(self.raw.containers.calls, [])
         self.assertFalse(self.network.started or self.network.stopped or self.network.removed)
 
+    def test_selected_network_participant_ids_are_private_copy_stable_and_not_extra_lookups(self):
+        other = "d" * 64
+        participants = {other: {"Name": "peer"}, CONTAINER: {"Name": "selected"}}
+        self.network.attrs["Containers"] = participants
+        first = self.sdk.inspect_network(NETWORK_A)
+        self.assertEqual(first.network_container_ids, (CONTAINER, other))
+        self.assertNotIn(CONTAINER, repr(first))
+        del participants[other]
+        second = self.sdk.inspect_network(NETWORK_A)
+        self.assertEqual(first.network_container_ids, (CONTAINER, other))
+        self.assertEqual(second.network_container_ids, (CONTAINER,))
+        self.assertEqual(first, second, "membership metadata must preserve existing snapshot equality")
+        self.assertEqual(self.raw.networks.calls, [NETWORK_A, NETWORK_A])
+        self.assertEqual(self.raw.containers.calls, [])
+        self.assertIsNone(self.sdk.inspect_container(CONTAINER).network_container_ids)
+
+    def test_selected_network_empty_and_unavailable_participant_sets_remain_distinct(self):
+        self.assertIsNone(self.sdk.inspect_network(NETWORK_A).network_container_ids)
+        self.network.attrs["Containers"] = {}
+        self.assertEqual(self.sdk.inspect_network(NETWORK_A).network_container_ids, ())
+        for participants in (None, [], {CONTAINER: None}, {"invalid": {}},
+                {CONTAINER: {}, "A" * 64: {}}, {f"{index:064x}": {} for index in range(65)}):
+            with self.subTest(participants=participants):
+                self.network.attrs["Containers"] = participants
+                self.assertIsNone(self.sdk.inspect_network(NETWORK_A).network_container_ids)
+
+    def test_selected_participant_reads_expose_peer_alias_and_name_without_routing_claim(self):
+        peer_id = "d" * 64
+        self.network.attrs["Containers"] = {CONTAINER: {}, peer_id: {}}
+        self.container.attrs["NetworkSettings"]["Networks"] = {"runtime": {
+            "NetworkID": NETWORK_A, "Aliases": ["root-a-postgres"]}}
+        peer = FakeResource("root-a-postgres", image="fixture", running=True)
+        peer.attrs["Id"] = peer_id
+        peer.attrs["NetworkSettings"]["Networks"] = {"runtime": {
+            "NetworkID": NETWORK_A, "Aliases": ["peer-only"]}}
+        self.raw.containers.resources[peer_id] = peer
+        members = self.sdk.inspect_network(NETWORK_A).network_container_ids
+        observed = {identity: self.sdk.inspect_container(identity) for identity in members}
+        self.assertEqual(observed[CONTAINER].network_attachments[0].aliases, ("root-a-postgres",))
+        self.assertEqual(observed[peer_id].name, "root-a-postgres")
+        self.assertNotIn("root-a-postgres", observed[peer_id].network_attachments[0].aliases)
+        peer.attrs["NetworkSettings"]["Networks"]["runtime"]["Aliases"] = ["root-a-postgres"]
+        duplicate = self.sdk.inspect_container(peer_id)
+        self.assertIn("root-a-postgres", duplicate.network_attachments[0].aliases)
+        self.assertEqual(duplicate.network_attachments[0].network_id, NETWORK_A)
+        self.assertEqual(self.raw.networks.calls, [NETWORK_A])
+        self.assertEqual(self.raw.containers.calls, [CONTAINER, peer_id, peer_id])
+        self.assertFalse(peer.started or peer.stopped or peer.removed)
+
     def test_same_payload_memberships_preserve_identity_address_and_snapshot(self):
         networks = {"z-first": {"NetworkID": NETWORK_B, "IPAddress": "172.19.0.3"},
             "a-second": {"NetworkID": NETWORK_A, "IPAddress": "172.18.0.2"}}

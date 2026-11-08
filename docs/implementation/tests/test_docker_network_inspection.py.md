@@ -48,3 +48,11 @@ right/wrong-network and changed aliases, immutable snapshots, repr privacy,
 missing/invalid versus observed empty evidence. They reuse the existing fake
 SDK lookup and never implement a routing or readiness decision. No new provider
 lookup or mutation is expected. The ordinary pinned ./test.sh remains the gate.
+
+Three follow-on methods cover selected network participant ID snapshots, private
+repr/compare-compatible copying, full-set unknown on missing/invalid/over-limit
+evidence, exact empty mapping and existing exact participant reads. The latter
+retains a peer's matching name separately from its nonmatching/matching aliases;
+it does not implement a uniqueness or SQL decision. The owning suite's documented
+local-core mode is explicitly released against exact Core054e for this selected
+source cohort because normal pinned Core lacks a native-sample test import.

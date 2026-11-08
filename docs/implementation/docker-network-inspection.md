@@ -84,3 +84,16 @@ The unchanged normal pinned ./test.sh owns validation, including its ordinary
 SDK witness and exact test-resource cleanup. No provider-contract opt-in, extra
 lookup, DNS query, mutation, resolver or SQL qualification is added. The consuming
 SQL adapter and Core/Operations observation admission remain separate owners.
+
+North's bounded local-network follow-on appends private compare=False
+`network_container_ids: tuple[str, ...] | None` on network inspection only.
+It snapshots the same selected network payload's Containers keys: at most 64
+canonical lowercase 64-hex IDs, sorted and copied only when the entire mapping
+is usable. Missing/malformed/over-limit membership stays None; actual {} gives
+(). No lookup or daemon inventory is added. Existing inspect_container reads
+can then obtain each exact participant's name, selected-network aliases and
+process generation. A peer's name can be resolvable even when its Aliases list
+omits that name. Reads are separate snapshots: consumers must bind the exact
+network and revalidate membership/target generation around the observation, or
+use an independently verified exact destination. This projects local provider
+facts and does not establish exclusive DNS routing or shared-daemon authority.
