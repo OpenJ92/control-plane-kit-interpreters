@@ -3,7 +3,7 @@
 `DockerSdkClient.inspect_network` now retains the selected resource's immutable
 Docker `Id` as `DockerSdkResourceInspection.network_id`. `inspect_container`
 retains its existing `container_id` and adds `network_attachments`, a tuple of
-public frozen `DockerSdkNetworkAttachment(network_id, private_address)` values.
+public frozen `DockerSdkNetworkAttachment(network_id, private_address, aliases=None)` values.
 The new identity/address fields come from the same already-fetched inspect
 payload, never from a positional join of the existing name/address maps.
 
@@ -25,8 +25,8 @@ remain available to current consumers.
 
 IDs must be 64 lowercase hexadecimal characters. Membership count is capped at
 64; each address is a canonical, unscoped numeric IP of at most 45 characters from
-the existing IPAddress field. This does not add a new GlobalIPv6Address source or
-alias inventory. Duplicate member IDs refuse; ordering is by immutable ID.
+the existing IPAddress field. This does not add a new GlobalIPv6Address source.
+Duplicate member IDs refuse; ordering is by immutable ID.
 Each member is copied into a frozen value, so later provider metadata mutation
 does not change the observed pair. Malformed metadata produces fixed bounded
 errors; private addresses are omitted from the new member value's repr.
@@ -53,3 +53,27 @@ The [target companion](tests/test_docker_network_inspection.py.md) records the
 behavioral laws and red-to-green evidence boundary. Core/Operations and dependency
 coordinates are unchanged. No live/provider mutation, image publication or
 original tunnel/DNS/token changes are included.
+
+## #2089 process generation and attachment aliases
+
+General container inspection now appends `started_at: str | None`, read only
+from the same payload's State.StartedAt. It preserves the provider's exact
+RFC3339 text, including nanoseconds, using the connector's existing 40-byte
+text bound and timestamp component rules. Missing, malformed and Docker's zero
+timestamp yield None, with no creation-time or container-ID fallback. Two
+observations of one container ID can therefore retain different process starts.
+This is generation metadata; it does not prove freshness, continuity or readiness.
+
+Each attachment appends `aliases: tuple[str, ...] | None`, copied only from that
+attachment's Aliases list. Missing/null/invalid evidence yields None; an observed
+empty list yields (). Up to 64 bounded Docker-name-shaped ASCII aliases of at
+most 255 characters are copied into a sorted, deduplicated tuple. The value and
+private address stay out of repr. Existing two-argument callers remain valid.
+An alias on a different immutable network ID cannot satisfy the selected
+membership. Even a matching alias establishes only this container's reported
+membership: it does not establish unique DNS routing or absence of other owners.
+
+The unchanged normal pinned ./test.sh owns validation, including its ordinary
+SDK witness and exact test-resource cleanup. No provider-contract opt-in, extra
+lookup, DNS query, mutation, resolver or SQL qualification is added. The consuming
+SQL adapter and Core/Operations observation admission remain separate owners.

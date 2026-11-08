@@ -75,6 +75,41 @@ class DockerNetworkInspectionTests(unittest.TestCase):
         self.assertEqual(self.raw.networks.calls, [])
         self.assertFalse(self.container.started or self.container.stopped or self.container.removed)
 
+    def test_alias_evidence_stays_on_its_exact_network_and_is_a_private_snapshot(self):
+        networks = {"right": {"NetworkID": NETWORK_A, "Aliases": ["root-a-postgres", "container-id"]},
+            "wrong": {"NetworkID": NETWORK_B, "Aliases": ["other-postgres"]}}
+        first, values = self.attachments(networks)
+        by_id = {value.network_id: value for value in values}
+        self.assertEqual(by_id[NETWORK_A].aliases, ("container-id", "root-a-postgres"))
+        self.assertNotIn("root-a-postgres", by_id[NETWORK_B].aliases)
+        self.assertNotIn("root-a-postgres", repr(first))
+        networks["right"]["Aliases"][0] = "changed-postgres"
+        second, changed = self.attachments(networks)
+        self.assertIn("root-a-postgres", by_id[NETWORK_A].aliases)
+        self.assertEqual(changed[0].aliases, ("changed-postgres", "container-id"))
+        self.assertNotEqual(first, second)
+        networks["right"]["Aliases"], networks["wrong"]["Aliases"] = [], ["root-a-postgres"]
+        _, moved = self.attachments(networks)
+        self.assertNotIn("root-a-postgres", moved[0].aliases)
+        self.assertIn("root-a-postgres", moved[1].aliases)
+        self.assertEqual(self.raw.networks.calls, [])
+        self.assertFalse(self.container.started or self.container.stopped or self.container.removed)
+
+    def test_alias_unknown_empty_and_bounded_invalid_evidence_remain_distinct(self):
+        details = {"NetworkID": NETWORK_A}
+        _, missing = self.attachments({"runtime": details})
+        self.assertIsNone(missing[0].aliases)
+        details["Aliases"] = []
+        _, empty = self.attachments({"runtime": details})
+        self.assertEqual(empty[0].aliases, ())
+        for aliases in (None, "root-a-postgres", [42], ["PRIVATE value"], ["a" * 256], ["a"] * 65):
+            with self.subTest(aliases=aliases):
+                details["Aliases"] = aliases
+                result, values = self.attachments({"runtime": details})
+                self.assertIsNone(values[0].aliases)
+                self.assertEqual(values[0].network_id, NETWORK_A)
+                self.assertNotIn("PRIVATE", repr(result))
+
     def test_same_names_do_not_hide_changed_network_identity(self):
         first = self.sdk.inspect_network("runtime")
         self.network.attrs["Id"] = NETWORK_B

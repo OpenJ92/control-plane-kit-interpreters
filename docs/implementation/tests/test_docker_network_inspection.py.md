@@ -42,3 +42,9 @@ The correction registers only the two new SDK parser origins and new fixed
 network-identity message. Existing malformed-observer cases gain actual bad
 network/member IDs; the lookalike-message test gains both messages and retains
 programming-error propagation. No assertion or SDK target is removed or weakened.
+
+For #2089, two SDK projection methods exercise per-network alias association,
+right/wrong-network and changed aliases, immutable snapshots, repr privacy,
+missing/invalid versus observed empty evidence. They reuse the existing fake
+SDK lookup and never implement a routing or readiness decision. No new provider
+lookup or mutation is expected. The ordinary pinned ./test.sh remains the gate.
