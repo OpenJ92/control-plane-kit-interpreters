@@ -278,6 +278,7 @@ class DockerSdkNetworkAttachment:
     network_id: str
     private_address: str | None = field(repr=False)
     aliases: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
+    dns_names: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         valid = _is_docker_identity(self.network_id)
@@ -289,10 +290,11 @@ class DockerSdkNetworkAttachment:
                     valid = str(ip_address(address)) == address
                 except ValueError:
                     valid = False
-        if self.aliases is not None:
-            valid = valid and type(self.aliases) is tuple and len(self.aliases) <= 64
-            if valid:
-                valid = all(_is_network_alias(alias) for alias in self.aliases)
+        for names in (self.aliases, self.dns_names):
+            if names is not None:
+                valid = valid and type(names) is tuple and len(names) <= 64
+                if valid:
+                    valid = all(_is_network_alias(name) for name in names)
         if not valid:
             raise ValueError("Docker network attachment is invalid")
 
@@ -2098,7 +2100,8 @@ def _network_attachments(attrs: Any) -> tuple[DockerSdkNetworkAttachment, ...] |
             address = None
         try:
             value = DockerSdkNetworkAttachment(details["NetworkID"], address,
-                _observed_network_aliases(details))
+                _observed_network_names(details, "Aliases"),
+                _observed_network_names(details, "DNSNames"))
         except ValueError:
             raise RuntimeError("Docker network membership inspection was malformed") from None
         if value.network_id in identities:
@@ -2124,11 +2127,11 @@ def _is_network_alias(value: Any) -> bool:
     return type(value) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", value) is not None
 
 
-def _observed_network_aliases(details: Mapping[str, Any]) -> tuple[str, ...] | None:
-    aliases = details.get("Aliases")
-    if type(aliases) is not list or len(aliases) > 64 or not all(_is_network_alias(value) for value in aliases):
+def _observed_network_names(details: Mapping[str, Any], field_name: str) -> tuple[str, ...] | None:
+    names = details.get(field_name)
+    if type(names) is not list or len(names) > 64 or not all(_is_network_alias(value) for value in names):
         return None
-    return tuple(sorted(set(aliases)))
+    return tuple(sorted(set(names)))
 
 
 def _container_started_at(attrs: Any) -> str | None:

@@ -56,3 +56,10 @@ retains a peer's matching name separately from its nonmatching/matching aliases;
 it does not implement a uniqueness or SQL decision. The owning suite's documented
 local-core mode is explicitly released against exact Core054e for this selected
 source cohort because normal pinned Core lacks a native-sample test import.
+
+The DNSNames correction adds two methods: a hostname-only peer match retained on
+its exact network despite a nonmatching top-level name/Aliases, immutable private
+snapshots with compatible equality, and missing/invalid/empty DNSNames with no
+synthesis from other name fields. Consumer ambiguity/refusal and SQL behavior are
+not implemented here. The ordinary daemon witness independently checks actual
+API1.45 DNSNames availability and configured-hostname inclusion.

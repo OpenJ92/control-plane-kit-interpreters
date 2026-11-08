@@ -107,6 +107,42 @@ class DockerNetworkInspectionTests(unittest.TestCase):
         self.assertEqual(self.raw.containers.calls, [CONTAINER, peer_id, peer_id])
         self.assertFalse(peer.started or peer.stopped or peer.removed)
 
+    def test_dns_names_retain_hostname_only_peer_on_exact_network_without_synthesis(self):
+        self.container.attrs["Config"]["Hostname"] = "root-a-postgres"
+        networks = {"selected": {"NetworkID": NETWORK_A, "Aliases": ["peer-only"],
+            "DNSNames": ["peer-only", "root-a-postgres", "peer-only"]},
+            "other": {"NetworkID": NETWORK_B, "Aliases": ["root-a-postgres"], "DNSNames": []}}
+        first, values = self.attachments(networks)
+        self.assertEqual(first.name, "gateway")
+        self.assertNotIn("root-a-postgres", values[0].aliases)
+        self.assertEqual(values[0].dns_names, ("peer-only", "root-a-postgres"))
+        self.assertEqual(values[1].dns_names, ())
+        self.assertNotIn("root-a-postgres", repr(first))
+        networks["selected"]["DNSNames"][1] = "changed-hostname"
+        second, changed = self.attachments(networks)
+        self.assertIn("root-a-postgres", values[0].dns_names)
+        self.assertNotIn("root-a-postgres", changed[0].dns_names)
+        self.assertEqual(first, second, "DNS metadata must preserve existing replacement comparisons")
+        self.assertEqual(self.raw.networks.calls, [])
+        self.assertEqual(self.raw.containers.calls, [CONTAINER, CONTAINER])
+
+    def test_dns_names_missing_invalid_and_observed_empty_remain_distinct(self):
+        details = {"NetworkID": NETWORK_A, "Aliases": ["root-a-postgres"]}
+        self.container.name = "root-a-postgres"
+        self.container.attrs["Config"]["Hostname"] = "root-a-postgres"
+        _, missing = self.attachments({"runtime": details})
+        self.assertIsNone(missing[0].dns_names, "other name fields must not fill missing DNSNames")
+        details["DNSNames"] = []
+        _, empty = self.attachments({"runtime": details})
+        self.assertEqual(empty[0].dns_names, ())
+        for names in (None, "root-a-postgres", [42], ["PRIVATE name"], ["a" * 256], ["a"] * 65):
+            with self.subTest(names=names):
+                details["DNSNames"] = names
+                result, values = self.attachments({"runtime": details})
+                self.assertIsNone(values[0].dns_names)
+                self.assertEqual(values[0].aliases, ("root-a-postgres",))
+                self.assertNotIn("PRIVATE", repr(result))
+
     def test_same_payload_memberships_preserve_identity_address_and_snapshot(self):
         networks = {"z-first": {"NetworkID": NETWORK_B, "IPAddress": "172.19.0.3"},
             "a-second": {"NetworkID": NETWORK_A, "IPAddress": "172.18.0.2"}}

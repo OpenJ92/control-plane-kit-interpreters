@@ -97,3 +97,23 @@ omits that name. Reads are separate snapshots: consumers must bind the exact
 network and revalidate membership/target generation around the observation, or
 use an independently verified exact destination. This projects local provider
 facts and does not establish exclusive DNS routing or shared-daemon authority.
+
+The supported named-route correction appends private compare=False
+`DockerSdkNetworkAttachment.dns_names: tuple[str, ...] | None`. Only that
+attachment's actual DNSNames list supplies it; name, Aliases and Config.Hostname
+are never fallback sources. The same 64-entry/255-character bounded name
+validation and copied sorted-set representation apply. Missing/null/invalid is
+None; an actual empty list is (). Moby's endpoint DNS names include configured
+hostname and short ID as well as name and aliases; see the
+[v28.5.1 source](https://github.com/moby/moby/blob/v28.5.1/daemon/container_operations.go#L579-L611).
+Consumers must use this exact per-network set for the supported ordinary authored
+single-label hostname, with every relevant peer available and no ambiguous match.
+It is not a general resolver for numeric, network-qualified or arbitrary DNS names.
+Membership/generation revalidation across the operation remains required.
+
+The existing owned installation witness verifies the actual daemon's API1.45
+response using the normal explicit Unix SDK factory, compares the projected set
+to that owned endpoint's real DNSNames, and checks configured hostname separately
+from Aliases. It creates no additional resource or resolver and closes the extra
+read-only client. Missing support stops with a precise precondition message and
+cannot count as route evidence; cleanup still runs through the ordinary ledger.
