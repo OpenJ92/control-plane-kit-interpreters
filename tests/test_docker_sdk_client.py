@@ -1357,7 +1357,8 @@ assert "docker" not in sys.modules
         self.assertEqual(first.container_id, second.container_id)
         self.assertEqual(getattr(first, "started_at", None), stamps[0])
         self.assertEqual(second.started_at, stamps[1])
-        self.assertNotEqual(first, second)
+        self.assertNotEqual(first.started_at, second.started_at)
+        self.assertEqual(first, second, "new metadata must preserve existing effect snapshot equality")
         self.assertFalse(resource.started or resource.stopped or resource.removed)
 
     def test_container_process_generation_preserves_missing_and_invalid_as_unknown(self) -> None:

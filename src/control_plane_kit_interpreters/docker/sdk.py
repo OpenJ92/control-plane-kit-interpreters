@@ -277,7 +277,7 @@ class DockerSdkNetworkAttachment:
 
     network_id: str
     private_address: str | None = field(repr=False)
-    aliases: tuple[str, ...] | None = field(default=None, repr=False)
+    aliases: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         valid = _is_docker_identity(self.network_id)
@@ -315,7 +315,7 @@ class DockerSdkResourceInspection:
     container_id: str | None = None
     network_id: str | None = None
     network_attachments: tuple[DockerSdkNetworkAttachment, ...] | None = None
-    started_at: str | None = field(default=None, repr=False)
+    started_at: str | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)

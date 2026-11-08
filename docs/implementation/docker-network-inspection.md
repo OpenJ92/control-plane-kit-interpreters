@@ -73,6 +73,13 @@ An alias on a different immutable network ID cannot satisfy the selected
 membership. Even a matching alias establishes only this container's reported
 membership: it does not establish unique DNS routing or absence of other owners.
 
+Both appended fields use compare=False. Existing snapshot equality is part of
+the ordinary destructive replacement guard in docker.runtime; adding read
+metadata must not silently introduce a different replacement/recovery policy.
+The SQL consumer must compare process generation and the selected attachment's
+aliases explicitly. Tests demonstrate both visible field differences and
+unchanged ordinary snapshot equality.
+
 The unchanged normal pinned ./test.sh owns validation, including its ordinary
 SDK witness and exact test-resource cleanup. No provider-contract opt-in, extra
 lookup, DNS query, mutation, resolver or SQL qualification is added. The consuming

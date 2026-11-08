@@ -87,7 +87,8 @@ class DockerNetworkInspectionTests(unittest.TestCase):
         second, changed = self.attachments(networks)
         self.assertIn("root-a-postgres", by_id[NETWORK_A].aliases)
         self.assertEqual(changed[0].aliases, ("changed-postgres", "container-id"))
-        self.assertNotEqual(first, second)
+        self.assertNotEqual(values[0].aliases, changed[0].aliases)
+        self.assertEqual(first, second, "alias metadata must not alter existing replacement policy")
         networks["right"]["Aliases"], networks["wrong"]["Aliases"] = [], ["root-a-postgres"]
         _, moved = self.attachments(networks)
         self.assertNotIn("root-a-postgres", moved[0].aliases)
