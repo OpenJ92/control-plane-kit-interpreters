@@ -1,5 +1,9 @@
 # Native connection observation (#167)
 
+## New connector on a retained runtime (#248)
+
+A managed wrapper can qualify a new connector on a named Docker runtime when the full plan matches the existing-runtime bootstrap compiler. Its observation requires a newly created installation receipt from the connector's start in that run. The named ingress allocation must be a predecessor of that start. The original material, wrapper selection and authority must agree with the observation. The reader compares the inspected container's immutable ID with the installation fingerprint before using its samples.
+
 ## Configuration-aware creation labels (#239)
 
 The managed wrapper profile requires the configuration-aware creator's

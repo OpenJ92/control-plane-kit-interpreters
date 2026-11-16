@@ -19,7 +19,7 @@ from control_plane_kit_core.planning import (
     ActivityId, ActivityPlan, ManagementBootstrapStage, ObserveManagementBootstrap,
     PlanGraphSide, resolve_management_observation, compile_graph_activity_plan,
     compile_managed_update_activity_plan, compile_retained_image_ingress_activity_plan,
-    AllocatePublicIngress, ReconcileNode, StartNode, StartRuntime,
+    compile_existing_runtime_bootstrap_activity_plan, AllocatePublicIngress, ReconcileNode, StartNode, StartRuntime,
 )
 from control_plane_kit_core.products import ProductDescriptorCodec, ProductDescriptorDocument, ProductReference, ProviderRuntimePort
 from control_plane_kit_core.receiver_configuration import (
@@ -28,7 +28,7 @@ from control_plane_kit_core.receiver_configuration import (
 from control_plane_kit_core.runtime_authority import RuntimeAuthorityReference
 from control_plane_kit_core.runtime_effects import RuntimeEffectKind, RuntimeEffectRequest, RuntimeProductMaterial
 from control_plane_kit_core.secret_installation import (
-    SecretInstallationReceipt, secret_installation_correlation_for_request,
+    SecretInstallationDisposition, SecretInstallationReceipt, secret_installation_correlation_for_request,
     secret_material_selection_fingerprint,
 )
 from control_plane_kit_core.secret_selections import SecretVersionSelection
@@ -59,6 +59,7 @@ class ConnectorConnectionOutcome(StrEnum):
 
 class ConnectorConnectionQualification(StrEnum):
     FRESH = "fresh"
+    NEW_CONNECTOR_ON_RETAINED_RUNTIME = "new_connector_on_retained_runtime"
     RETAINED_CONTENT_UPDATE = "retained_content_update"
     RETAINED_IMAGE_INGRESS_UPDATE = "retained_image_ingress_update"
 
@@ -199,6 +200,12 @@ class DockerConnectorConnectionQualifier:
                     or not any(type(item) is AllocatePublicIngress and item.target.ingress_id == ingress_id for item in operations)):
                 raise ValueError
             mode = ConnectorConnectionQualification.FRESH
+        elif current.graph.runtimes[runtime_id].management is None:
+            compiled = compile_existing_runtime_bootstrap_activity_plan(current, desired)
+            if (self.profile is not ConnectorConnectionProfile.MANAGED_WRAPPER_V1
+                    or plan != compiled or not compiled.ready_for_execution):
+                raise ValueError
+            mode = ConnectorConnectionQualification.NEW_CONNECTOR_ON_RETAINED_RUNTIME
         else:
             if (current.graph.runtimes[runtime_id] != runtime
                     or current.graph.nodes.get(gateway_id) != resolved.gateway_node
@@ -291,7 +298,8 @@ class DockerConnectorConnectionObserver:
 
     def observe(self, request, *, plan, current, desired,
                 installation_request: RuntimeEffectRequest | None = None,
-                installation_receipt: SecretInstallationReceipt | None = None):
+                installation_receipt: SecretInstallationReceipt | None = None,
+                allocation_activity_id: ActivityId | None = None):
         try:
             if type(request) is not RuntimeEffectRequest or type(plan) is not ActivityPlan:
                 raise ValueError
@@ -310,11 +318,27 @@ class DockerConnectorConnectionObserver:
             else:
                 origin = _installation_origin(request, installation_request, installation_receipt)
                 incarnation = installation_receipt.current_realization_fingerprint
+            if mode is ConnectorConnectionQualification.NEW_CONNECTOR_ON_RETAINED_RUNTIME:
+                if type(allocation_activity_id) is not ActivityId:
+                    raise ValueError
+                allocation = plan.activity(allocation_activity_id).operation
+                start = plan.activity(origin.activity_id)
+                if (type(allocation) is not AllocatePublicIngress
+                        or allocation.target.ingress_id != resolved.ingress.ingress_id
+                        or allocation_activity_id not in tuple(dep.predecessor for dep in start.dependencies)
+                        or type(start.operation) is not StartNode or start.operation != origin.operation
+                        or start.operation.target.node_id != node.node_id
+                        or origin.authority_ref != request.authority_ref
+                        or origin.effect_id != origin.source.intent_event_id or origin.effect_id == request.effect_id
+                        or replace(origin.source, intent_event_id=request.source.intent_event_id) != request.source
+                        or installation_receipt.disposition is not SecretInstallationDisposition.CREATED):
+                    raise ValueError
+            elif allocation_activity_id is not None:
+                raise ValueError
             artifact, configuration_volume, configuration_selection = None, None, None
             if self.profile is ConnectorConnectionProfile.MANAGED_WRAPPER_V1:
                 artifact = _managed_configuration(material, node, workspace_id=request.source.workspace_id)
-                if mode in (ConnectorConnectionQualification.RETAINED_CONTENT_UPDATE,
-                            ConnectorConnectionQualification.RETAINED_IMAGE_INGRESS_UPDATE):
+                if mode is not ConnectorConnectionQualification.FRESH:
                     # Invalid retained proof must never acquire fresh candidate semantics.
                     if origin.kind is not RuntimeEffectKind.CONFIGURATION_ACTIVITY_V1 or origin.configuration_instances is None:
                         raise ValueError
