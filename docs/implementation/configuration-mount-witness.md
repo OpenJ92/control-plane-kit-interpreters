@@ -1,5 +1,21 @@
 # Selected configuration delivery witness (#156)
 
+## #2089 bounded DNSNames precondition
+
+On the existing created running workload in each installation sequence, an
+additional read-only SDK handle uses the established explicit Unix/API1.45
+factory and verifies the same daemon. It inspects that recorded ID, selects the
+same immutable network attachment, compares the typed DNSNames to the actual
+endpoint response, and checks the configured hostname is present separately from
+Aliases. No extra resource, DNS request, route, retained inspection or mutation
+is added. The handle closes in finally and the ordinary exact ledger cleanup is
+unchanged. Both success booleans are emitted only after the sequence and cleanup
+pass. An unsupported DNSNames response produces a fixed bounded precondition
+stop; it is never filled from name/aliases or credited as routing evidence.
+The real witness uses its existing default hostname (the short container ID),
+not a new custom-hostname peer. A custom hostname absent from name/Aliases is
+proved only by the SDK projection unit fixture and is labeled that way.
+
 ## I191 selected consumer extension (candidate)
 
 The existing installation witness additionally runs with exact consumer-selected

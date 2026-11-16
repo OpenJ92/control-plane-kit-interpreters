@@ -12,3 +12,15 @@ Causal-red update: unchanged targets ran in owner39610482883. All21 new methods
 failed only at the intentional missing-policy assertion; all563 prior methods
 passed (584 total,0 errors). Kepler independently accepted causal red6317675525.
 Source implementation now exists; deeper branches await the unchanged full gate.
+
+For #2089, two general inspection methods prove exact StartedAt text including
+nanoseconds survives a same-ID restart, remains explicitly distinguishable and never
+invokes process mutation. Missing/invalid/zero timestamp evidence stays unknown
+despite a running container, stable ID and available Created field. These are
+SDK translation tests, not SQL readiness or process-attestation proof. Existing
+connector qualification and the normal pinned owning suite are unchanged.
+
+Meridian found that default dataclass equality would make these new fields alter
+the existing destructive replacement guard. The correction excludes both new
+metadata fields from ordinary equality. Tests compare the fields explicitly and
+also preserve the old snapshot equality, without adding a lifecycle policy.

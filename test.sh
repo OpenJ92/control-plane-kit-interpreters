@@ -5,6 +5,12 @@ IMAGE_NAME="${CPK_INTERPRETERS_TEST_IMAGE_NAME:-control-plane-kit-interpreters-t
 POLICY_IMAGE="${CPK_INTERPRETERS_POLICY_IMAGE:-python:3.14-slim}"
 DEPENDENCY_MODE="${CPK_INTERPRETERS_DEPENDENCY_MODE:-pinned}"
 CORE_REPO="${CPK_CORE_REPO:-}"
+POSTGRES_READINESS_SOURCE="${CPK_INTERPRETERS_POSTGRES_READINESS_SOURCE:-0}"
+case "$POSTGRES_READINESS_SOURCE" in
+  0) ;;
+  1) [[ "$DEPENDENCY_MODE" == local-core && -n "$CORE_REPO" ]] || { echo 'PostgreSQL source tests require explicit local-core context' >&2; exit 2; } ;;
+  *) echo 'unsupported PostgreSQL source test selection' >&2; exit 2 ;;
+esac
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # A separately admitted one-attempt provider phase; ordinary gates leave it off.
 CONTRACT_MODE="${CPK_INTERPRETERS_START_NODE_CONTRACT:-0}"
@@ -110,6 +116,7 @@ docker run --rm \
     --package-root /source \
     --source-root src \
     --test-root tests \
+    --test-root source_tests \
     --gate-file test.sh
 
 case "$DEPENDENCY_MODE" in
@@ -140,9 +147,10 @@ if [[ "$DEPENDENCY_MODE" == "local-core" ]]; then
   docker run \
     --name "$CONTAINER_NAME" \
     --cidfile "$FIXTURE_RECORDS/package" --label "org.openj92.cpk.test-run=$FIXTURE_RUN" \
+    -e "CPK_INTERPRETERS_POSTGRES_READINESS_SOURCE=$POSTGRES_READINESS_SOURCE" \
     -v "$(cd "$CORE_REPO" && pwd):/workspace/control-plane-kit:ro" \
     "$IMAGE_NAME" \
-    sh -c 'cp -R /workspace/control-plane-kit/control-plane-kit-core /tmp/control-plane-kit-core && python -m pip install /tmp/control-plane-kit-core && python -m compileall src tests && python -m unittest discover -s tests -v'
+    sh -c 'cp -R /workspace/control-plane-kit/control-plane-kit-core /tmp/control-plane-kit-core && python -m pip install /tmp/control-plane-kit-core && python -m compileall src tests && python -m unittest discover -s tests -v && if [ "$CPK_INTERPRETERS_POSTGRES_READINESS_SOURCE" = 1 ]; then python -m compileall source_tests && PYTHONPATH=/tmp/control-plane-kit-core:/app/tests python -m unittest discover -s source_tests -v; fi'
 else
   docker run \
     --name "$CONTAINER_NAME" \

@@ -31,5 +31,6 @@ RUN python -m pip install --no-deps \
     "control-plane-kit-servers @ https://github.com/OpenJ92/control-plane-kit-servers/archive/9921911d3939855a4f7c1989acdf7683fc8961da.zip"
 
 COPY tests ./tests
+COPY source_tests ./source_tests
 
 CMD ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
