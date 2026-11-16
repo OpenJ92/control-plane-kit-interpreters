@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import re
-from typing import Callable, Mapping, TypeVar
+from typing import Callable, Mapping, TypeVar, TYPE_CHECKING
 
 from control_plane_kit_core.planning import (
     ActivityOperation,
@@ -94,6 +94,8 @@ from control_plane_kit_interpreters.docker.sdk import (
 )
 from control_plane_kit_interpreters.probes.security import ProbeAddressPolicy
 from control_plane_kit_interpreters.invocations import InvocationPortError, control_errors, invoke
+if TYPE_CHECKING:
+    from control_plane_kit_interpreters.probes.http_sample_check import HttpSampleCheckExecutor
 from control_plane_kit_interpreters.secrets import (
     _PreparedSecretResolver,
     ImagePullCredentialDenied,
@@ -209,11 +211,23 @@ class DockerRuntimeInterpreter:
     )
     docker_module: object | None = field(default=None, repr=False, kw_only=True)
     require_invocations: bool = field(default=False, kw_only=True)
+    http_sample_executor: HttpSampleCheckExecutor | None = field(default=None, repr=False, kw_only=True)
+    postgres_readiness_executor: object | None = field(default=None, repr=False, kw_only=True)
     _invocations: object | None = field(default=None, repr=False, kw_only=True)
 
     def __post_init__(self) -> None:
         if type(self.require_invocations) is not bool:
             raise TypeError("require_invocations must be a bool")
+        if self.http_sample_executor is not None:
+            from control_plane_kit_interpreters.probes.http_sample_check import HttpSampleCheckExecutor
+            if type(self.http_sample_executor) is not HttpSampleCheckExecutor:
+                raise TypeError("HTTP sample executor must be the configured native executor")
+        if self.postgres_readiness_executor is not None:
+            from control_plane_kit_interpreters.probes.postgres_readiness_check import PostgresReadinessCheckExecutor
+            if (type(self.postgres_readiness_executor) is not PostgresReadinessCheckExecutor
+                    or getattr(self.postgres_readiness_executor.managed_verification_support, "http_samples", None)
+                        is not self.http_sample_support):
+                raise TypeError("managed verification must consume the configured native executors")
         if (self.client is None) == (self.local_client_config is None):
             raise ValueError("Docker runtime requires exactly one client or local policy")
         if self.local_client_config is not None:
@@ -221,6 +235,15 @@ class DockerRuntimeInterpreter:
                 raise TypeError("Docker runtime local policy is invalid")
         elif self.docker_module is not None:
             raise ValueError("Docker runtime module injection requires a local policy")
+
+    @property
+    def http_sample_support(self):
+        return None if self.http_sample_executor is None else self.http_sample_executor.http_sample_support
+
+    @property
+    def managed_verification_support(self):
+        return (None if self.postgres_readiness_executor is None
+            else self.postgres_readiness_executor.managed_verification_support)
 
     def execute(self, request: RuntimeEffectRequest, *, invocations=None) -> RuntimeEffectResult:
         controls = (InvocationPortError, *control_errors(
@@ -404,6 +427,40 @@ class DockerRuntimeInterpreter:
             return _unsupported(request, "docker.unsupported-runtime-kind")
         if type(request.operation) is WaitForHealthy and not callable(getattr(invocations, "for_check", None)):
             raise InvocationPortError("ordinary verification requires a per-check invocation port")
+        sample_support = getattr(invocations, "http_sample_support", None)
+        postgres_readiness = False
+        managed_support = getattr(invocations, "managed_verification_support", None)
+        if type(request.operation) is WaitForHealthy and managed_support is not None:
+            if managed_support is not self.managed_verification_support:
+                raise InvocationPortError("managed verification capability does not match the configured executor")
+            checks = _single_product(request).product.runtime_contract.verification.checks
+            if len(checks) == 1 and type(checks[0]) is PostgresQueryCheck:
+                if (not with_authority
+                        or _authority_value(getattr(authority, "runtime_kind", None)) != RuntimeKind.DOCKER.value
+                        or _authority_value(getattr(authority, "authority_kind", None)) != "local-docker-socket"):
+                    return _unsupported(request, "docker.postgres-readiness-local-authority-required")
+                postgres_readiness = True
+            elif not checks or any(type(check) is not HttpCheck for check in checks):
+                return _unsupported(request, "docker.managed-verification-check-unsupported")
+            elif sample_support is not self.http_sample_support or sample_support is None:
+                raise InvocationPortError("managed HTTP verification does not match the configured executor")
+        if type(request.operation) is WaitForHealthy and sample_support is not None and not postgres_readiness:
+            if self.http_sample_executor is None or sample_support is not self.http_sample_support:
+                raise InvocationPortError("HTTP sample capability does not match the configured executor")
+            from control_plane_kit_interpreters.probes.http_sample_check import HttpSampleUnavailable
+            # Select this arm before Docker acquisition, endpoint inspection or
+            # private helper selection. A missing sample capability never falls
+            # through to the ordinary private verification branch.
+            try:
+                acquired = invoke(invocations, "ordinary-verification-acquisition",
+                    lambda: self.http_sample_executor.acquire(request, invocations))
+                return self._wait_for_healthy(request, invocations=invocations,
+                                             http_samples=True, http_sample_route=acquired)
+            except controls:
+                raise
+            except HttpSampleUnavailable:
+                return RuntimeEffectResult.uncertain(request.effect_id, RuntimeEffectFailure(
+                    "docker.http-sample-unavailable", "Authenticated HTTP sample is unavailable"))
         resolver = (_PreparedSecretResolver(self.authorized_secret_resolver, invocations)
             if self.authorized_secret_resolver is not None else None)
         prepared = replace(self, authorized_secret_resolver=resolver,
@@ -445,7 +502,7 @@ class DockerRuntimeInterpreter:
                 "docker.runtime-authority-uncertain", "Docker runtime preparation is uncertain"))
 
         if type(request.operation) is WaitForHealthy:
-            return self._execute_ordinary_invoked(request, invocations, acquire)
+            return self._execute_ordinary_invoked(request, invocations, acquire, postgres_readiness=postgres_readiness)
 
         def dispatch():
             try:
@@ -459,13 +516,14 @@ class DockerRuntimeInterpreter:
 
         return invoke(invocations, "prepared-runtime-dispatch", dispatch)
 
-    def _execute_ordinary_invoked(self, request, invocations, acquire):
+    def _execute_ordinary_invoked(self, request, invocations, acquire, *, postgres_readiness=False):
         controls = (InvocationPortError, *control_errors(invocations))
         binding, bound, endpoints = None, None, None
+        acquired = None
         result, execution_error, close_error = None, None, None
 
         def acquisition():
-            nonlocal binding, bound, endpoints
+            nonlocal binding, bound, endpoints, acquired
             # Establish custody before inspection or recording can fail. The
             # returned binding cannot otherwise be recovered from a failed ack.
             binding = acquire()
@@ -473,13 +531,30 @@ class DockerRuntimeInterpreter:
                 docker_module=None, secret_resolver=None, image_pull_credentials=None,
                 _invocations=invocations)
             material = _single_product(request)
-            endpoints = ({observation.socket_name: observation
-                for observation in bound._runtime_private_endpoint_observations(request, material)}
-                if material.product.runtime_contract.verification.checks else {})
+            if postgres_readiness:
+                acquired = bound.postgres_readiness_executor.acquire(request, invocations)
+            else:
+                endpoints = ({observation.socket_name: observation
+                    for observation in bound._runtime_private_endpoint_observations(request, material)}
+                    if material.product.runtime_contract.verification.checks else {})
 
         try:
             invoke(invocations, "ordinary-verification-acquisition", acquisition)
-            result = bound._wait_for_healthy(request, endpoints=endpoints, invocations=invocations)
+            if postgres_readiness:
+                material = _single_product(request)
+                check, = material.product.runtime_contract.verification.checks
+                child = invocations.for_check(check.check_id)
+                control_errors(child, required=True)
+                if (child.control_error is not invocations.control_error
+                        or not callable(getattr(child, "prepare_postgres_readiness", None))):
+                    raise InvocationPortError("original SQL verification child port is invalid")
+                item = bound.postgres_readiness_executor.execute(request, check, child,
+                    docker=binding.client, acquired=acquired)
+                result = RuntimeEffectResult.succeeded(request.effect_id, evidence={
+                    "action": "verified-healthy", "node_id": material.node_id,
+                    "postgres_readiness_checks": [item]})
+            else:
+                result = bound._wait_for_healthy(request, endpoints=endpoints, invocations=invocations)
         except BaseException as error:
             execution_error = error
         if binding is not None and binding.close_after_execution:
@@ -1050,6 +1125,8 @@ class DockerRuntimeInterpreter:
         *,
         endpoints=None,
         invocations=None,
+        http_samples=False,
+        http_sample_route=None,
     ) -> RuntimeEffectResult:
         material = _single_product(request)
         checks = material.product.runtime_contract.verification.checks
@@ -1061,7 +1138,7 @@ class DockerRuntimeInterpreter:
                     "node_id": material.node_id,
                 },
             )
-        if endpoints is None:
+        if endpoints is None and not http_samples:
             endpoints = {
                 observation.socket_name: observation
                 for observation in self._runtime_private_endpoint_observations(request, material)
@@ -1069,14 +1146,14 @@ class DockerRuntimeInterpreter:
         completed: list[dict[str, object]] = []
         observations: list[VerificationCompleted] = []
         for check in checks:
-            endpoint = endpoints.get(check.provider_socket)
-            if endpoint is None:
+            endpoint = None if http_samples else endpoints.get(check.provider_socket)
+            if endpoint is None and not http_samples:
                 return _failed(
                     request,
                     "docker.health-endpoint-missing",
                     "health check provider socket has no runtime endpoint",
                 )
-            if not isinstance(endpoint.address, LiteralEndpointMaterial):
+            if not http_samples and not isinstance(endpoint.address, LiteralEndpointMaterial):
                 return _failed(
                     request,
                     "docker.health-endpoint-unresolved",
@@ -1084,14 +1161,19 @@ class DockerRuntimeInterpreter:
                 )
             if not isinstance(check, (HttpCheck, PostgresQueryCheck)):
                 return _unsupported(request, "docker.health-check-unsupported")
+            if http_samples and type(check) is not HttpCheck:
+                return _unsupported(request, "docker.http-sample-check-unsupported")
             child = None
             if invocations is not None:
                 child = invocations.for_check(check.check_id)
                 control_errors(child, required=True)
                 if (child.control_error is not invocations.control_error
-                        or not hasattr(child, "credential_grant")):
+                        or (not http_samples and not hasattr(child, "credential_grant"))
+                        or (http_samples and not callable(getattr(child, "prepare_http_sample", None)))):
                     raise InvocationPortError("ordinary verification child port is invalid")
-            if isinstance(check, HttpCheck):
+            if http_samples:
+                result = self.http_sample_executor.execute(request, check, child, acquired=http_sample_route)
+            elif isinstance(check, HttpCheck):
                 result = invoke(child, "ordinary-verification-check",
                     lambda: self._execute_http_health_check(material, request, check, endpoint))
             elif isinstance(check, PostgresQueryCheck):

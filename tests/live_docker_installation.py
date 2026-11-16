@@ -21,7 +21,9 @@ from control_plane_kit_core.runtime_effects import (
     EffectResultKind, RuntimeEffectKind, RuntimeEffectRequest, RuntimeEffectSource, RuntimeProductMaterial,
 )
 from control_plane_kit_core.types import RuntimeKind
-from control_plane_kit_interpreters.docker import DockerRuntimeInterpreter, DockerSdkConfigurationMount
+from control_plane_kit_interpreters.docker import (
+    DockerRuntimeInterpreter, DockerSdkClient, DockerSdkConfigurationMount, DockerUnixSocketClientConfig,
+)
 from control_plane_kit_interpreters.docker.configuration import configuration_volume_name
 from control_plane_kit_interpreters.docker.runtime import _container_name, _network_name
 from live_docker_configuration import ConfigurationFixtureResources
@@ -292,6 +294,29 @@ def run_installation_witness(client, sdk, image_reference, helper_image, *, sele
                 assert "no-new-privileges" in resource.attrs["HostConfig"]["SecurityOpt"]
                 assert not resource.attrs["HostConfig"]["PortBindings"]
                 assert set(resource.attrs["NetworkSettings"]["Networks"]) == {network}
+                if disposition == "created":
+                    # Verify the selected explicit API path on this already-owned
+                    # running container; no retained resource or DNS query.
+                    dns_sdk = DockerSdkClient.from_authority(DockerUnixSocketClientConfig("/var/run/docker.sock", 5))
+                    try:
+                        if dns_sdk.client.info().get("ID") != client.info().get("ID"):
+                            raise RuntimeError("DNSNames witness daemon differs")
+                        dns_observed = dns_sdk.inspect_container(identity)
+                        network_id = resource.attrs["NetworkSettings"]["Networks"][network]["NetworkID"]
+                        members = () if dns_observed is None or dns_observed.network_attachments is None else tuple(
+                            value for value in dns_observed.network_attachments if value.network_id == network_id)
+                        if (dns_observed is None or dns_observed.container_id != identity or not dns_observed.running
+                                or len(members) != 1 or members[0].dns_names is None):
+                            raise RuntimeError("selected local daemon/API1.45 DNSNames is unavailable")
+                        raw_dns = dns_sdk.client.api.inspect_container(identity)
+                        endpoint = raw_dns["NetworkSettings"]["Networks"][network]
+                        assert endpoint["NetworkID"] == network_id
+                        assert members[0].dns_names == tuple(sorted(set(endpoint["DNSNames"])))
+                        hostname = raw_dns["Config"]["Hostname"]
+                        assert hostname in members[0].dns_names and hostname not in (endpoint.get("Aliases") or ())
+                        assert resource.name in members[0].dns_names and identity[:12] in members[0].dns_names
+                    finally:
+                        dns_sdk.close()
                 artifacts = {artifact.artifact_id: artifact for artifact in request.products[0].product.runtime_contract.configuration_artifacts}
                 assert len(resource.attrs["Mounts"]) == (3 if selected_secrets else 2)
                 for ref in request.configuration_instances.instances:
@@ -335,4 +360,7 @@ def run_installation_witness(client, sdk, image_reference, helper_image, *, sele
         "selected_secret_receipts": selected_secrets,
         "stable_reuse_identity": True, "distinct_replacement_identity": True,
         "prior_absence_verified": True, "all_selected_material_verified": True,
+        "dns_names_api145": True,
+        "configured_hostname_separate_from_aliases": True,
+        "custom_hostname_collision": "unit-fixture-only",
         "resources": counts, "residue": "absent"}, sort_keys=True))

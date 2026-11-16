@@ -1,0 +1,297 @@
+"""Native runtime branch and signed sampler, without Operations state emulation."""
+import asyncio
+from dataclasses import replace
+from types import SimpleNamespace
+import json
+import sys
+import time
+import unittest
+from unittest.mock import patch
+
+import httpx
+import jwt
+import control_plane_kit_core as core
+from control_plane_kit_core.http_verification_samples import (
+    HttpVerificationSampleResult, http_verification_check_digest,
+    HttpVerificationSampleRequestCodec,
+)
+from control_plane_kit_core.operations.execution import EffectResultKind
+from control_plane_kit_core.runtime_effect_observation import (
+    runtime_effect_intent_for_request, runtime_effect_intent_fingerprint,
+)
+from control_plane_kit_core.planning import NodeTarget, WaitForHealthy
+from control_plane_kit_core.secrets import SecretResolved, SecretValue, http_verification_sample_signing_intent_for
+from control_plane_kit_core.verification import (
+    VerificationOutcome, HttpVerificationEvidence, VerificationPolicy, VerificationContract,
+)
+from control_plane_kit_interpreters.docker import DockerRuntimeInterpreter
+from control_plane_kit_interpreters.invocations import InvocationPortError
+from control_plane_kit_interpreters.probes import http_sample_transport as transport_api
+from control_plane_kit_interpreters.probes.http_sample_check import (
+    HttpSampleCheckExecutor, HttpSampleCheckInput, HttpSampleSigningKey, HttpSampleRouteInput,
+)
+from health_signing_fixtures import world, private_pem
+from test_health_invocations import RecordingPort, Denied, RecordingUncertain
+from test_http_sample_transport import inputs
+from test_docker_runtime_interpreter import _product_with_health_check, _material, _request
+
+
+class NativeHttpSampleTests(unittest.TestCase):
+    def setUp(self):
+        self.events, self.posts, self.resolved = [], [], []
+        self.support = object()  # Identity supplied by composition, never authority.
+        product = _product_with_health_check(policy=VerificationPolicy(
+            timeout_seconds=1, interval_seconds=0.001, maximum_attempts=2))
+        check, = product.runtime_contract.verification.checks
+        self.runtime = _request(WaitForHealthy(NodeTarget("api")), products=(_material(product),))
+        original, _, destination, _ = inputs(transport_api)
+        target = replace(original.target, node_id=replace(original.target.node_id, value="api"),
+                         runtime_id=replace(original.target.runtime_id, value="docker"))
+        gateway = replace(original.gateway_target, runtime_id=target.runtime_id)
+        template = replace(original, target=target, gateway_target=gateway,
+            authority_context=core.NodeControlAuthorityContext("graph-desired", "projection-a"),
+            activity_id="activity-a", effect_id="event-started", check_digest=http_verification_check_digest(check),
+            request_fingerprint=runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(self.runtime)))
+        destination = replace(destination, gateway_target=gateway, route=replace(destination.route, target=target))
+        values = world()
+        purposes = (core.DelegationKeyPurpose.GATEWAY_HTTP_VERIFICATION_SAMPLE_TRANSIT,
+                    core.DelegationKeyPurpose.WORKLOAD_HTTP_VERIFICATION_SAMPLE)
+        grants = tuple(replace(grant, intent=http_verification_sample_signing_intent_for(purpose),
+            activity_id=template.activity_id, effect_id=template.effect_id)
+            for grant, purpose in zip(values.resolutions, purposes))
+        self.keys = tuple(HttpSampleSigningKey("sample-controller", public, grant)
+                          for public, grant in zip(values.publics, grants))
+        self.prepared = HttpSampleCheckInput(template, check, destination, *self.keys)
+        self.secrets = dict(zip((grant.authorization_id for grant in grants),
+                               (private_pem(private) for private in values.privates)))
+        self.publics = values.publics
+        owner = self
+        class Resolver:
+            def resolve(self, grant):
+                owner.resolved.append(grant.authorization_id)
+                return SecretResolved(grant.reference, SecretValue(owner.secrets[grant.authorization_id]))
+        class PublicResolver:
+            async def resolve(self, _hostname):
+                return ("8.8.8.8",)
+        self.outcomes = [VerificationOutcome.FAILED, VerificationOutcome.PASSED]
+        async def gateway(request):
+            body = json.loads(await request.aread())
+            g = request.headers["authorization"][7:]
+            w = body["workload_credential"]
+            verified = []
+            for token, public, claim in zip((g, w), self.publics,
+                    ("gateway_http_verification_sample_transit", "workload_http_verification_sample")):
+                payload = jwt.decode(token, public.public_key_pem, algorithms=["EdDSA"],
+                    options={"verify_exp": False, "verify_iat": False, "verify_nbf": False, "verify_aud": False})
+                verified.append(payload[claim]["request"] == body["request"])
+            self.posts.append((body["request"]["sample_ordinal"], body["request"]["request_id"], all(verified)))
+            r = HttpVerificationSampleRequestCodec().decode(body["request"])
+            outcome = self.outcomes.pop(0)
+            result = HttpVerificationSampleResult(r, outcome, HttpVerificationEvidence(200 if outcome is VerificationOutcome.PASSED else 503, 0))
+            return httpx.Response(200, content=result.canonical_bytes(installed_check=check),
+                                  headers={"content-type": "application/json"})
+        self.client = transport_api.SignedGatewayHttpSampleClient(clock=lambda: 100,
+            public_resolver=PublicResolver(), transport=httpx.MockTransport(gateway))
+        self.executor = HttpSampleCheckExecutor(Resolver(), self.client, lambda: 100, self.support)
+        self.child = RecordingPort(self.events)
+        self.prepares = []
+        def prepare():
+            self.assertIn(("record", "ordinary-verification-acquisition", None, "returned"), self.events)
+            self.prepares.append(True)
+            return self.prepared
+        self.child.prepare_http_sample = prepare
+        self.parent = RecordingPort(self.events)
+        self.parent.http_sample_support = self.support
+        self.parent.for_check = lambda _check: self.child
+        self.acquired = HttpSampleRouteInput(destination, (check,), template.authority_context,
+                                            self.runtime.products[0].reference)
+        def acquire():
+            self.events.append(("route-read",))
+            return self.acquired
+        self.parent.acquire_http_sample_route = acquire
+        self.interpreter = DockerRuntimeInterpreter(client=SimpleNamespace(),
+            http_sample_executor=self.executor, require_invocations=True)
+
+    def execute(self):
+        with patch.object(DockerRuntimeInterpreter, "_runtime_private_endpoint_observations") as private, \
+                patch.object(DockerRuntimeInterpreter, "_execute_runtime_private_http_health_check") as helper:
+            result = self.interpreter.execute(self.runtime, invocations=self.parent)
+            private.assert_not_called()
+            helper.assert_not_called()
+            return result
+
+    def test_actual_sender_retries_only_original_application_result_with_one_pair_resolution(self):
+        result = self.execute()
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED)
+        self.assertEqual(self.resolved, [key.resolution_grant.authorization_id for key in self.keys])
+        self.assertEqual([(ordinal, valid) for ordinal, _, valid in self.posts], [(1, True), (2, True)])
+        self.assertNotEqual(self.posts[0][1], self.posts[1][1])
+        observation, = result.observations
+        self.assertIs(observation.outcome, VerificationOutcome.PASSED)
+        self.assertEqual(observation.attempts, 2)
+        self.assertEqual(observation.identity.node_id, "api")
+        self.assertEqual(self.events[-1], ("record", "ordinary-verification-check", None, "returned"))
+        self.assertEqual(sum(item[:2] == ("admit", "ordinary-verification-check") for item in self.events), 1)
+        self.assertEqual(self.events[:3], [("admit", "ordinary-verification-acquisition", None),
+            ("route-read",), ("record", "ordinary-verification-acquisition", None, "returned")])
+
+    def test_both_private_fingerprints_checked_before_either_token_emission(self):
+        self.secrets[self.keys[1].resolution_grant.authorization_id] = self.secrets[self.keys[0].resolution_grant.authorization_id]
+        with patch("control_plane_kit_interpreters.probes.http_sample_check.jwt.encode") as encode:
+            result = self.execute()
+        self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+        self.assertEqual(result.observations, ())
+        self.assertEqual(len(self.resolved), 2)
+        self.assertEqual(self.posts, [])
+        encode.assert_not_called()
+
+    def test_missing_or_swapped_sample_capability_has_no_private_fallback_or_resolution(self):
+        for sampler in (None, replace(self.executor, http_sample_support=object())):
+            self.interpreter = replace(self.interpreter, http_sample_executor=sampler)
+            with self.assertRaises(InvocationPortError):
+                self.execute()
+        self.assertEqual(self.resolved, [])
+        self.assertEqual(self.posts, [])
+
+    def test_transport_refusal_is_uncertain_without_application_observation(self):
+        self.executor = replace(self.executor, client=replace(self.client,
+            transport=httpx.MockTransport(lambda _: httpx.Response(502, content=b"peer-secret"))))
+        self.interpreter = replace(self.interpreter, http_sample_executor=self.executor)
+        result = self.execute()
+        self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+        self.assertEqual(result.observations, ())
+        self.assertEqual(self.events[-1], ("record", "ordinary-verification-check", None, "unknown"))
+        self.assertNotIn("peer-secret", str(result.descriptor()))
+
+    def test_wrong_original_effect_fingerprint_refuses_before_resolution_or_send(self):
+        self.prepared = replace(self.prepared, request_template=replace(
+            self.prepared.request_template, request_fingerprint="0" * 64))
+        result = self.execute()
+        self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+        self.assertEqual(result.observations, ())
+        self.assertEqual(self.resolved, [])
+        self.assertEqual(self.posts, [])
+
+    def test_synchronous_runtime_arm_works_under_an_active_operator_event_loop(self):
+        self.outcomes = [VerificationOutcome.PASSED]
+        async def operator():
+            return self.execute()
+        self.assertIs(asyncio.run(operator()).kind, EffectResultKind.SUCCEEDED)
+
+    def test_original_attempt_timeout_and_interval_both_contribute_to_overall_budget(self):
+        check = replace(self.prepared.check, policy=VerificationPolicy(
+            timeout_seconds=1, interval_seconds=1.2, maximum_attempts=2))
+        product = self.runtime.products[0].product
+        material = replace(self.runtime.products[0], product=replace(product,
+            runtime_contract=replace(product.runtime_contract, verification=VerificationContract((check,)))))
+        self.runtime = replace(self.runtime, products=(material,))
+        self.prepared = replace(self.prepared, check=check, request_template=replace(
+            self.prepared.request_template, check_digest=http_verification_check_digest(check),
+            request_fingerprint=runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(self.runtime))))
+        self.acquired = replace(self.acquired, checks=(check,))
+        # The controlled peer encodes using the original check object captured
+        # above; its wire policy must agree with the currently selected check.
+        async def gateway(request):
+            body = json.loads(await request.aread())
+            r = HttpVerificationSampleRequestCodec().decode(body["request"])
+            self.posts.append((r.sample_ordinal, r.request_id, True))
+            outcome = self.outcomes.pop(0)
+            result = HttpVerificationSampleResult(r, outcome,
+                HttpVerificationEvidence(200 if outcome is VerificationOutcome.PASSED else 503, 0))
+            return httpx.Response(200, content=result.canonical_bytes(installed_check=check),
+                                  headers={"content-type": "application/json"})
+        started = time.monotonic()
+        clock = lambda: 100 + time.monotonic() - started
+        self.executor = replace(self.executor, clock=clock,
+            client=replace(self.client, clock=clock, transport=httpx.MockTransport(gateway)))
+        self.interpreter = replace(self.interpreter, http_sample_executor=self.executor)
+        # Record only synthetic timing/control coordinates when this wall-clock
+        # fixture refuses. Never infer infrastructure failure from UNCERTAIN.
+        from control_plane_kit_interpreters.probes import http_sample_check as sample_api
+        diagnostics = []
+        original_require = sample_api._require
+        original_samples = sample_api.HttpSampleCheckExecutor._samples
+        original_dispatch = type(self.client).dispatch
+        def observed_require(condition):
+            if condition is not True:
+                frame = sys._getframe(1)
+                diagnostics.append(dict(guard=frame.f_code.co_name, line=frame.f_lineno, at=clock()))
+            return original_require(condition)
+        async def observed_samples(executor, *args):
+            try:
+                return await original_samples(executor, *args)
+            except BaseException as error:
+                diagnostics.append(dict(sample_error=type(error).__name__, at=clock()))
+                raise
+        async def observed_dispatch(client, **kwargs):
+            before = clock()
+            result = await original_dispatch(client, **kwargs)
+            diagnostics.append(dict(dispatch_code=result.code.value, before=before, at=clock(),
+                expires=kwargs["credentials"].transit_grant.expires_at))
+            return result
+        with patch.object(sample_api, "_require", observed_require), \
+                patch.object(transport_api, "_require", observed_require), \
+                patch.object(sample_api.HttpSampleCheckExecutor, "_samples", observed_samples), \
+                patch.object(type(self.client), "dispatch", observed_dispatch):
+            result = self.execute()
+        self.assertIs(result.kind, EffectResultKind.SUCCEEDED, json.dumps(diagnostics))
+        self.assertEqual(len(self.posts), 2)
+
+    def test_fractional_window_without_future_integer_expiry_never_emits_or_sends(self):
+        check = replace(self.prepared.check, policy=VerificationPolicy(
+            timeout_seconds=0.1, interval_seconds=0.001, maximum_attempts=1))
+        material = self.runtime.products[0]
+        material = replace(material, product=replace(material.product,
+            runtime_contract=replace(material.product.runtime_contract, verification=VerificationContract((check,)))))
+        self.runtime = replace(self.runtime, products=(material,))
+        self.prepared = replace(self.prepared, check=check, request_template=replace(
+            self.prepared.request_template, check_digest=http_verification_check_digest(check),
+            request_fingerprint=runtime_effect_intent_fingerprint(runtime_effect_intent_for_request(self.runtime))))
+        self.acquired = replace(self.acquired, checks=(check,))
+        self.executor = replace(self.executor, clock=lambda: 100.2)
+        self.interpreter = replace(self.interpreter, http_sample_executor=self.executor)
+        with patch("control_plane_kit_interpreters.probes.http_sample_check.jwt.encode") as encode:
+            result = self.execute()
+        self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+        self.assertEqual(result.observations, ())
+        self.assertEqual(self.resolved, [])
+        self.assertEqual(self.posts, [])
+        encode.assert_not_called()
+
+    def test_changed_prepared_ingress_refuses_before_any_signing_resolution(self):
+        destination = self.prepared.destination
+        self.prepared = replace(self.prepared, destination=replace(destination,
+            ingress=replace(destination.ingress, hostname="other.example.invalid")))
+        result = self.execute()
+        self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+        self.assertEqual(result.observations, ())
+        self.assertEqual(self.resolved, [])
+        self.assertEqual(self.posts, [])
+
+    def test_denied_or_ambiguous_acquisition_stops_before_prepare_resolution_or_send(self):
+        def denied(kind, _authorization):
+            if kind == "ordinary-verification-acquisition":
+                raise Denied()
+        def ambiguous(kind, _authorization, _outcome):
+            if kind == "ordinary-verification-acquisition":
+                raise RecordingUncertain()
+        for before, after, error in ((denied, None, Denied), (None, ambiguous, RecordingUncertain)):
+            with self.subTest(error=error.__name__):
+                self.parent.before, self.parent.after = before, after
+                with self.assertRaises(error):
+                    self.execute()
+        self.assertEqual(self.prepares, [])
+        self.assertEqual(self.resolved, [])
+        self.assertEqual(self.posts, [])
+
+    def test_unknown_route_read_stops_before_prepare_resolution_or_send(self):
+        def failed_read():
+            raise RuntimeError("private-owner-diagnostic")
+        self.parent.acquire_http_sample_route = failed_read
+        result = self.execute()
+        self.assertIs(result.kind, EffectResultKind.UNCERTAIN)
+        self.assertEqual(result.observations, ())
+        self.assertEqual(self.prepares, [])
+        self.assertEqual(self.resolved, [])
+        self.assertEqual(self.posts, [])
+        self.assertIn(("record", "ordinary-verification-acquisition", None, "unknown"), self.events)

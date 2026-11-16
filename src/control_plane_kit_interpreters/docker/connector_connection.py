@@ -106,12 +106,25 @@ class DockerConnectorConnectionQualifier:
     product_reference: ProductReference
     image_reference: str
     profile: ConnectorConnectionProfile = ConnectorConnectionProfile.NATIVE_READER_V1
+    http_sample_executor: object | None = field(default=None, repr=False, kw_only=True)
+    postgres_readiness_executor: object | None = field(default=None, repr=False, kw_only=True)
 
     def __post_init__(self):
         if (type(self.product_reference) is not ProductReference
                 or type(self.image_reference) is not str
                 or type(self.profile) is not ConnectorConnectionProfile):
             raise TypeError("native connection qualifier configuration is invalid")
+        if self.http_sample_executor is not None:
+            from control_plane_kit_interpreters.probes.http_sample_check import HttpSampleCheckExecutor
+            if type(self.http_sample_executor) is not HttpSampleCheckExecutor:
+                raise TypeError("native sample composition is invalid")
+        if self.postgres_readiness_executor is not None:
+            from control_plane_kit_interpreters.probes.postgres_readiness_check import PostgresReadinessCheckExecutor
+            if (type(self.postgres_readiness_executor) is not PostgresReadinessCheckExecutor
+                    or self.http_sample_executor is None
+                    or self.postgres_readiness_executor.managed_verification_support.http_samples
+                        is not self.http_sample_executor.http_sample_support):
+                raise TypeError("native managed verification composition is invalid")
 
     def qualify(self, *, activity_id, plan, current, desired, material,
                 authority_ref) -> ConnectorConnectionQualification | None:
@@ -190,6 +203,32 @@ class DockerConnectorConnectionQualifier:
         if runtime_id not in current.graph.runtimes:
             # Freshness requires actual creation obligations in the complete pair.
             compiled = compile_graph_activity_plan(current, desired)
+            if self.http_sample_executor is not None:
+                from control_plane_kit_core.planning import compile_http_sample_bootstrap_activity_plan
+                sample = compile_http_sample_bootstrap_activity_plan(current, desired)
+                if plan == sample and sample.ready_for_execution:
+                    compiled = sample
+            if self.postgres_readiness_executor is not None:
+                from control_plane_kit_core.planning import compile_managed_verification_bootstrap_activity_plan, WaitForHealthy
+                from control_plane_kit_core.verification import HttpCheck, PostgresQueryCheck
+                managed = compile_managed_verification_bootstrap_activity_plan(current, desired)
+                if plan == managed and managed.ready_for_execution:
+                    support = self.postgres_readiness_executor.managed_verification_support
+                    for activity in managed.activities:
+                        if type(activity.operation) is not WaitForHealthy:
+                            continue
+                        target = desired.graph.node(activity.operation.target.node_id)
+                        checks = target.block_spec.verification.checks
+                        if checks and all(type(check) is HttpCheck for check in checks):
+                            continue
+                        if len(checks) != 1 or type(checks[0]) is not PostgresQueryCheck:
+                            raise ValueError
+                        matches = tuple(observer for observer in support.postgres_observers
+                            if observer.product.identity.key == target.metadata.get("product_identity")
+                            and observer.product.descriptor_sha256.value == target.metadata.get("product_descriptor_digest"))
+                        if len(matches) != 1:
+                            raise ValueError
+                    compiled = managed
             operations = tuple(item.operation for item in compiled.activities)
             if (plan != compiled or not compiled.ready_for_execution
                     or gateway_id in current.graph.nodes or node.node_id in current.graph.nodes
@@ -270,6 +309,8 @@ class DockerConnectorConnectionObserver:
     image_reference: str
     clock: Callable[[], datetime]
     profile: ConnectorConnectionProfile = ConnectorConnectionProfile.NATIVE_READER_V1
+    http_sample_executor: object | None = field(default=None, repr=False, kw_only=True)
+    postgres_readiness_executor: object | None = field(default=None, repr=False, kw_only=True)
     _qualification: DockerConnectorConnectionQualifier = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
@@ -278,6 +319,8 @@ class DockerConnectorConnectionObserver:
         try:
             qualification = DockerConnectorConnectionQualifier(
                 self.product_reference, self.image_reference, self.profile,
+                http_sample_executor=self.http_sample_executor,
+                postgres_readiness_executor=self.postgres_readiness_executor,
             )
         except TypeError:
             raise TypeError("native connection observer configuration is invalid") from None

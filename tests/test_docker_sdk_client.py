@@ -1342,6 +1342,44 @@ assert "docker" not in sys.modules
             )),
         )
 
+    def test_container_inspection_retains_process_generation_across_same_id_restart(self) -> None:
+        raw = FakeDockerClient()
+        resource = FakeResource("web", image="fixture", running=True)
+        resource.attrs["Id"] = "c" * 64
+        raw.containers.resources["web"] = resource
+        sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+        self.addCleanup(sdk.close)
+        stamps = ("2026-11-08T10:20:30.123456789Z", "2026-11-08T10:21:00.123456789Z")
+        resource.attrs["State"]["StartedAt"] = stamps[0]
+        first = sdk.inspect_container("web")
+        resource.attrs["State"]["StartedAt"] = stamps[1]
+        second = sdk.inspect_container("web")
+        self.assertEqual(first.container_id, second.container_id)
+        self.assertEqual(getattr(first, "started_at", None), stamps[0])
+        self.assertEqual(second.started_at, stamps[1])
+        self.assertNotEqual(first.started_at, second.started_at)
+        self.assertEqual(first, second, "new metadata must preserve existing effect snapshot equality")
+        self.assertFalse(resource.started or resource.stopped or resource.removed)
+
+    def test_container_process_generation_preserves_missing_and_invalid_as_unknown(self) -> None:
+        raw = FakeDockerClient()
+        resource = FakeResource("web", image="fixture", running=True)
+        resource.attrs["Id"] = "c" * 64
+        resource.attrs["Created"] = "2026-11-08T10:00:00Z"
+        raw.containers.resources["web"] = resource
+        sdk = DockerSdkClient(client=raw, docker_module=FakeDockerModule(raw))
+        self.addCleanup(sdk.close)
+        self.assertIsNone(sdk.inspect_container("web").started_at)
+        for stamp in (None, 42, "", "PRIVATE", "2026-02-30T00:00:00Z",
+                "2026-11-08T10:00:00+00:60", "2026-11-08T10:00:00.1234567890Z",
+                "0001-01-01T00:00:00Z", "2026-11-08T10:00:00Z\x00", "x" * 41):
+            with self.subTest(stamp=stamp):
+                resource.attrs["State"]["StartedAt"] = stamp
+                value = sdk.inspect_container("web")
+                self.assertIsNone(value.started_at)
+                self.assertTrue(value.running)
+                self.assertEqual(value.container_id, "c" * 64)
+
     def test_container_inspection_rejects_ambiguous_image_identity(self) -> None:
         cases = (
             ("missing", None),

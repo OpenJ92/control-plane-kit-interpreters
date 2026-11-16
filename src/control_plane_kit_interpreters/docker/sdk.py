@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 import hashlib
 import json
@@ -276,6 +277,8 @@ class DockerSdkNetworkAttachment:
 
     network_id: str
     private_address: str | None = field(repr=False)
+    aliases: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
+    dns_names: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         valid = _is_docker_identity(self.network_id)
@@ -287,6 +290,11 @@ class DockerSdkNetworkAttachment:
                     valid = str(ip_address(address)) == address
                 except ValueError:
                     valid = False
+        for names in (self.aliases, self.dns_names):
+            if names is not None:
+                valid = valid and type(names) is tuple and len(names) <= 64
+                if valid:
+                    valid = all(_is_network_alias(name) for name in names)
         if not valid:
             raise ValueError("Docker network attachment is invalid")
 
@@ -309,6 +317,8 @@ class DockerSdkResourceInspection:
     container_id: str | None = None
     network_id: str | None = None
     network_attachments: tuple[DockerSdkNetworkAttachment, ...] | None = None
+    started_at: str | None = field(default=None, repr=False, compare=False)
+    network_container_ids: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -1444,6 +1454,8 @@ class DockerSdkClient:
             container_id=_resource_identity(attrs) if include_runtime_identity else None,
             network_id=network_id,
             network_attachments=attachments,
+            started_at=_container_started_at(attrs) if include_runtime_identity else None,
+            network_container_ids=_network_container_ids(attrs) if include_network_identity else None,
         )
 
     def _labels(self, resource: Any) -> Mapping[str, str]:
@@ -2087,7 +2099,9 @@ def _network_attachments(attrs: Any) -> tuple[DockerSdkNetworkAttachment, ...] |
         if address == "":
             address = None
         try:
-            value = DockerSdkNetworkAttachment(details["NetworkID"], address)
+            value = DockerSdkNetworkAttachment(details["NetworkID"], address,
+                _observed_network_names(details, "Aliases"),
+                _observed_network_names(details, "DNSNames"))
         except ValueError:
             raise RuntimeError("Docker network membership inspection was malformed") from None
         if value.network_id in identities:
@@ -2097,6 +2111,48 @@ def _network_attachments(attrs: Any) -> tuple[DockerSdkNetworkAttachment, ...] |
     if unavailable:
         return None
     return tuple(sorted(values, key=lambda value: value.network_id))
+
+
+def _network_container_ids(attrs: Any) -> tuple[str, ...] | None:
+    participants = attrs.get("Containers") if isinstance(attrs, Mapping) else None
+    if not isinstance(participants, Mapping) or len(participants) > 64:
+        return None
+    if any(not _is_docker_identity(identity) or not isinstance(details, Mapping)
+            for identity, details in participants.items()):
+        return None
+    return tuple(sorted(participants))
+
+
+def _is_network_alias(value: Any) -> bool:
+    return type(value) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", value) is not None
+
+
+def _observed_network_names(details: Mapping[str, Any], field_name: str) -> tuple[str, ...] | None:
+    names = details.get(field_name)
+    if type(names) is not list or len(names) > 64 or not all(_is_network_alias(value) for value in names):
+        return None
+    return tuple(sorted(set(names)))
+
+
+def _container_started_at(attrs: Any) -> str | None:
+    state = attrs.get("State") if isinstance(attrs, Mapping) else None
+    if not isinstance(state, Mapping):
+        return None
+    try:
+        value = _connector_text(state.get("StartedAt"), 40)
+        # Match the connector consumer's RFC3339/nanosecond shape. Preserve the
+        # exact provider text, never round it or substitute container creation.
+        match = re.fullmatch(r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]{1,9}))?(Z|[+-][0-9]{2}:[0-9]{2})", value)
+        if match is None:
+            return None
+        whole, _fraction, zone = match.groups()
+        if zone != "Z" and (int(zone[1:3]) > 23 or int(zone[4:6]) > 59):
+            return None
+        parsed = datetime.fromisoformat(whole + ("+00:00" if zone == "Z" else zone))
+        # Docker's zero timestamp means no observed process generation.
+        return value if parsed.year > 1 else None
+    except (ValueError, UnicodeError):
+        return None
 
 
 def _resource_identity(attrs: Any) -> str | None:
