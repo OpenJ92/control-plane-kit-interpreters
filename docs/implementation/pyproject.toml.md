@@ -1,4 +1,8 @@
-Current dependency selection (#244): accepted Core
+Source: [pyproject.toml](../../pyproject.toml). Maintain this companion with the source.
+
+Interpreters #252 selects Core `68f187710abe8fa89701f403ac76e904b3fec35d`. Its test extra installs Secrets `fd6da8a3de83708968ebebf11c026a5362c23482`, which selects that Core and SDK `b988030bd5931a7f6a3aef6d1a66a43ba817f7e8`. The runtime package requires only Core before extras are selected.
+
+Historical dependency selection (#244): accepted Core
 `976901c609d950a557ec1e9966f018e8ff6e16aa`, accepted Secrets #87 / PR #88 merge
 `158b17ed10689360c4e1529a395b3ee2b47aecbc`, and its actual SDK
 `d61b374cb2a23d773c31748f47f88169499298b7`. Secrets and SDK select this same Core.
