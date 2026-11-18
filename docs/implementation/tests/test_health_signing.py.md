@@ -1,4 +1,8 @@
-Current dependency selection (#244): accepted Core
+Source: [tests/test_health_signing.py](../../../tests/test_health_signing.py). Maintain this companion with the source.
+
+The installed-distribution test for #252 checks the archive origins of Secrets `fd6da8a3` and its SDK `b988030b`. The signing cases still exercise the installed Secrets implementation.
+
+Historical dependency selection (#244): accepted Core
 `976901c609d950a557ec1e9966f018e8ff6e16aa`, accepted Secrets #87 / PR #88 merge
 `158b17ed10689360c4e1529a395b3ee2b47aecbc`, and its actual SDK
 `d61b374cb2a23d773c31748f47f88169499298b7`. Secrets and SDK select this same Core.

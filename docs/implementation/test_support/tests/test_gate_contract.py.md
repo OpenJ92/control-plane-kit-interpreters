@@ -1,4 +1,8 @@
-Current dependency selection (#244): accepted Core
+Source: [test_support/tests/test_gate_contract.py](../../../../test_support/tests/test_gate_contract.py). Maintain this companion with the source.
+
+The #252 package preflight requires the Core archive at `68f187710abe8fa89701f403ac76e904b3fec35d` and the `control-plane-kit-core` subdirectory. The owning gate uses the pinned package by default.
+
+Historical dependency selection (#244): accepted Core
 `976901c609d950a557ec1e9966f018e8ff6e16aa`, accepted Secrets #87 / PR #88 merge
 `158b17ed10689360c4e1529a395b3ee2b47aecbc`, and its actual SDK
 `d61b374cb2a23d773c31748f47f88169499298b7`. Secrets and SDK select this same Core.
