@@ -708,6 +708,8 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
         from test_docker_runtime_interpreter import _local_socket_transport
         for operation_type in (StartNode, ReconcileNode):
             for case, expected in (("qualified", "succeeded"), ("omitted", "succeeded"),
+                                   ("current", "succeeded"), ("current-omitted", "succeeded"),
+                                   ("crossed-old", "conflict"), ("crossed-current", "conflict"),
                                    ("provider", "conflict"), ("null", "indeterminate"),
                                    ("configured-canonical", "conflict"),
                                    ("configured-source", "conflict"), ("group", "conflict")):
@@ -717,7 +719,11 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                     raw = FakeDockerClient()
                     _local_socket_transport(raw)
                     raw.info = lambda: {"OperatingSystem": "other" if case == "provider" else "Docker Desktop", "OSType": "linux"}
-                    raw.version = lambda: {"Version": "29.7.2", "ApiVersion": "1.55"}
+                    version, api = {
+                        "current": ("29.9.3", "1.56"), "current-omitted": ("29.9.3", "1.56"),
+                        "crossed-old": ("29.7.2", "1.56"), "crossed-current": ("29.9.3", "1.55"),
+                    }.get(case, ("29.7.2", "1.55"))
+                    raw.version = lambda: {"Version": version, "ApiVersion": api}
                     network = expected_client.network
                     raw.networks.resources[network.name] = FakeResource(network.name, labels=dict(network.labels))
                     base = expected_client.container
@@ -732,7 +738,7 @@ class DockerRuntimeEffectObserverTests(unittest.TestCase):
                         "/run/host-services/docker.proxy.sock")
                     configured = {"Type": "bind", "Source": configured_source,
                                   "Target": "/var/run/docker.sock", "ReadOnly": False}
-                    if case == "omitted":
+                    if case in ("omitted", "current-omitted"):
                         del configured["ReadOnly"]
                     elif case == "null":
                         configured["ReadOnly"] = None
