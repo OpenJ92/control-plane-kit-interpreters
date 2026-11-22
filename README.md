@@ -108,9 +108,18 @@ do not fetch Desktop facts. The candidate exception requires canonical approved
 and requested source, the fixed reviewed proxy configured source, and that same
 fixed proxy actual source. It also requires exact target/writability/groups,
 active local transport, and same-client provider facts
-Docker Desktop / linux / Engine29.7.2 / API1.55 or the candidate
-Engine29.9.3 / API1.56 profile (#254). The latter remains pending actual Servers
-bootstrap qualification; unit tests alone do not establish empirical support.
+Docker Desktop / linux / Engine29.7.2 / API1.55 or
+Engine29.9.3 / API1.56 (#254). The latter passed the existing Servers static
+bootstrap on November 20, 2026: Interpreter `b0b88343`, Servers `5d330ba3`
+([Servers #436](https://github.com/OpenJ92/control-plane-kit-servers/issues/436)),
+with independent review of the complete owning gate. Its private
+decision evidence retained matching groups/local transport, the exact provider
+profile and a conformant result; numeric-user socket access, same-daemon checks
+and owned cleanup also passed. The same Interpreter commit then passed the
+reviewed [CPK #2120](https://github.com/OpenJ92/control-plane-kit/issues/2120)
+whole-backend composition on November 22, 2026, with runner
+`e70a991a` and Servers `5d330ba3`. These results qualify the exact tested
+relation and composition; live adoption remains a separate acceptance step.
 Unknown or conflicting facts never qualify. It does not accept other versions,
 crossed Engine/API pairs or discover aliases from observations.
 
@@ -135,9 +144,9 @@ extra provider reads occur. The record contains no group IDs, paths or exception
 text. Ordinary callback failure does not change the returned enum. Qualification
 callers separately require complete private retention of the record.
 
-This candidate is not accepted Desktop support until the exact source/image
-pairing passes the existing Servers-root numeric CPK socket/API/sibling witness
-and independent review. Read reachability does not authorize later mutations or
+The exact source/image pairing above passed the existing Servers-root numeric
+CPK socket/API/sibling witness and independent review. That qualification is
+limited to the tested pairing. Read reachability does not authorize later mutations or
 bypass provider restrictions. Real Interpreter child-effect composition remains
 separate #163 acceptance; no standalone live qualification fixture is introduced.
 
