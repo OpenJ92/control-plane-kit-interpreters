@@ -2012,6 +2012,11 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
         for operation_type in (StartNode, ReconcileNode):
             for case, expected in (("qualified", EffectResultKind.SUCCEEDED),
                                    ("omitted", EffectResultKind.SUCCEEDED),
+                                   ("current", EffectResultKind.SUCCEEDED),
+                                   ("current-omitted", EffectResultKind.SUCCEEDED),
+                                   ("crossed-old", EffectResultKind.FAILED),
+                                   ("crossed-current", EffectResultKind.FAILED),
+                                   ("current-adjacent", EffectResultKind.FAILED),
                                    ("version", EffectResultKind.FAILED),
                                    ("unknown", EffectResultKind.UNCERTAIN),
                                    ("null", EffectResultKind.UNCERTAIN),
@@ -2022,7 +2027,15 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                     raw = FakeDockerClient()
                     _local_socket_transport(raw)
                     raw.info = Mock(return_value={"OperatingSystem": "Docker Desktop", "OSType": "linux"})
-                    raw.version = Mock(return_value={"Version": "29.7.3" if case == "version" else "29.7.2", "ApiVersion": "1.55"})
+                    version, api = {
+                        "version": ("29.7.3", "1.55"),
+                        "current": ("29.9.3", "1.56"),
+                        "current-omitted": ("29.9.3", "1.56"),
+                        "crossed-old": ("29.7.2", "1.56"),
+                        "crossed-current": ("29.9.3", "1.55"),
+                        "current-adjacent": ("29.9.4", "1.56"),
+                    }.get(case, ("29.7.2", "1.55"))
+                    raw.version = Mock(return_value={"Version": version, "ApiVersion": api})
                     provider_error = "token=cpk137-provider-private-value"
                     if case == "unknown":
                         raw.info.side_effect = RuntimeError(provider_error)
@@ -2041,7 +2054,7 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                                     "/var/run/docker.sock" if case == "configured-canonical" else
                                     "/foreign" if case == "configured-foreign" else
                                     "/run/host-services/docker.proxy.sock")
-                                if case == "omitted":
+                                if case in ("omitted", "current-omitted"):
                                     del mount["ReadOnly"]
                                 elif case == "null":
                                     mount["ReadOnly"] = None
@@ -2061,6 +2074,106 @@ class DockerRuntimeInterpreterTests(unittest.TestCase):
                     self.assertNotIn(provider_error, repr(result))
                     if expected is not EffectResultKind.SUCCEEDED:
                         self.assertEqual(result.observations, ())
+
+    def test_authority_diagnostic_preserves_decision_and_consumed_reads(self):
+        from control_plane_kit_interpreters.docker.authority import docker_authority_conformance
+        from control_plane_kit_interpreters.docker.sdk import (
+            DockerAuthorityProviderFacts, DockerSdkBindMount,
+            DockerSdkConfiguredBindMount, DockerSdkResourceInspection,
+        )
+        socket = "/var/run/docker.sock"
+        canonical = (DockerSdkBindMount(socket, socket),)
+        proxy = "/run/host-services/docker.proxy.sock"
+        inspection = DockerSdkResourceInspection(
+            name="controller", running=True, image="image", labels={},
+            bind_mounts=(DockerSdkBindMount(proxy, socket),),
+            configured_bind_mounts=(DockerSdkConfiguredBindMount(proxy, socket, None),),
+            supplementary_groups=("987",),
+        )
+        qualified = DockerAuthorityProviderFacts("Docker Desktop", "linux", "29.9.3", "1.56")
+        private = "credential=must-not-escape /private/provider"
+        cases = (
+            ("canonical", replace(inspection, bind_mounts=canonical), canonical, ("987",),
+             True, qualified, "conformant", "match", "not-consulted", "not-consulted", 0, 0),
+            ("empty", replace(inspection, bind_mounts=(), supplementary_groups=()), (), (),
+             True, qualified, "conformant", "match", "not-consulted", "not-consulted", 0, 0),
+            ("unknown-mount", replace(inspection, bind_mounts=None), canonical, ("987",),
+             True, qualified, "unknown", "not-consulted", "not-consulted", "not-consulted", 0, 0),
+            ("unknown-group", replace(inspection, supplementary_groups=None), canonical, ("987",),
+             True, qualified, "unknown", "unknown", "not-consulted", "not-consulted", 0, 0),
+            ("wrong-group", inspection, canonical, ("different",),
+             True, qualified, "conflict", "mismatch", "not-consulted", "not-consulted", 0, 0),
+            ("remote", inspection, canonical, ("987",),
+             False, qualified, "conflict", "match", "mismatch", "not-consulted", 1, 0),
+            ("transport-error", inspection, canonical, ("987",),
+             RuntimeError(private), qualified, "unknown", "match", "unknown", "not-consulted", 1, 0),
+            ("provider-error", inspection, canonical, ("987",),
+             True, RuntimeError(private), "unknown", "match", "match", "unknown", 1, 1),
+            ("provider-unavailable", inspection, canonical, ("987",),
+             True, None, "unknown", "match", "match", "unknown", 1, 1),
+            ("provider-conflict", inspection, canonical, ("987",),
+             True, replace(qualified, engine_version="29.9.4"),
+             "conflict", "match", "match", "known", 1, 1),
+            ("qualified", inspection, canonical, ("987",),
+             True, qualified, "conformant", "match", "match", "known", 1, 1),
+        )
+        for (name, observed, mounts, groups, transport, provider, expected, group_state,
+             transport_state, provider_state, transport_calls, provider_calls) in cases:
+            for capture in (False, True):
+                with self.subTest(case=name, capture=capture):
+                    client = Mock(spec=DockerSdkClient)
+                    for method, value in ((client.uses_local_socket, transport),
+                                          (client.inspect_authority_provider_facts, provider)):
+                        if isinstance(value, Exception):
+                            method.side_effect = value
+                        else:
+                            method.return_value = value
+                    records = []
+                    options = {"observe": records.append} if capture else {}
+                    result = docker_authority_conformance(observed, expected_mounts=mounts,
+                        expected_groups=groups, client=client, **options)
+                    self.assertEqual(result.value, expected)
+                    self.assertEqual(client.uses_local_socket.call_count, transport_calls)
+                    self.assertEqual(client.inspect_authority_provider_facts.call_count, provider_calls)
+                    if capture:
+                        self.assertEqual(len(records), 1)
+                        facts = None if provider_state != "known" else {
+                            "operating_system": provider.operating_system,
+                            "os_type": provider.os_type, "engine_version": provider.engine_version,
+                            "api_version": provider.api_version,
+                        }
+                        self.assertEqual(records[0], {
+                            "schema": "cpk.docker.authority-decision.v1", "groups": group_state,
+                            "local_transport": transport_state,
+                            "provider": {"state": provider_state, "facts": facts},
+                            "disposition": expected,
+                        })
+                        self.assertNotIn(private, json.dumps(records))
+                        self.assertNotIn("987", json.dumps(records))
+
+    def test_authority_diagnostic_sink_cannot_change_disposition(self):
+        from control_plane_kit_interpreters.docker.authority import docker_authority_conformance
+        from control_plane_kit_interpreters.docker.sdk import DockerSdkResourceInspection
+
+        inspection = DockerSdkResourceInspection(name="sibling", running=True, image="image",
+            labels={}, bind_mounts=(), supplementary_groups=())
+        def fail(record):
+            raise RuntimeError("private observer error")
+        def mutate(record):
+            record.clear()
+        for groups, expected in (((), "conformant"), (("unexpected",), "conflict")):
+            for sink in (fail, mutate, object()):
+                with self.subTest(groups=groups, sink=sink):
+                    client = Mock(spec=DockerSdkClient)
+                    result = docker_authority_conformance(inspection, expected_mounts=(),
+                        expected_groups=groups, client=client, observe=sink)
+                    self.assertEqual(result.value, expected)
+                    self.assertEqual(client.mock_calls, [])
+        def cancel(record):
+            raise KeyboardInterrupt
+        with self.assertRaises(KeyboardInterrupt):
+            docker_authority_conformance(inspection, expected_mounts=(), expected_groups=(),
+                client=Mock(spec=DockerSdkClient), observe=cancel)
 
     def test_same_runtime_materials_deliver_socket_only_to_declared_recipient(self):
         raw = FakeDockerClient()
