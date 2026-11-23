@@ -7,8 +7,10 @@ Maintain this companion in the same change when the source or its selected impor
 Read `result.evidence["outcome"]` to learn what happened at the target. For example, a
 gateway can return HTTP 200 with a valid `http-status` result reporting `failed`,
 target status 503 and a body size of zero. The client returns `SUCCEEDED` with
-`outcome="failed"` and `http_status=503`. A gateway that itself returns HTTP 503
-produces `TRANSPORT_FAILED`. On that path `http_status` describes the gateway.
+`outcome="failed"` and `http_status=503`. If the gateway itself returns HTTP 503
+and its body is read within the configured limit, the client returns
+`TRANSPORT_FAILED` with the gateway status. A timeout or oversized body during
+the read determines the client code before it classifies the HTTP status.
 
 After a 2xx response, `_decode_result` checks that the decoded fields match the
 request's target and probe kind, the outcome is `passed` or `failed`, and any
