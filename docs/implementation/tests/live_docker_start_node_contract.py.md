@@ -9,9 +9,15 @@ used for this companion differ, so installing those bytes would stop the witness
 admission. The [#141 receipt](https://github.com/OpenJ92/control-plane-kit-interpreters/issues/141#issuecomment-5629083712)
 records one passing attempt at `aa95de25`.
 
-After admission, `prepare_fixture` uses the selected Core product and runtime-effect contracts
-to construct synthetic StartRuntime and StartNode requests. It binds versioned secret selections
-and grants to the node request. The witness observes the recipient's API create and the inspect
+After source admission, `prepare_fixture` uses the selected Core product and runtime-effect
+contracts to construct synthetic StartRuntime and StartNode requests. It binds versioned
+secret selections and grants to the node request and supplies the synthetic root key and
+provider credential document through typed secret-file deliveries. The public environment
+inherits the pinned image's nonsecret database path and provider ID. Before creating fixture
+resources, `run_provider_contract` checks both defaults and requires the development credentials
+environment variable to be unset or empty.
+
+The witness observes the recipient's API create and the inspect
 correlated with the returned ID, then checks the running recipient’s image, network, mounts,
 numeric-user file access and local readiness. Its journal tracks the exact resources eligible
 for cleanup. Missing journal evidence or incomplete cleanup leaves the fixture on HOLD.
