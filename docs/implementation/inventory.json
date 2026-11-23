@@ -5,13 +5,13 @@
     {
       "source": "src/control_plane_kit_interpreters/probes/gateway.py",
       "companion": "docs/implementation/src/control_plane_kit_interpreters/probes/gateway.py.md",
-      "status": "authored",
+      "status": "reviewed",
       "exclusion_reason": null
     },
     {
       "source": "tests/test_gateway_probe_client.py",
       "companion": "docs/implementation/tests/test_gateway_probe_client.py.md",
-      "status": "authored",
+      "status": "reviewed",
       "exclusion_reason": null
     }
   ]
