@@ -1,0 +1,18 @@
+{
+  "issue": "OpenJ92/control-plane-kit-interpreters#143",
+  "scope": "Gateway probe client and tests reconciled with main. Other paths in the archived #144 inventory are outside this slice.",
+  "entries": [
+    {
+      "source": "src/control_plane_kit_interpreters/probes/gateway.py",
+      "companion": "docs/implementation/src/control_plane_kit_interpreters/probes/gateway.py.md",
+      "status": "authored",
+      "exclusion_reason": null
+    },
+    {
+      "source": "tests/test_gateway_probe_client.py",
+      "companion": "docs/implementation/tests/test_gateway_probe_client.py.md",
+      "status": "authored",
+      "exclusion_reason": null
+    }
+  ]
+}
