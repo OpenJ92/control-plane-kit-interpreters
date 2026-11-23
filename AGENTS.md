@@ -139,6 +139,13 @@ before proposing an interface or issue change; reuse existing owners. Do not
 treat issue ordering or evidence labels as missing code. Keep this within the
 existing dry run, not a new checklist or issue-creation step.
 
+Follow the [implementation companion convention](https://github.com/OpenJ92/control-plane-kit/issues/1799).
+For each relevant source file, maintain its note at
+`docs/implementation/<repository-relative-source-path>.md`. Add, move or remove
+the note with its source. When a source or selected dependency changes, check its
+actual consumers and update affected notes in the same change. If their meaning
+still holds, record that in the existing PR decision log.
+
 ### Source Traversal Cadence
 
 Do substantial source traversal at decision points, not on every turn:
